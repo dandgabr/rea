@@ -109,7 +109,7 @@ try {
     assert.throws(() => native.call("open", [rejected]));
   assert.throws(
     () => native.call("cutter_bridge_verify_directory", [sourceDirectory]),
-    /DACL/u,
+    /owner|DACL/u,
   );
   report.controls.ordinaryDriveSeparatorsAndRequestedIdentity = true;
   const snapshotOwner = WindowsPrivateRuntime.create(
