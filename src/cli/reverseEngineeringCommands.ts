@@ -99,6 +99,7 @@ export const registerReverseEngineeringCommands = (
             const executed = await manager.execute(
               started.value.session_id,
               args.command,
+              signal,
             );
             return executed.ok
               ? executed.value.evidence
@@ -167,6 +168,7 @@ export const registerReverseEngineeringCommands = (
             const executed = await manager.execute(
               started.value.session_id,
               args.command,
+              signal,
             );
             return executed.ok
               ? executed.value.evidence

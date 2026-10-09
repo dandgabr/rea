@@ -128,20 +128,26 @@ export class ReverseEngineeringService {
         env: { ...process.env, ...this.#environment },
         signal,
         timeout: DEFAULT_TIMEOUT_MS,
+        stopSignal: "SIGTERM",
         maxBuffer: MAX_OUTPUT_BYTES_PER_STREAM,
       });
       stdout = output.stdout;
       stderr = output.stderr;
     } catch (cause) {
       const capture = execFileOutputFailure(cause);
-      if (capture === undefined) {
-        const code = (cause as NodeJS.ErrnoException).code;
-        if (signal?.aborted)
-          return err(new AnalysisCancelledError(operation, { cause }));
-        if (code === "ETIMEDOUT")
-          return err(
-            new AnalysisTimeoutError(operation, DEFAULT_TIMEOUT_MS, { cause }),
-          );
+      const code =
+        capture?.code ?? (cause as NodeJS.ErrnoException).code ?? undefined;
+      if (signal?.aborted || code === "ABORT_ERR")
+        return err(new AnalysisCancelledError(operation, { cause }));
+      if (code === "ETIMEDOUT")
+        return err(
+          new AnalysisTimeoutError(operation, DEFAULT_TIMEOUT_MS, { cause }),
+        );
+      if (code === "EACCES" || code === "EPERM")
+        return err(
+          new AnalysisAccessDeniedError(operation, command, code, { cause }),
+        );
+      if (capture === undefined || code === "ENOENT") {
         return err(
           new AnalysisCapabilityUnavailableError(
             operation === "inspect_with_objdump" ? "objdump" : "rizin",

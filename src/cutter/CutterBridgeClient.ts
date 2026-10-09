@@ -164,7 +164,10 @@ export class CutterBridgeClient {
             pid: descriptor.pid,
             document_generation:
               status.data.document_generation ?? descriptor.document_generation,
-            current_file: status.data.current_file ?? descriptor.current_file,
+            current_file:
+              status.data.current_file === undefined
+                ? descriptor.current_file
+                : status.data.current_file,
             cutter_version:
               status.data.cutter_version ?? descriptor.cutter_version,
             identity_status: "partial" as const,
@@ -237,7 +240,10 @@ export class CutterBridgeClient {
       );
     return {
       output: response.output ?? null,
-      currentFile: response.current_file ?? descriptor.current_file,
+      currentFile:
+        response.current_file === undefined
+          ? descriptor.current_file
+          : response.current_file,
       documentGeneration:
         response.document_generation ?? input.expectedGeneration,
       identityStatus: "partial",

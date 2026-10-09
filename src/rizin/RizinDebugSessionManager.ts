@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 
 import {
+  AnalysisCancelledError,
   AnalysisCapabilityUnavailableError,
   AnalysisInputError,
   AnalysisTimeoutError,
@@ -28,6 +29,7 @@ const MAX_QUEUED_FRAMES = 4096;
 const MIN_QUEUED_FRAME_CHARGE_BYTES = 64;
 const MAX_COMMAND_FRAMES = 4096;
 const MAX_RECENT_FRAME_BYTES = 16 * 1024;
+const MAX_DIAGNOSTIC_BYTES = 64 * 1024;
 
 export const RIZIN_DEBUGGER_PROVIDER_IDENTITY = {
   id: "rizin.debugger",
@@ -99,6 +101,10 @@ export class RizinDebugSessionManager {
         ...(signal === undefined ? {} : { signal }),
       });
     } catch (cause) {
+      if (signal?.aborted)
+        return err(
+          new AnalysisCancelledError("start_rizin_debug_session", { cause }),
+        );
       return err(
         new AnalysisCapabilityUnavailableError(
           "rizin",
@@ -115,7 +121,10 @@ export class RizinDebugSessionManager {
       backend: input.backend ?? null,
       supervisor: new ProviderProcessSupervisor(
         { process: launched.process, ownsProcessLifetime: false },
-        { captureStdout: false },
+        {
+          captureStdout: false,
+          maxDiagnosticBytes: MAX_DIAGNOSTIC_BYTES,
+        },
       ),
       frames: [],
       frameWaiters: [],
@@ -132,6 +141,16 @@ export class RizinDebugSessionManager {
     launched.process.stdout?.on("data", (chunk: Buffer | string) =>
       this.#receive(session, Buffer.from(chunk)),
     );
+    launched.process.stdin?.on("error", (cause: Error) =>
+      this.#failProtocol(
+        session,
+        `Rizin stdin stream failed: ${cause.message}`,
+      ),
+    );
+    launched.process.stdin?.once("close", () => {
+      if (!session.exited && session.protocolError === undefined)
+        this.#failProtocol(session, "Rizin stdin stream closed unexpectedly.");
+    });
     launched.process.once("exit", () => {
       session.exited = true;
       for (const waiter of session.frameWaiters)
@@ -141,12 +160,18 @@ export class RizinDebugSessionManager {
       session.frameWaiters.length = 0;
     });
     try {
-      await waitForFrame(session, STARTUP_TIMEOUT_MS);
+      await waitForFrame(session, STARTUP_TIMEOUT_MS, signal);
+      if (signal?.aborted)
+        throw new AnalysisCancelledError("start_rizin_debug_session");
       session.ready = true;
       return ok({ session_id: id, backend: input.backend ?? null });
     } catch (cause) {
       const stopped = await stopDebuggerOnly(session);
       if (stopped.status !== "incomplete") this.#sessions.delete(id);
+      if (signal?.aborted || cause instanceof AnalysisCancelledError)
+        return err(
+          new AnalysisCancelledError("start_rizin_debug_session", { cause }),
+        );
       if (session.protocolError !== undefined)
         return err(
           new AnalysisCapabilityUnavailableError(
@@ -178,6 +203,7 @@ export class RizinDebugSessionManager {
   async execute(
     sessionId: string,
     command: string,
+    signal?: AbortSignal,
   ): Promise<
     Result<
       { readonly result: RizinDebugCommandResult; readonly evidence: Evidence },
@@ -192,13 +218,18 @@ export class RizinDebugSessionManager {
       session.protocolError !== undefined
     )
       return err(new AnalysisInputError("rizin_debug_command"));
+    if (signal?.aborted)
+      return err(new AnalysisCancelledError("rizin_debug_command"));
     let release: (() => void) | undefined;
+    let commandSent = false;
     const previous = session.commandTail;
     session.commandTail = new Promise<void>((resolve) => {
       release = resolve;
     });
-    await previous;
     try {
+      await waitForTurn(previous, signal);
+      if (signal?.aborted)
+        return err(new AnalysisCancelledError("rizin_debug_command"));
       if (session.frames.length > 0) {
         const message =
           "Unsolicited Rizin frames arrived before a command; command output can no longer be safely correlated.";
@@ -212,14 +243,42 @@ export class RizinDebugSessionManager {
         );
       }
       const marker = `__REA_COMMAND_COMPLETE_${randomUUID().replaceAll("-", "")}__`;
-      session.launched.process.stdin?.write(
-        `${command}\n!echo ${marker}\n`,
-        "utf8",
-      );
+      commandSent = true;
+      const stdin = session.launched.process.stdin;
+      if (
+        stdin === null ||
+        stdin === undefined ||
+        stdin.destroyed ||
+        !stdin.writable
+      ) {
+        this.#failProtocol(session, "Rizin stdin stream is closed.");
+      } else {
+        try {
+          stdin.write(
+            `${command}\n!echo ${marker}\n`,
+            "utf8",
+            (cause?: Error | null) => {
+              if (cause)
+                this.#failProtocol(
+                  session,
+                  `Rizin stdin write failed: ${cause.message}`,
+                );
+            },
+          );
+        } catch (cause) {
+          this.#failProtocol(
+            session,
+            `Rizin stdin write failed: ${cause instanceof Error ? cause.message : "unknown error"}`,
+          );
+        }
+      }
+      if (session.protocolError !== undefined)
+        throw new Error(session.protocolError);
       const output = await waitForCommandFrames(
         session,
         marker,
         this.#frameTimeoutMs,
+        signal,
       );
       const result = {
         command,
@@ -247,6 +306,27 @@ export class RizinDebugSessionManager {
       );
       return ok({ result, evidence });
     } catch (cause) {
+      if (signal?.aborted || cause instanceof AnalysisCancelledError) {
+        if (!commandSent)
+          return err(
+            new AnalysisCancelledError("rizin_debug_command", { cause }),
+          );
+        session.protocolError =
+          "A Rizin command was cancelled; the owned session was stopped because command output can no longer be correlated safely.";
+        const stopped = await stopDebuggerOnly(session);
+        if (stopped.status === "incomplete")
+          return err(
+            new AnalysisCapabilityUnavailableError(
+              "rizin",
+              "rizin_debug_command",
+              `Cancellation was requested, but the owned Rizin process could not be confirmed stopped: ${stopped.reason}`,
+              { cause: new AnalysisCancelledError("rizin_debug_command") },
+            ),
+          );
+        return err(
+          new AnalysisCancelledError("rizin_debug_command", { cause }),
+        );
+      }
       if (session.protocolError !== undefined)
         return err(
           new AnalysisCapabilityUnavailableError(
@@ -284,6 +364,7 @@ export class RizinDebugSessionManager {
         readonly state: "ready" | "closed";
         readonly recent_output: readonly string[];
         readonly recent_output_truncated: boolean;
+        readonly diagnostics_truncated: boolean;
       }
     | undefined {
     const session = this.#sessions.get(sessionId);
@@ -299,6 +380,8 @@ export class RizinDebugSessionManager {
                 : "closed",
           recent_output: [...session.history],
           recent_output_truncated: session.historyTruncated,
+          diagnostics_truncated:
+            session.supervisor.snapshot().diagnosticTruncated === true,
         };
   }
 
@@ -402,6 +485,7 @@ const waitForCommandFrames = async (
   session: RizinDebugSession,
   marker: string,
   timeoutMs: number,
+  signal?: AbortSignal,
 ): Promise<string> => {
   const deadline = Date.now() + timeoutMs;
   const output: string[] = [];
@@ -413,7 +497,7 @@ const waitForCommandFrames = async (
       throw new Error(
         "Timed out waiting for Rizin's command-completion marker",
       );
-    const frame = await waitForFrame(session, remaining);
+    const frame = await waitForFrame(session, remaining, signal);
     frameCount += 1;
     if (frameCount > MAX_COMMAND_FRAMES) {
       const message =
@@ -452,7 +536,10 @@ const waitForCommandFrames = async (
 const waitForFrame = (
   session: RizinDebugSession,
   timeoutMs: number,
+  signal?: AbortSignal,
 ): Promise<string> => {
+  if (signal?.aborted)
+    return Promise.reject(new AnalysisCancelledError("rizin_debug_command"));
   const queued = session.frames.shift();
   if (queued !== undefined) {
     session.queuedFrameBytes -= queued.queueChargeBytes;
@@ -463,22 +550,66 @@ const waitForFrame = (
       new Error("Rizin process exited before the next NUL frame"),
     );
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
+    let settled = false;
+    const cleanup = (): void => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
       const index = session.frameWaiters.indexOf(waiter);
       if (index >= 0) session.frameWaiters.splice(index, 1);
+    };
+    const onAbort = (): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new AnalysisCancelledError("rizin_debug_command"));
+    };
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      cleanup();
       reject(new Error("Timed out waiting for the next Rizin NUL frame"));
     }, timeoutMs);
     const waiter = {
       resolve: (frame: string): void => {
-        clearTimeout(timer);
+        if (settled) return;
+        settled = true;
+        cleanup();
         resolve(frame);
       },
       reject: (cause: Error): void => {
-        clearTimeout(timer);
+        if (settled) return;
+        settled = true;
+        cleanup();
         reject(cause);
       },
     };
     session.frameWaiters.push(waiter);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) onAbort();
+  });
+};
+
+const waitForTurn = (
+  previous: Promise<void>,
+  signal?: AbortSignal,
+): Promise<void> => {
+  if (signal === undefined) return previous;
+  if (signal.aborted)
+    return Promise.reject(new AnalysisCancelledError("rizin_debug_command"));
+  return new Promise<void>((resolve, reject) => {
+    const onAbort = (): void =>
+      reject(new AnalysisCancelledError("rizin_debug_command"));
+    signal.addEventListener("abort", onAbort, { once: true });
+    previous.then(
+      () => {
+        signal.removeEventListener("abort", onAbort);
+        resolve();
+      },
+      (cause: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(cause);
+      },
+    );
   });
 };
 

@@ -64,13 +64,14 @@ export const RIZIN_DEBUG_TOOL_CONTRACTS = [
     ...toolContractMetadata("rizin_debug_session_status"),
     kind: "native-provider",
     description:
-      "Return observed lifecycle state and bounded recent NUL-framed output for one Rizin debugger session; recent_output_truncated reports discarded history bytes.",
+      "Return observed lifecycle state and bounded recent NUL-framed output and process diagnostics for one Rizin debugger session; truncation fields report discarded data.",
     inputSchema: z.strictObject({ session_id: sessionId }),
     outputSchema: z.strictObject({
       session_id: sessionId,
       state: z.enum(["ready", "closed"]),
       recent_output: z.array(z.string()),
       recent_output_truncated: z.boolean(),
+      diagnostics_truncated: z.boolean(),
     }),
     examples: [
       {

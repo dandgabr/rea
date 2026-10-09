@@ -71,6 +71,38 @@ describe("reverse engineering command services", () => {
       await rm(directory, { recursive: true, force: true });
     }
   });
+
+  it("classifies captured spawn failures instead of reporting provider evidence", async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), "rea-objdump-spawn-failure-"),
+    );
+    const path = join(directory, "fixture.bin");
+    await writeFile(path, "fixture");
+    const service = new ReverseEngineeringService({
+      run: async () => {
+        const failure = Object.assign(new Error("not found"), {
+          stdout: "",
+          stderr: "",
+          code: "ENOENT",
+          signal: null,
+          killed: false,
+        });
+        throw failure;
+      },
+    });
+
+    try {
+      const result = await service.inspectWithObjdump({
+        path,
+        operation: "file_headers",
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok)
+        expect(result.error._tag).toBe("AnalysisCapabilityUnavailableError");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("Rizin command service", () => {

@@ -42,9 +42,9 @@ export const registerRizinDebugTools = (
   server.registerTool(
     command.name,
     toolRegistrationOptions(command),
-    async (input) => {
+    async (input, context: ServerContext) => {
       const result = await logToolExecution(logger, command.name, () =>
-        manager.execute(input.session_id, input.command),
+        manager.execute(input.session_id, input.command, context.mcpReq.signal),
       );
       if (!result.ok) return delivery.toCallToolResult(result, command);
       return delivery.toEvidenceToolResult(

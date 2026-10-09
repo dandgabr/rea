@@ -196,6 +196,7 @@ process.stdin.on("data", (chunk) => {
         `#!/usr/bin/env node
 process.stdout.write("\\0");
 let input = "";
+let stalled = false;
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk) => {
   input += chunk;

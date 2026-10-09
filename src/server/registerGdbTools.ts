@@ -37,9 +37,9 @@ export const registerGdbTools = (
   server.registerTool(
     consoleContract.name,
     toolRegistrationOptions(consoleContract),
-    async (input) => {
+    async (input, context: ServerContext) => {
       const result = await logToolExecution(logger, consoleContract.name, () =>
-        manager.execute(input.session_id, input.command),
+        manager.execute(input.session_id, input.command, context.mcpReq.signal),
       );
       if (!result.ok) return delivery.toCallToolResult(result, consoleContract);
       const recorded = recordEvidence?.(result.value.evidence);
