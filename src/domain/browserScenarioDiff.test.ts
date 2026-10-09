@@ -2,11 +2,11 @@ import { createHash } from "node:crypto";
 
 import { describe, expect, it } from "vitest";
 
+import { compareBrowserScenarios } from "./browserScenarioDiff.js";
 import {
-  compareBrowserScenarios,
   compareBrowserScenariosInputSchema,
   browserScenarioDiffSchema,
-} from "./browserScenarioDiff.js";
+} from "./browserScenarioDiffValues.js";
 import {
   browserScenarioCaptureSchema,
   type BrowserScenarioCapture,
@@ -28,6 +28,7 @@ const networkCapture = (sourceSequence: number, receiptStep: number) => {
       },
       resource_type: "fetch",
       transaction_id: "request-1",
+      redirected_from_transaction_id: null,
       header_names: [],
       status: null,
       failure: null,

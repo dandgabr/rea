@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 import { emptyArraySchema } from "./emptyArraySchema.js";
-import { webPageInspectionSchema } from "./browserObservation.js";
+import { webPageInspectionSchema } from "./browserObservationSchemas.js";
 import { webMcpDiscoverySchema } from "./webMcpDiscovery.js";
 
 /** One normalized passive page snapshot accepted by capture comparison. */
@@ -58,13 +58,6 @@ const dimensionSchema = z.union([
     reason: z.string(),
   }),
 ]);
-const legacyUnknownDimension: z.input<typeof dimensionSchema> = {
-  status: "unknown",
-  total_changes: 0,
-  changes: [],
-  reason: "Dimension was not recorded by this version 1 capture diff.",
-};
-
 /** Completeness-aware changes across stable browser evidence dimensions. */
 export const webCaptureDiffSchema = z
   .object({
@@ -78,8 +71,8 @@ export const webCaptureDiffSchema = z
       network: dimensionSchema,
       metadata: dimensionSchema,
       webmcp: dimensionSchema,
-      accessibility: dimensionSchema.default(legacyUnknownDimension),
-      storage: dimensionSchema.default(legacyUnknownDimension),
+      accessibility: dimensionSchema,
+      storage: dimensionSchema,
     }),
     limitations: z.array(z.string()),
   })

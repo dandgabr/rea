@@ -1,6 +1,10 @@
-import { EMPTY_PROCESS_CAPTURE_EXAMPLE } from "./processCapture.fixture.js";
-import { parseProcessCapture, type ProcessCapture } from "./processCapture.js";
-import { type ProcessTraceSpecification } from "./processTraceComparison.js";
+import { EMPTY_PROCESS_CAPTURE_EXAMPLE } from "./processCaptureExample.js";
+import { hasCaptureTruncation } from "./processCaptureCoverage.js";
+import {
+  parseProcessCapture,
+  type ProcessCapture,
+} from "./processCaptureParsing.js";
+import { type ProcessTraceSpecification } from "./processTraceSpecification.js";
 
 export const emptyCapture = parseProcessCapture(EMPTY_PROCESS_CAPTURE_EXAMPLE);
 export const terminal = { sequence: 0, at_ms: 900, data: "Ready" };
@@ -21,11 +25,30 @@ export const capture = (
     >[];
   },
   options: {
-    readonly truncated?: boolean;
+    readonly omittedTerminalFrame?: boolean;
     readonly residualUnknowns?: ProcessCapture["residual_unknowns"];
   } = {},
-): ProcessCapture =>
-  parseProcessCapture({
+): ProcessCapture => {
+  const omittedTerminalFrame = options.omittedTerminalFrame ?? false;
+  const retainedBytes = values.frames.reduce(
+    (total, frame) => total + Buffer.byteLength(frame.raw_data ?? frame.data),
+    0,
+  );
+  const truncationDetails = {
+    ...emptyCapture.truncation_details,
+    raw_terminal: {
+      ...emptyCapture.truncation_details.raw_terminal,
+      observed_bytes: retainedBytes + (omittedTerminalFrame ? 1 : 0),
+      retained_bytes: retainedBytes,
+      observed_frames: values.frames.length + (omittedTerminalFrame ? 1 : 0),
+      retained_frames: values.frames.length,
+    },
+    process: {
+      ...emptyCapture.truncation_details.process,
+      retained_samples: values.process_samples.length,
+    },
+  };
+  return parseProcessCapture({
     ...emptyCapture,
     frames: values.frames,
     process_samples: values.process_samples,
@@ -51,9 +74,11 @@ export const capture = (
         index: 1,
       },
     ],
-    truncated: options.truncated ?? false,
+    truncated: hasCaptureTruncation(truncationDetails),
+    truncation_details: truncationDetails,
     residual_unknowns: options.residualUnknowns ?? [],
   });
+};
 
 export const values = (
   order: readonly ("terminal" | "process")[],

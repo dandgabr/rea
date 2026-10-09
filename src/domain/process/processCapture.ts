@@ -3,8 +3,12 @@ import { jsonValueSchema } from "../jsonValue.js";
 
 import { normalizationSchema } from "./processScenario.js";
 import { collectProcessCaptureIssues } from "./processCaptureValidation.js";
-
-export * from "./processScenario.js";
+import {
+  filesystemCoverageSchema,
+  processCaptureTruncationDetailsSchema,
+  type FilesystemCoverage,
+  type ProcessCaptureTruncationDetails,
+} from "./processCaptureCoverage.js";
 
 /** Normalized raw PTY chunk, preserving transport-level output differences. */
 export interface TerminalFrame {
@@ -63,6 +67,15 @@ export type FileState = FileStateIdentity &
         readonly symlink_target: null;
       }
   );
+
+/** Complete metadata returned for one root-aliased filesystem checkpoint. */
+export interface ProcessFilesystemSnapshot {
+  readonly files: readonly FileState[];
+  readonly truncated: boolean;
+  /** Root aliases whose path enumeration was exhausted, regardless of hash coverage. */
+  readonly completeRoots: readonly string[];
+  readonly coverage: FilesystemCoverage;
+}
 
 interface FileEffectIdentity {
   readonly path: string;
@@ -206,6 +219,8 @@ export interface UnverifiedProcessCapture {
   readonly files_after: readonly FileState[];
   readonly filesystem_effects: readonly FileEffect[];
   readonly truncated: boolean;
+  /** Per-source accounting for the producer's actual capture coverage. */
+  readonly truncation_details: ProcessCaptureTruncationDetails;
   readonly limitations: readonly string[];
   readonly residual_unknowns: readonly {
     readonly scope:
@@ -261,14 +276,6 @@ export type PartialProcessObservationField<T> =
   | { readonly state: "available"; readonly value: T }
   | { readonly state: "unavailable"; readonly reason: string };
 
-/** Snapshot facts available before filesystem comparison can be completed. */
-/** Snapshot facts available before filesystem comparison can be completed. */
-export interface PartialFilesystemSnapshot {
-  readonly files: readonly FileState[];
-  readonly truncated: boolean;
-}
-
-/** Available and unavailable fields when a run never becomes a full capture. */
 /** Available and unavailable fields when a run never becomes a full capture. */
 export interface IncompleteProcessCaptureObservations {
   readonly target_pid: PartialProcessObservationField<number>;
@@ -292,8 +299,8 @@ export interface IncompleteProcessCaptureObservations {
     readonly ProcessSample[]
   >;
   readonly filesystem_snapshots: {
-    readonly before: PartialProcessObservationField<PartialFilesystemSnapshot>;
-    readonly after: PartialProcessObservationField<PartialFilesystemSnapshot>;
+    readonly before: PartialProcessObservationField<ProcessFilesystemSnapshot>;
+    readonly after: PartialProcessObservationField<ProcessFilesystemSnapshot>;
   };
   readonly event_journal: PartialProcessObservationField<
     readonly ProcessCaptureEventJournalEntry[]
@@ -326,6 +333,13 @@ const fileStateSchema = z.discriminatedUnion("type", [
     symlink_target: z.null(),
   }),
 ]);
+/** Canonical checkpoint facts retained even when capture completion fails. */
+export const processFilesystemSnapshotSchema = z.strictObject({
+  files: z.array(fileStateSchema),
+  truncated: z.boolean(),
+  completeRoots: z.array(z.string()),
+  coverage: filesystemCoverageSchema,
+});
 const fileEffectSchema = z.discriminatedUnion("status", [
   z.object({
     path: z.string(),
@@ -477,6 +491,7 @@ const processCaptureShapeSchema = z.strictObject({
   files_after: z.array(fileStateSchema),
   filesystem_effects: z.array(fileEffectSchema),
   truncated: z.boolean(),
+  truncation_details: processCaptureTruncationDetailsSchema,
   limitations: z.array(z.string()),
   residual_unknowns: z.array(
     z.object({
@@ -540,18 +555,8 @@ const incompleteProcessCaptureObservationsSchema = z.strictObject({
     processCaptureShapeSchema.shape.process_samples,
   ),
   filesystem_snapshots: z.strictObject({
-    before: partialObservationFieldSchema(
-      z.strictObject({
-        files: z.array(fileStateSchema),
-        truncated: z.boolean(),
-      }),
-    ),
-    after: partialObservationFieldSchema(
-      z.strictObject({
-        files: z.array(fileStateSchema),
-        truncated: z.boolean(),
-      }),
-    ),
+    before: partialObservationFieldSchema(processFilesystemSnapshotSchema),
+    after: partialObservationFieldSchema(processFilesystemSnapshotSchema),
   }),
   event_journal: partialObservationFieldSchema(
     processCaptureShapeSchema.shape.event_journal,
@@ -668,14 +673,3 @@ export const processCaptureSchema = processCaptureShapeSchema
   .describe(
     "The capture must preserve its canonical scenario, comparison, and normalization SHA-256 commitments; ordered capture timestamps and contiguous sequence numbers; before and final filesystem snapshots with truncation propagated; and exit-code consistency with deadline termination. The event journal is required; empty journals are valid. A non-empty journal must reference every captured observation exactly once with unique in-range references. These cross-field invariants are checked by REA after capture.",
   );
-
-export { parseProcessCapture } from "./processCaptureParsing.js";
-export type { ProcessCapture } from "./processCaptureParsing.js";
-
-export {
-  compareProcessCaptures,
-  comparisonStatusSchema,
-  deriveProcessComparisonStatus,
-  PROCESS_COMPARISON_DIMENSIONS,
-  processCaptureComparisonSchema,
-} from "./processComparison.js";

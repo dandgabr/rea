@@ -2,11 +2,9 @@ import { createHash } from "node:crypto";
 
 import canonicalize from "canonicalize";
 
-import type {
-  InspectWebPageInput,
-  WebPageInspection,
-} from "../domain/browserObservation.js";
-import { compareCodePoints } from "../domain/canonicalOrdering.js";
+import type { InspectWebPageInput } from "../domain/browserObservation.js";
+import type { WebPageInspection } from "../domain/browserObservationSchemas.js";
+import { compareUnicodeCodePoints } from "../domain/unicodeCodePointOrder.js";
 import { CdpConnection } from "./CdpConnection.js";
 import { optionalCdpCommand } from "./CdpOptionalCommand.js";
 import {
@@ -87,7 +85,7 @@ export const captureStorageFingerprints = async ({
   await addIndexedDb(run, origin, indexedDbNames);
   await addCaches(run, caches);
   state.items.sort((left, right) =>
-    compareCodePoints(
+    compareUnicodeCodePoints(
       `${left.scope}:${left.identity_sha256}`,
       `${right.scope}:${right.identity_sha256}`,
     ),
@@ -449,7 +447,7 @@ const stableValue = (value: unknown): unknown => {
   return Object.fromEntries(
     Object.entries(record)
       .filter(([key]) => key !== "objectId" && key !== "customPreview")
-      .sort(([left], [right]) => compareCodePoints(left, right))
+      .sort(([left], [right]) => compareUnicodeCodePoints(left, right))
       .map(([key, item]) => [key, stableValue(item)]),
   );
 };

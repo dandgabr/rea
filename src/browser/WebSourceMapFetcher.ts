@@ -342,7 +342,9 @@ const fetchFollowingApprovedRedirects = async (
       await close().catch(() => undefined);
       throw signal.reason;
     }
-    if (response.status < 300 || response.status >= 400)
+    // Location is a redirect target only for the Fetch redirect statuses.
+    // A 304 or another 3xx response must retain its own HTTP failure.
+    if (![301, 302, 303, 307, 308].includes(response.status))
       return { response, fetchedUrl: current, close };
     const location = response.headers.get("location");
     if (location === null) return { response, fetchedUrl: current, close };

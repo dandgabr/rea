@@ -1,3 +1,4 @@
+import { parseMcpToolError } from "../../fixtures/mcpToolError.js";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import type { CallToolResult } from "@modelcontextprotocol/server";
 import { afterEach, expect, it } from "vitest";
@@ -17,7 +18,7 @@ afterEach(async () => {
 });
 
 const connect = async (analysis: AnalysisOperationPort) => {
-  const server = createServer(analysis);
+  const server = createServer({ kind: "fixed", analysis });
   const client = new Client({
     name: "integration-test",
     version: "1.0.0",
@@ -37,6 +38,7 @@ const text = (result: CallToolResult): string => {
 };
 
 const structured = (result: CallToolResult): Record<string, unknown> => {
+  if (result.isError === true) return parseMcpToolError(result);
   if (
     typeof result.structuredContent !== "object" ||
     result.structuredContent === null
@@ -61,7 +63,7 @@ it("projects remote failures without provider or bridge details", async () => {
       category: "execution_failure",
     },
   });
-  expect(text(result)).toBe(JSON.stringify(result.structuredContent));
+  expect(text(result)).toBe(JSON.stringify(parseMcpToolError(result)));
 });
 
 it("lets the SDK validate a tool call before invoking its handler", async () => {

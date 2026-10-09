@@ -5,10 +5,31 @@ import { z } from "zod";
 const positiveBudget = z.number().int().safe().positive();
 const timedEventBase = { at_ms: z.number().int().safe().nonnegative() };
 const reservedRunIdEnvironmentName = "REA_PROCESS_RUN_ID";
+const ENVIRONMENT_NAME_CHARACTER = "[^=\\x00]";
+
+/**
+ * Nonempty environment names other than the reserved run identifier. The
+ * exclusion is spelled as a complement instead of a negative look-ahead,
+ * because RE2 and Rust schema validators reject look-around and would refuse
+ * every tool in the advertised catalog.
+ */
+const environmentNamePattern = (reserved: string): RegExp => {
+  // After the complete reserved name, at least one more character is needed.
+  let rest = `${ENVIRONMENT_NAME_CHARACTER}+`;
+  for (let index = reserved.length - 1; index >= 0; index -= 1) {
+    const character = reserved[index] ?? "";
+    // Diverge here, match the next reserved character, or (after a nonempty
+    // prefix) end the name early.
+    const choice = `[^=\\x00${character}]${ENVIRONMENT_NAME_CHARACTER}*|${character}${rest}`;
+    rest = index === 0 ? choice : `(?:${choice})?`;
+  }
+  return new RegExp(`^(?:${rest})$`, "u");
+};
+
 const environmentName = z
   .string()
   .min(1, "Environment names must not be empty")
-  .regex(/^(?!REA_PROCESS_RUN_ID(?![\s\S]))[^=\u0000]+$/u, {
+  .regex(environmentNamePattern(reservedRunIdEnvironmentName), {
     error: (issue) =>
       issue.input === reservedRunIdEnvironmentName
         ? `${reservedRunIdEnvironmentName} is reserved by the process adapter`
@@ -17,7 +38,7 @@ const environmentName = z
 const childProcessString = z
   .string()
   .regex(
-    /^[^\u0000]*$/u,
+    /^[^\x00]*$/u,
     "Values passed to operating-system APIs cannot contain NUL",
   );
 export const normalizationSchema = z.object({
@@ -85,7 +106,7 @@ export const processComparisonContract = (
   limits: scenario.limits,
   normalization: scenario.normalization,
   ...(scenario.normalization.ports
-    ? { port_normalization_version: "contextual-endpoints-v1" }
+    ? { port_normalization_version: "contextual-endpoints-v2" }
     : {}),
 });
 

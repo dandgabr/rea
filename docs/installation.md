@@ -137,6 +137,16 @@ listed after the table because its connector is not one of these files:
 | Command Code       | `commandcode`    |
 | VS Code            | `vscode`         |
 | Grok Build         | `grok_build`     |
+| OMP                | `omp`            |
+
+For OMP, setup writes a `type: "stdio"` entry to the user-level
+`~/.omp/agent/mcp.json`. It follows `PI_CONFIG_DIR`, an absolute
+`PI_CODING_AGENT_DIR`, and the profile selected by `OMP_PROFILE` or
+`PI_PROFILE` (`~/.omp/profiles/<name>/agent/mcp.json`). Setup also removes
+`rea` from that file's `disabledServers` list, which would otherwise hide the
+registration. Doctor treats an `enabled: false` entry as active when
+`enabledServers` lists `rea`, as OMP does, unless `disabledServers` also lists
+it. Run setup under each profile that should load REA.
 
 For OpenCode, setup writes the V1 `mcp.rea` entry, which OpenCode V1 and V2
 both load. If the configuration already uses OpenCode V2's native
@@ -406,6 +416,17 @@ Closing or switching a target closes its bound Hopper document, shuts down REA's
 bridge and removes its temporary socket directory while preserving the Hopper
 application and unrelated documents. A `cleanup_incomplete`
 result identifies resources whose cleanup could not be verified.
+REA retains unresolved cleanup ownership and any confirmed shutdown phases.
+After addressing the reported failure, retry `close_binary` on the same
+connection. Unconfirmed document or process cleanup retains the target/application
+lease and prevents another client from launching against that owned resource.
+Once document and process closure are confirmed, the lease can be released even
+if temporary-file cleanup fails. Another client can then launch, but the owning
+client must finish its retained cleanup before starting again.
+An unconfirmed external document can be retried while its authenticated bridge
+remains connected. If that bridge has disconnected, another close cannot confirm
+the document: inspect and close the reported document in Hopper before ending
+the owning REA connection.
 
 ### Hopper in CI
 
@@ -659,7 +680,7 @@ For a client that requires manual configuration, use:
   "mcpServers": {
     "rea": {
       "command": "npx",
-      "args": ["-y", "rea-agents@6.1.0", "mcp"]
+      "args": ["-y", "rea-agents@6.2.0", "mcp"]
     }
   }
 }

@@ -1,3 +1,4 @@
+import { parseMcpToolError } from "../../fixtures/mcpToolError.js";
 import { readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
@@ -167,10 +168,13 @@ describe("target-free MCP lifecycle", () => {
       close: () => Promise.resolve(),
       execute: () => Promise.resolve(ok(null)),
     };
-    const server = createServer(session, session, {
-      androidAnalysis,
-      logger: silentLogger,
-    });
+    const server = createServer(
+      { kind: "session", session },
+      {
+        androidAnalysis,
+        logger: silentLogger,
+      },
+    );
     const mcp = new Client({ name: "status-readiness", version: "1.0.0" });
     const [clientTransport, serverTransport] =
       InMemoryTransport.createLinkedPair();
@@ -203,7 +207,10 @@ describe("target-free MCP lifecycle", () => {
       resolveAnalysisProfile: () =>
         Promise.resolve(resultOk({ profile: SNAPSHOT_PROFILE })),
     });
-    const server = createServer(session, session, { logger: silentLogger });
+    const server = createServer(
+      { kind: "session", session },
+      { logger: silentLogger },
+    );
     const mcp = new Client({ name: "replaced-target", version: "1.0.0" });
     const [clientTransport, serverTransport] =
       InMemoryTransport.createLinkedPair();
@@ -496,6 +503,7 @@ const text = (result: CallToolResult): string => {
 };
 
 const structured = (result: CallToolResult): Record<string, unknown> => {
+  if (result.isError === true) return parseMcpToolError(result);
   if (
     typeof result.structuredContent !== "object" ||
     result.structuredContent === null

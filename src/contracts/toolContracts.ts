@@ -23,8 +23,6 @@ import { GDB_TOOL_CONTRACTS } from "./gdbToolContracts.js";
 import { RIZIN_DEBUG_TOOL_CONTRACTS } from "./rizinDebugToolContracts.js";
 import { CUTTER_TOOL_CONTRACTS } from "./cutterToolContracts.js";
 
-export type { ToolContract } from "./toolContractTypes.js";
-
 /** Complete ordered public inventory used by registration and verification. */
 export const TOOL_CONTRACTS = [
   ...OFFICIAL_TOOL_CONTRACTS,

@@ -5,10 +5,8 @@ import { promisify } from "node:util";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { expect, it, onTestFinished } from "vitest";
 import { parseEvidence } from "../../../src/domain/evidence.js";
-import {
-  compareProcessCaptures,
-  parseProcessCapture,
-} from "../../../src/domain/process/processCapture.js";
+import { compareProcessCaptures } from "../../../src/domain/process/processComparison.js";
+import { parseProcessCapture } from "../../../src/domain/process/processCaptureParsing.js";
 import { createServer } from "../../../src/server/createServer.js";
 import { createTestBinarySession } from "../../fixtures/binarySession.js";
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
@@ -23,7 +21,7 @@ const captureViaMcp = async (scenario: Record<string, unknown>) => {
   const session = createTestBinarySession(() => {
     throw new Error("Process capture must not launch a binary provider");
   });
-  const server = createServer(session, session);
+  const server = createServer({ kind: "session", session });
   const client = new Client({ name: "filesystem-coverage", version: "1" });
   onTestFinished(async () => {
     await client.close();
@@ -127,9 +125,7 @@ it.skipIf(CAPTURE_SKIP_REASON || process.platform === "win32")(
       scope: "filesystem",
       reason: expect.any(String),
     });
-    expect(["unknown", "truncated"]).toContain(
-      compareProcessCaptures(capture, capture).filesystem,
-    );
+    expect(compareProcessCaptures(capture, capture).filesystem).toBe("unknown");
   },
   20_000,
 );

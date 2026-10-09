@@ -1,3 +1,4 @@
+import { parseMcpToolError } from "../../fixtures/mcpToolError.js";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -5,11 +6,11 @@ import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { expect, it, onTestFinished } from "vitest";
 
 import { compareProcessEvidenceFiles } from "../../../src/application/process/ProcessCli.js";
-import { PROCESS_PROVIDER } from "../../../src/application/process/ProcessEvidence.js";
-import { EMPTY_PROCESS_CAPTURE_EXAMPLE } from "../../../src/contracts/process/processCaptureExample.js";
+import { PROCESS_PROVIDER } from "../../../src/domain/process/processEvidenceProvider.js";
+import { EMPTY_PROCESS_CAPTURE_EXAMPLE } from "../../../src/domain/process/processCaptureExample.js";
 import { createEvidence } from "../../../src/domain/evidence.js";
 import { jsonValueSchema } from "../../../src/domain/jsonValue.js";
-import { digestProcessCommitment } from "../../../src/domain/process/processCapture.js";
+import { digestProcessCommitment } from "../../../src/domain/process/processScenario.js";
 import { createServer } from "../../../src/server/createServer.js";
 import { createTestBinarySession } from "../../fixtures/binarySession.js";
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
@@ -43,7 +44,7 @@ const connect = async () => {
   const session = createTestBinarySession(() => {
     throw new Error("Process comparison must not launch a provider");
   });
-  const server = createServer(session, session);
+  const server = createServer({ kind: "session", session });
   const client = new Client({ name: "process-comparison-test", version: "1" });
   onTestFinished(async () => {
     await Promise.allSettled([client.close(), server.close(), session.close()]);
@@ -70,7 +71,7 @@ it("names differing comparison contract fields through MCP and the CLI", async (
     ),
     expected: ["working_directory"],
   };
-  expect(response.structuredContent).toMatchObject({
+  expect(parseMcpToolError(response)).toMatchObject({
     error: { code: "invalid_request", details: { issues: [issue] } },
   });
 
@@ -97,7 +98,7 @@ it("names the stale capture that exceeds max_capture_age_ms", async () => {
     },
   });
   expect(response.isError).toBe(true);
-  expect(response.structuredContent).toMatchObject({
+  expect(parseMcpToolError(response)).toMatchObject({
     error: {
       code: "invalid_request",
       details: {
@@ -146,7 +147,7 @@ it("names the side and constraint when Evidence is not a usable capture", async 
     name: "compare_process_captures",
     arguments: { left: unrelated, right: capture },
   });
-  expect(wrongKind.structuredContent).toMatchObject({
+  expect(parseMcpToolError(wrongKind)).toMatchObject({
     error: {
       code: "invalid_request",
       details: {
@@ -170,7 +171,7 @@ it("names the side and constraint when Evidence is not a usable capture", async 
       right: { ...capture, parameters: { side: "changed" } },
     },
   });
-  expect(tampered.structuredContent).toMatchObject({
+  expect(parseMcpToolError(tampered)).toMatchObject({
     error: {
       code: "evidence_integrity_mismatch",
       message: expect.stringContaining(
@@ -189,7 +190,7 @@ it("names the side and constraint when Evidence is not a usable capture", async 
     name: "compare_process_captures",
     arguments: { left: capture, right: invalidResult },
   });
-  expect(malformed.structuredContent).toMatchObject({
+  expect(parseMcpToolError(malformed)).toMatchObject({
     error: {
       code: "evidence_integrity_mismatch",
       message: expect.stringContaining(

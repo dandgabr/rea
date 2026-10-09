@@ -14,18 +14,17 @@ import {
   type JavaScriptSemanticScopeState,
 } from "./javascriptSemanticState.js";
 import { semanticRequireOrigin } from "./javascriptSemanticRequireOrigin.js";
-import { compareCodePoints } from "../canonicalOrdering.js";
+import { compareUnicodeCodePoints } from "../unicodeCodePointOrder.js";
 import { traverseJavaScriptAst } from "./javascriptSemanticTraversal.js";
 import {
   evaluateSemanticBinding,
   evaluateSemanticProvenance,
 } from "./javascriptSemanticValues.js";
+import { range, stringValue } from "./javascriptStaticAnalysisHelpers.js";
 import {
   propertyName,
-  range,
-  stringValue,
-} from "./javascriptStaticAnalysisHelpers.js";
-import { semanticStaticPropertyKey } from "./javascriptAstValues.js";
+  semanticStaticPropertyKey,
+} from "./javascriptAstValues.js";
 
 interface CollectCallableInput {
   readonly node: t.Node;
@@ -161,7 +160,7 @@ export const immutableSemanticScopes = (
     bindingsComplete: scope.bindingsComplete,
     bindingIds: [...scope.bindings.values()]
       .map(({ bindingId }) => bindingId)
-      .sort(compareCodePoints),
+      .sort(compareUnicodeCodePoints),
   }));
 
 /** Evaluate and freeze bindings into deterministic IR order. */
@@ -179,12 +178,9 @@ export const immutableSemanticBindings = (
       value: evaluateSemanticBinding(binding, state),
       provenance: evaluateSemanticProvenance(binding, state),
     }))
-    .sort((left, right) => compareCodePoints(left.bindingId, right.bindingId));
-
-export {
-  semanticStaticPropertyKey,
-  semanticStaticPropertyName,
-} from "./javascriptAstValues.js";
+    .sort((left, right) =>
+      compareUnicodeCodePoints(left.bindingId, right.bindingId),
+    );
 
 const callableKind = (
   node: t.Node,

@@ -24,7 +24,7 @@ import {
   NATIVE_TOOL_CONTRACTS,
   type NativeToolName,
 } from "../contracts/native/nativeToolContracts.js";
-import type { BinaryTarget } from "../domain/binaryTarget.js";
+import type { BinaryTarget } from "../domain/binaryTargetTypes.js";
 import { toolContract } from "../contracts/toolContracts.js";
 import { analysisInputErrorFromIssues } from "../domain/inputIssueProjection.js";
 import type { EvidenceLocation } from "../domain/evidence.js";
@@ -283,6 +283,16 @@ class NativeMacOSClient implements AnalysisClient {
   async #listArchitectures(
     signal?: AbortSignal,
   ): Promise<Result<NativeObservation, AnalysisError>> {
+    // lipo reads only Mach-O; its refusal of a PE, ELF, or plist target is not
+    // a tool failure that a retry or `rea doctor` could repair.
+    if (this.target.format !== "mach-o")
+      return err(
+        new AnalysisCapabilityUnavailableError(
+          IDENTITY.id,
+          "list_architectures",
+          "Active artifact is not Mach-O.",
+        ),
+      );
     const capture = await this.#run(
       "list_architectures",
       "lipo",

@@ -4,20 +4,24 @@ import { semanticSlotAtPath } from "./javascriptSemanticSlots.js";
 
 import { invalidateSemanticMutationPath } from "./javascriptSemanticMutationValues.js";
 
+import type { JavaScriptBindingProvenance } from "./javascriptSemanticIr.js";
 import type {
-  JavaScriptBindingProvenance,
   JavaScriptSemanticProperty,
   JavaScriptSemanticResourceLimit,
   JavaScriptSemanticValue,
-} from "./javascriptSemanticIr.js";
+} from "./javascriptSemanticValueTypes.js";
 import {
   resolveSemanticBindingState,
   type JavaScriptSemanticAnalysisState,
   type JavaScriptSemanticBindingState,
 } from "./javascriptSemanticState.js";
 import { semanticRequireOrigin } from "./javascriptSemanticRequireOrigin.js";
-import { compareCodePoints } from "../canonicalOrdering.js";
-import { semanticStaticPropertyKey } from "./javascriptAstValues.js";
+import { compareUnicodeCodePoints } from "../unicodeCodePointOrder.js";
+import {
+  readExactJavaScriptLiteral,
+  semanticStaticPropertyKey,
+  unwrapJavaScriptExpression,
+} from "./javascriptAstValues.js";
 import {
   semanticAmbiguousProvenance,
   semanticLocalProvenance,
@@ -26,10 +30,8 @@ import {
   uniqueSemanticOrigins,
 } from "./javascriptSemanticProvenance.js";
 import {
-  MAX_SEMANTIC_PRIMITIVE_CANDIDATES,
   semanticPrimitiveCandidates as primitiveCandidates,
   semanticPrimitiveSet as primitiveSet,
-  semanticPrimitiveValue as primitiveValue,
 } from "./javascriptSemanticPrimitives.js";
 import {
   SEMANTIC_EXPRESSION_DEPTH_LIMIT,
@@ -120,6 +122,21 @@ const evaluateBinding = (
       status: "unknown",
       reason: `Binding ${binding.name} has no constant initializer.`,
     };
+  if (
+    binding.initializers.some(
+      ({ node }) =>
+        t.isUpdateExpression(node) ||
+        (t.isAssignmentExpression(node) &&
+          node.operator !== "=" &&
+          node.operator !== "&&=" &&
+          node.operator !== "||=" &&
+          node.operator !== "??="),
+    )
+  )
+    return {
+      status: "unknown",
+      reason: `Binding ${binding.name} has a compound or update write.`,
+    };
   if (binding.initializers.length > 1)
     return {
       status: "ambiguous",
@@ -154,8 +171,23 @@ const evaluateExpression = (
 ): JavaScriptSemanticValue => {
   if (context.expressionDepth > SEMANTIC_EXPRESSION_DEPTH_LIMIT)
     return semanticResourceLimitUnknown("expression-depth");
-  const literal = primitiveValue(node);
-  if (literal.found) return { status: "literal", value: literal.value };
+  const unwrapped = unwrapJavaScriptExpression(node);
+  if (unwrapped.depth > 0) {
+    if (
+      context.expressionDepth + unwrapped.depth >
+      SEMANTIC_EXPRESSION_DEPTH_LIMIT
+    )
+      return semanticResourceLimitUnknown("expression-depth");
+    return evaluateExpression(unwrapped.node, {
+      ...context,
+      expressionDepth: context.expressionDepth + unwrapped.depth,
+    });
+  }
+  const literal = readExactJavaScriptLiteral(node);
+  if (literal.found)
+    return typeof literal.value === "number"
+      ? primitiveSet([literal.value])
+      : { status: "literal", value: literal.value };
   if (t.isIdentifier(node)) {
     const binding = resolveSemanticBindingState(context.state, node, node.name);
     return binding === undefined
@@ -180,13 +212,6 @@ const evaluateExpression = (
   if (t.isBinaryExpression(node, { operator: "+" }))
     return evaluateAddition(node, context);
   if (t.isUnaryExpression(node)) return evaluateUnary(node, context);
-  if (
-    (t.isTSAsExpression(node) ||
-      t.isTSTypeAssertion(node) ||
-      t.isTSNonNullExpression(node)) &&
-    t.isExpression(node.expression)
-  )
-    return evaluateExpression(node.expression, nestedContext(context));
   return { status: "unknown", reason: `Unsupported ${node.type} value.` };
 };
 
@@ -284,7 +309,7 @@ const evaluateObject = (
     });
   }
   const properties = [...propertiesByName.values()].sort((left, right) =>
-    compareCodePoints(left.name, right.name),
+    compareUnicodeCodePoints(left.name, right.name),
   );
   return unknownProperties
     ? {
@@ -408,7 +433,7 @@ const addPrimitiveValues = (
     if (isSemanticResourceLimit(rightValue)) return rightValue;
     return { status: "unknown", reason: "Non-primitive addition." };
   }
-  if (left.length > MAX_SEMANTIC_PRIMITIVE_CANDIDATES / right.length)
+  if (left.length > SEMANTIC_PRIMITIVE_CANDIDATE_LIMIT / right.length)
     return semanticResourceLimitUnknown("primitive-candidates");
   if (exceedsSemanticPrimitiveAdditionByteBudget(left, right))
     return semanticResourceLimitUnknown("primitive-bytes");
@@ -511,6 +536,21 @@ const provenanceForExpression = (
       "unknown",
       semanticResourceLimitReason("expression-depth"),
     );
+  const unwrapped = unwrapJavaScriptExpression(node);
+  if (unwrapped.depth > 0) {
+    if (
+      context.expressionDepth + unwrapped.depth >
+      SEMANTIC_EXPRESSION_DEPTH_LIMIT
+    )
+      return semanticUnresolvedProvenance(
+        "unknown",
+        semanticResourceLimitReason("expression-depth"),
+      );
+    return provenanceForExpression(unwrapped.node, {
+      ...context,
+      expressionDepth: context.expressionDepth + unwrapped.depth,
+    });
+  }
   const required = semanticRequireOrigin(node, context.state);
   if (required !== undefined) return semanticOriginsProvenance([required]);
   if (t.isIdentifier(node)) {

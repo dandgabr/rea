@@ -16,7 +16,7 @@ import {
   listBrowserTargetsInputSchema,
 } from "../dist/domain/browserObservation.js";
 import { observeWebSessionInputSchema } from "../dist/domain/browserSession.js";
-import { compareWebCapturesInputSchema } from "../dist/domain/webCaptureDiff.js";
+import { compareWebCapturesInputSchema } from "../dist/domain/webCaptureDiffSchemas.js";
 import {
   captureWebScreenshotInputSchema,
   compareWebScreenshotsInputSchema,
@@ -33,6 +33,7 @@ import {
   browserScenario,
   runScenarioCli,
   scenarioProfiles,
+  verifyScenarioFailureEvidence,
 } from "./lib/browser-scenario-verifier.mjs";
 import { completeVerifierRun, createVerifierRun } from "./lib/verifier-run.mjs";
 import { verifyLargeScreenshotE2e } from "./lib/browser-screenshot-e2e.mjs";
@@ -43,6 +44,7 @@ import { verifyBrowserModules } from "./lib/browser-module-e2e.mjs";
 import { verifyBrowserDomDestinations } from "./lib/browser-dom-destinations-e2e.mjs";
 import { verifyBrowserCaptureMetadataBudget } from "./lib/browser-capture-metadata-budget-e2e.mjs";
 import { artifactCliEvidence, artifactMcpResult } from "./lib/artifact-e2e.mjs";
+import { verifyScenarioEnvironment } from "./lib/browser-scenario-environment-e2e.mjs";
 
 const REAL_BROWSER_STARTUP_TIMEOUT_MS = 60_000;
 const SCENARIO_SECRET_VALUE = "rea-browser-verifier-secret";
@@ -273,6 +275,11 @@ try {
     throw new Error("Scenario attachment terminated its external browser");
 
   const profilesBefore = await scenarioProfiles();
+  const scenarioEnvironment = await verifyScenarioEnvironment(
+    endpoint,
+    target,
+    site.origin,
+  );
   const launchedScenario = await createBrowserScenarioProvider(
     process.env,
   ).captureScenario(
@@ -294,6 +301,10 @@ try {
   if ([...profilesAfter].some((entry) => !profilesBefore.has(entry)))
     throw new Error("Scenario launch retained a temporary browser profile");
   assertScenarioCapture(launchedScenario.value);
+  const scenarioFailure = await verifyScenarioFailureEvidence(
+    executable,
+    site.origin,
+  );
   const scenarioResults = JSON.stringify([
     attachedScenario,
     launchedScenario.value,
@@ -360,6 +371,8 @@ try {
     browserScenarioCli: true,
     browserScenarioAttachCleanup: "disconnected-external",
     browserScenarioLaunchCleanup: "terminated-owned-process",
+    scenarioFailure,
+    scenarioEnvironment,
     verified: true,
   };
 } finally {

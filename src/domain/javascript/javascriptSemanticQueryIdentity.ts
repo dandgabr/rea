@@ -2,11 +2,10 @@ import { createHash } from "node:crypto";
 
 import canonicalize from "canonicalize";
 
-import type {
-  JavaScriptSemanticGraph,
-  JavaScriptSemanticGraphNode,
-} from "./javascriptSemanticGraph.js";
-import { compareCodePoints, uniqueSorted } from "../canonicalOrdering.js";
+import type { JavaScriptSemanticGraph } from "./javascriptSemanticGraph.js";
+import type { JavaScriptSemanticGraphNode } from "./javascriptSemanticGraphSchemas.js";
+import { uniqueSorted } from "../canonicalOrdering.js";
+import { compareUnicodeCodePoints } from "../unicodeCodePointOrder.js";
 import type { JavaScriptSemanticQueryInput } from "./javascriptSemanticQuerySchemas.js";
 
 /** Canonical JSON used by semantic query commitments and ordering. */
@@ -68,7 +67,7 @@ export const resolveJavaScriptSemanticQuerySeeds = (
   return graph.nodes
     .filter((node) => seedMatches(node, input, fingerprintFunctions))
     .map(({ node_id }) => node_id)
-    .sort(compareCodePoints);
+    .sort(compareUnicodeCodePoints);
 };
 
 const seedMatches = (

@@ -2,12 +2,15 @@ import {
   createJavaScriptApplicationEdge,
   createJavaScriptApplicationGraph,
   createJavaScriptApplicationNode,
-  type ApplicationEdge,
-  type ApplicationGraphEvidence,
-  type ApplicationNode,
   type JavaScriptApplicationGraph,
 } from "./javascriptApplicationGraph.js";
-import { compareCodePoints, uniqueSorted } from "../canonicalOrdering.js";
+import type {
+  ApplicationEdge,
+  ApplicationNode,
+} from "./javascriptApplicationGraphSchemas.js";
+import type { ApplicationGraphEvidence } from "./javascriptApplicationEvidenceSchemas.js";
+import { uniqueSorted } from "../canonicalOrdering.js";
+import { compareUnicodeCodePoints } from "../unicodeCodePointOrder.js";
 import type { ApplicationVersionComparisonItem } from "./javascriptApplicationVersionComparisonSchemas.js";
 
 interface ChangeGraphInput {
@@ -216,7 +219,7 @@ const sourceCoverageLimits = (input: ChangeGraphInput) =>
         (limit) => [`${limit.name}\0${limit.value}\0${limit.unit}`, limit],
       ),
     ).values(),
-  ].sort((left, right) => compareCodePoints(left.name, right.name));
+  ].sort((left, right) => compareUnicodeCodePoints(left.name, right.name));
 
 const combineOmittedCounts = (left: number | null, right: number | null) =>
   left === null || right === null ? null : left + right;
@@ -236,7 +239,7 @@ const mergeNodes = (nodes: readonly ApplicationNode[]): ApplicationNode[] => {
           .map((observation) => [observation.observation_id, observation]),
       ).values(),
     ].sort((left, right) =>
-      compareCodePoints(left.observation_id, right.observation_id),
+      compareUnicodeCodePoints(left.observation_id, right.observation_id),
     );
     return createJavaScriptApplicationNode({
       kind: first.kind,
@@ -248,11 +251,11 @@ const mergeNodes = (nodes: readonly ApplicationNode[]): ApplicationNode[] => {
     });
   });
   return merged.sort((left, right) =>
-    compareCodePoints(left.node_id, right.node_id),
+    compareUnicodeCodePoints(left.node_id, right.node_id),
   );
 };
 
 const uniqueEdges = (edges: readonly ApplicationEdge[]): ApplicationEdge[] =>
   [...new Map(edges.map((edge) => [edge.edge_id, edge])).values()].sort(
-    (left, right) => compareCodePoints(left.edge_id, right.edge_id),
+    (left, right) => compareUnicodeCodePoints(left.edge_id, right.edge_id),
   );

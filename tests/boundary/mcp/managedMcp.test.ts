@@ -1,3 +1,4 @@
+import { parseMcpToolError } from "../../fixtures/mcpToolError.js";
 import { parseEvidence } from "../../../src/domain/evidence.js";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -13,7 +14,6 @@ import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
 import { AnalysisProviderRegistry } from "../../../src/application/binary/AnalysisProviderRegistry.js";
 import { composeBinarySession } from "../../../src/application/binary/BinarySessionComposition.js";
 import type { BinarySession } from "../../../src/application/binary/BinarySession.js";
-import type { BinaryTarget } from "../../../src/domain/binaryTarget.js";
 import { MANAGED_NATIVE_VERIFICATION_EXAMPLE } from "../../../src/contracts/managed/managedWorkflowExamples.js";
 import { toolContract } from "../../../src/contracts/toolContracts.js";
 import { ManagedStaticProvider } from "../../../src/dotnet/ManagedStaticProvider.js";
@@ -34,8 +34,7 @@ it("runs every managed static inspection independently of an active native targe
     new ManagedStaticProvider(),
   ]);
   const server = createServer(
-    session,
-    sessionWithUnrelatedNativeTarget(session),
+    { kind: "session", session },
     {
       availabilityPolicy: () => ({
         processCaptureEnabled: false,
@@ -132,8 +131,7 @@ it("opens a managed PE and executes the managed static provider through MCP", as
     new ManagedStaticProvider(),
   ]);
   const server = createServer(
-    session,
-    sessionWithUnrelatedNativeTarget(session),
+    { kind: "session", session },
     {
       availabilityPolicy: () => ({
         processCaptureEnabled: false,
@@ -218,11 +216,8 @@ const verifyManagedCatalogAndNativeWorkflow = async (
       ],
     },
   });
-  expect(wrong).toMatchObject({
-    isError: true,
-    structuredContent: {
-      error: { code: "evidence_integrity_mismatch" },
-    },
+  expect(parseMcpToolError(wrong)).toMatchObject({
+    error: { code: "evidence_integrity_mismatch" },
   });
 };
 
@@ -288,28 +283,6 @@ const inspectManagedStaticWorkflow = async (
     },
   });
   return members;
-};
-
-const sessionWithUnrelatedNativeTarget = (
-  session: BinarySession,
-): BinarySession => {
-  const nativeTarget: BinaryTarget = {
-    kind: "executable",
-    format: "pe",
-    path: "C:\\Windows\\System32\\notepad.exe",
-    sha256: "a".repeat(64),
-    architecture: "x86_64",
-    availableArchitectures: ["x86_64"],
-    executableRole: "application",
-    managed: false,
-  };
-  return new Proxy(session, {
-    get(target, property, receiver) {
-      if (property === "activeTarget") return () => nativeTarget;
-      const value: unknown = Reflect.get(target, property, receiver);
-      return typeof value === "function" ? value.bind(target) : value;
-    },
-  });
 };
 
 const methodFrom = (members: Record<string, unknown>) =>
@@ -426,6 +399,7 @@ const verifyImport = async (
 };
 
 const structured = (result: CallToolResult): Record<string, unknown> => {
+  if (result.isError === true) return parseMcpToolError(result);
   if (
     typeof result.structuredContent !== "object" ||
     result.structuredContent === null

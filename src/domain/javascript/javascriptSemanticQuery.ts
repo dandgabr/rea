@@ -1,9 +1,9 @@
+import type { JavaScriptSemanticGraph } from "./javascriptSemanticGraph.js";
 import type {
-  JavaScriptSemanticGraph,
   JavaScriptSemanticGraphNode,
   JavaScriptSemanticGraphRelation,
-} from "./javascriptSemanticGraph.js";
-import { compareCodePoints } from "../canonicalOrdering.js";
+} from "./javascriptSemanticGraphSchemas.js";
+import { compareUnicodeCodePoints } from "../unicodeCodePointOrder.js";
 import type { JavaScriptSemanticGraphUnknown } from "./javascriptSemanticGraphSchemas.js";
 import { isJavaScriptSemanticOwnershipRelation as ownershipRelation } from "./javascriptSemanticQueryRelations.js";
 import {
@@ -147,7 +147,7 @@ const buildAdjacency = (
   }
   for (const entries of adjacency.values())
     entries.sort((left, right) =>
-      compareCodePoints(
+      compareUnicodeCodePoints(
         `${left.relation.relation_id}\0${left.nextNodeId}`,
         `${right.relation.relation_id}\0${right.nextNodeId}`,
       ),

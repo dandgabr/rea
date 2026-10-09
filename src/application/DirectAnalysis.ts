@@ -6,7 +6,8 @@ import type { DirectAnalysisDependencies } from "./DirectAnalysisDependencies.js
 import type { BinarySession } from "./binary/BinarySession.js";
 import type { SessionProviderRoute } from "./binary/SessionProviderRouter.js";
 import type { ResolvedSessionOpen } from "./binary/BinarySessionOpen.js";
-import { silentLogger, type Logger } from "../logger.js";
+import { silentLogger } from "../logger.js";
+import type { Logger } from "pino";
 import { createEvidence } from "../domain/evidence.js";
 import type { Evidence } from "../domain/evidence.js";
 import type { NativeToolName } from "../contracts/native/nativeToolContracts.js";
@@ -24,7 +25,7 @@ import {
   writeAnalysisSnapshot,
 } from "./binary/AnalysisSnapshotFiles.js";
 import { parseBinaryTarget } from "./BinaryTargetResolver.js";
-import type { BinaryTarget } from "../domain/binaryTarget.js";
+import type { BinaryTarget } from "../domain/binaryTargetTypes.js";
 import {
   snapshotEvidenceForQuery,
   snapshotMatchesTarget,
@@ -200,6 +201,7 @@ const runAnalysis = async (
       const prepared = await prepareSnapshot({
         path,
         snapshotPath,
+        signal,
         ...(options.formatHint === undefined
           ? {}
           : { formatHint: options.formatHint }),
@@ -267,7 +269,8 @@ const runAnalysis = async (
       });
       if (evidence !== undefined) {
         const recorded = session.recordEvidence(evidence);
-        if (!recorded.ok) return cliError(recorded.error);
+        if (!recorded.ok)
+          return cliError(recorded.error.retainPartialObservation(evidence));
         if (isWorkflowEvidenceTool(tool)) {
           const unknowns = recordWorkflowUnknowns({
             name: tool,
@@ -275,7 +278,8 @@ const runAnalysis = async (
             evidenceId: evidence.evidence_id,
             recordUnknown: (unknown) => session.recordUnknown(unknown),
           });
-          if (!unknowns.ok) return cliError(unknowns.error);
+          if (!unknowns.ok)
+            return cliError(unknowns.error.retainPartialObservation(evidence));
         }
       }
       if (
@@ -288,7 +292,8 @@ const runAnalysis = async (
         const workflowRecord = workflowSnapshotRecord(evidence, tool);
         if (workflowRecord !== undefined) {
           const recorded = session.recordWorkflowSnapshot(workflowRecord);
-          if (!recorded.ok) return cliError(recorded.error);
+          if (!recorded.ok)
+            return cliError(recorded.error.retainPartialObservation(evidence));
         }
       }
       if (
@@ -297,13 +302,15 @@ const runAnalysis = async (
         evidence !== undefined
       ) {
         const snapshot = session.exportAnalysisSnapshot();
-        if (!snapshot.ok) return cliError(snapshot.error);
+        if (!snapshot.ok)
+          return cliError(snapshot.error.retainPartialObservation(evidence));
         const written = await writeAnalysisSnapshot(
           snapshot.value,
           snapshotPath,
           true,
         );
-        if (!written.ok) return cliError(written.error);
+        if (!written.ok)
+          return cliError(written.error.retainPartialObservation(evidence));
       }
       return output;
     },
@@ -433,6 +440,7 @@ const prepareSnapshot = async (options: {
   readonly path: string;
   readonly formatHint?: ExecutableFormatHint;
   readonly snapshotPath: string | undefined;
+  readonly signal: AbortSignal;
 }): Promise<
   Result<
     { readonly snapshot?: AnalysisSnapshot; readonly target?: BinaryTarget },
@@ -444,13 +452,12 @@ const prepareSnapshot = async (options: {
     return ok({});
   const loaded = await readAnalysisSnapshot(snapshotPath);
   if (!loaded.ok) return loaded;
-  const target = await parseBinaryTarget(
-    path,
-    process.cwd(),
-    process.arch,
-    undefined,
-    options.formatHint,
-  );
+  const target = await parseBinaryTarget(path, {
+    signal: options.signal,
+    ...(options.formatHint === undefined
+      ? {}
+      : { formatHint: options.formatHint }),
+  });
   if (!target.ok) return target;
   if (!snapshotMatchesTarget(loaded.value.target, target.value))
     return err(

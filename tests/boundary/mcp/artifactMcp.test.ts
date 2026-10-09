@@ -1,3 +1,4 @@
+import { parseMcpToolError } from "../../fixtures/mcpToolError.js";
 import { parseEvidence } from "../../../src/domain/evidence.js";
 import { ok as resultOk } from "../../../src/domain/result.js";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
@@ -46,7 +47,7 @@ it.each([
     }
 
     const session = createTestBinarySession(new ArtifactProvider(process.env));
-    const server = createServer(session, session);
+    const server = createServer({ kind: "session", session });
     const client = new Client({ name: "asar-integrity-test", version: "1" });
     const [clientTransport, serverTransport] =
       InMemoryTransport.createLinkedPair();
@@ -64,7 +65,7 @@ it.each([
         arguments: {},
       });
       expect(result.isError).toBe(true);
-      expect(result.structuredContent).toEqual({
+      expect(parseMcpToolError(result)).toEqual({
         error: {
           code: "artifact_integrity_mismatch",
           category: "integrity_mismatch",
@@ -116,7 +117,7 @@ it("extracts an active archive through MCP when requested", async () => {
   await writeFile(archive, await zip.close());
 
   const session = createTestBinarySession(new ArtifactProvider(process.env));
-  const server = createServer(session, session);
+  const server = createServer({ kind: "session", session });
   const client = new Client({ name: "artifact-extract-test", version: "1" });
   const [clientTransport, serverTransport] =
     InMemoryTransport.createLinkedPair();
@@ -165,7 +166,7 @@ it("extracts a macOS app bundle through MCP", async () => {
   await writeFile(join(contents, "MacOS", "Fixture"), header);
 
   const session = createTestBinarySession(new ArtifactProvider(process.env));
-  const server = createServer(session, session);
+  const server = createServer({ kind: "session", session });
   const client = new Client({
     name: "artifact-extract-app-test",
     version: "1",
@@ -224,7 +225,7 @@ it("records an explicitly continued mismatch, preserves verified siblings, and n
   await writeFile(archive, bytes);
 
   const session = createTestBinarySession(new ArtifactProvider(process.env));
-  const server = createServer(session, session);
+  const server = createServer({ kind: "session", session });
   const client = new Client({ name: "asar-continue-test", version: "1" });
   const [clientTransport, serverTransport] =
     InMemoryTransport.createLinkedPair();
@@ -325,7 +326,7 @@ it("rejects inline artifact Evidence whose content does not match its ID", async
     execute: () => Promise.resolve(observed(null)),
     close: () => Promise.resolve(resultOk(null)),
   }));
-  const server = createServer(session, session);
+  const server = createServer({ kind: "session", session });
   const client = new Client({
     name: "artifact-authority-test",
     version: "1",
@@ -363,7 +364,7 @@ it("compares inline inventory Evidence without prior session calls", async () =>
     execute: () => Promise.resolve(observed(null)),
     close: () => Promise.resolve(resultOk(null)),
   }));
-  const server = createServer(session, session);
+  const server = createServer({ kind: "session", session });
   const client = new Client({
     name: "artifact-ownership-test",
     version: "1",
@@ -410,7 +411,7 @@ it("returns full artifact graphs inline and compares changed inventories", async
   );
   await writeFile(changedArchive, await changedWriter.close());
   const session = createTestBinarySession(new ArtifactProvider(process.env));
-  const server = createServer(session, session);
+  const server = createServer({ kind: "session", session });
   const client = new Client({ name: "artifact-mcp-test", version: "1" });
   const [clientTransport, serverTransport] =
     InMemoryTransport.createLinkedPair();

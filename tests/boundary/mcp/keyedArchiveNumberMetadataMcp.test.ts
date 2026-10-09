@@ -3,7 +3,7 @@ import { expect } from "vitest";
 import { z } from "zod";
 
 import { createBinarySession } from "../../../src/composition/binary.js";
-import { parseConfig } from "../../../src/config.js";
+import { parseConfig } from "../../../src/config/parseConfig.js";
 import { keyedArchiveResultSchema } from "../../../src/domain/apple/keyedArchive.js";
 import { createServer } from "../../../src/server/createServer.js";
 import {
@@ -27,7 +27,9 @@ mcpTest.for(archiveNumberMetadataCases)(
     onTestFinished(async () => {
       await session.close();
     });
-    const client = await mcp.connect(createServer(session, session));
+    const client = await mcp.connect(
+      createServer({ kind: "session", session }),
+    );
     const opened = await client.callTool({
       name: "open_binary",
       arguments: { path: fixture.path },

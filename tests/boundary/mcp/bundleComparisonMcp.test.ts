@@ -1,3 +1,4 @@
+import { parseMcpToolError } from "../../fixtures/mcpToolError.js";
 import { ok as resultOk } from "../../../src/domain/result.js";
 import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -131,7 +132,7 @@ describe("bundle comparison MCP integration", () => {
         },
       });
       expect(result.isError).toBe(true);
-      expect(result.structuredContent).toMatchObject({
+      expect(parseMcpToolError(result)).toMatchObject({
         error: {
           code: "evidence_integrity_mismatch",
           message: expect.stringContaining(
@@ -151,7 +152,7 @@ const connect = async () => {
     execute: () => Promise.resolve(observed(null)),
     close: () => Promise.resolve(resultOk(null)),
   }));
-  const server = createServer(session, session);
+  const server = createServer({ kind: "session", session });
   const client = new Client({ name: "bundle-comparison-test", version: "1" });
   const [clientTransport, serverTransport] =
     InMemoryTransport.createLinkedPair();

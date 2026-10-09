@@ -1,15 +1,8 @@
 import type { IPty } from "@lydell/node-pty";
-import type {
-  InteractionEvent,
-  ProcessCapture,
-  UnverifiedProcessCapture,
-  ProcessCaptureEventJournalEntry,
-  ProcessSample,
-  ProcessScenario,
-  RecordProcessCaptureEvent,
-  TerminalFrame,
-} from "../../domain/process/processCapture.js";
-import { parseProcessCapture } from "../../domain/process/processCapture.js";
+import type { TerminalRetention } from "../../domain/process/processCaptureCoverage.js";
+import type { ProcessCapture } from "../../domain/process/processCaptureParsing.js";
+import type { ProcessScenario } from "../../domain/process/processScenario.js";
+import { parseProcessCapture } from "../../domain/process/processCaptureParsing.js";
 import { err, ok, type Result } from "../../domain/result.js";
 import { AnalysisCapabilityUnavailableError } from "../../domain/analysisErrorCore.js";
 import { type AnalysisError } from "../../domain/analysisErrorBase.js";
@@ -19,7 +12,14 @@ import {
   normalizeCaptureFailure,
   processCaptureCancelled,
 } from "./ProcessCaptureError.js";
-export { ProcessCaptureError } from "./ProcessCaptureError.js";
+import type {
+  InteractionEvent,
+  UnverifiedProcessCapture,
+  ProcessCaptureEventJournalEntry,
+  ProcessSample,
+  RecordProcessCaptureEvent,
+  TerminalFrame,
+} from "../../domain/process/processCapture.js";
 import { startProcessSampler } from "./ProcessSampling.js";
 import { snapshotRoots } from "./FilesystemSnapshot.js";
 import { TerminalRenderer } from "./TerminalRenderer.js";
@@ -56,7 +56,6 @@ import { makeProcessCaptureEnvironment } from "./ProcessCaptureEnvironment.js";
 import { classifyFilesystemEffects } from "./ProcessFilesystemEffects.js";
 import { processCaptureOwnershipUnavailableReason } from "./ProcessCaptureCapability.js";
 import type { ProcessOwnershipBaseline } from "../ProcessOwnership.js";
-export { probeProcessCaptureCapability } from "./ProcessCaptureCapability.js";
 
 interface StartedCaptureRuntime {
   readonly renderer: TerminalRenderer;
@@ -65,8 +64,8 @@ interface StartedCaptureRuntime {
   readonly startedAt: Date;
   readonly executableIdentity: ReturnType<typeof observeLaunchedExecutable>;
   readonly lastOutput: () => number;
-  readonly framesTruncated: () => boolean;
-  readonly stopSampler: () => Promise<{ readonly partial: boolean }>;
+  readonly rawTerminalRetention: () => TerminalRetention;
+  readonly stopSampler: ReturnType<typeof startProcessSampler>;
 }
 
 const cleanupFailedStartup = async (options: {
@@ -200,7 +199,7 @@ const startCaptureRuntime = async (
       scenario.executable,
       selectedExecutable,
     );
-    const framesTruncated = captureTerminalFrames({
+    const rawTerminalRetention = captureTerminalFrames({
       ...options,
       terminal,
       started,
@@ -228,7 +227,7 @@ const startCaptureRuntime = async (
       startedAt,
       executableIdentity,
       lastOutput: () => lastOutput,
-      framesTruncated,
+      rawTerminalRetention,
       stopSampler,
     };
   } catch (cause: unknown) {
@@ -334,7 +333,6 @@ const completeCapture = async (options: {
   readonly exit: Awaited<ReturnType<typeof awaitTerminalExit>>;
   readonly signal?: AbortSignal;
   readonly captureSnapshot: typeof snapshotRoots;
-  readonly initiallyTruncated: boolean;
   readonly eventJournal: readonly ProcessCaptureEventJournalEntry[];
   readonly observationBuffer: ProcessCaptureObservationBuffer;
   readonly recordEvent: RecordProcessCaptureEvent;
@@ -365,7 +363,8 @@ const completeCapture = async (options: {
     state: "available",
     value: settlement,
   };
-  const samplingPartial = (await runtime.stopSampler()).partial;
+  const sampling = await runtime.stopSampler();
+  const samplingPartial = sampling.partial;
   await settleProcessCaptureJournal(options.eventJournal);
   assertNotCancelled(options.signal);
   let after: Awaited<ReturnType<typeof snapshotRoots>>;
@@ -385,7 +384,7 @@ const completeCapture = async (options: {
     ...options.observationBuffer.filesystem_snapshots,
     after: {
       state: "available",
-      value: { files: after.files, truncated: after.truncated },
+      value: after,
     },
   };
   options.recordEvent("filesystem_checkpoints", 1);
@@ -436,20 +435,19 @@ const completeCapture = async (options: {
     throw cause;
   }
   options.observationBuffer.manifest = { state: "available", value: manifest };
-  const truncated =
-    options.initiallyTruncated ||
-    after.truncated ||
-    runtime.framesTruncated() ||
-    checkpoints.some(({ truncated: partial }) => partial) ||
-    samplingPartial ||
-    runtime.renderer.truncated();
   return buildCaptureResult({
     frames: options.frames,
     exit: { ...options.exit, reason },
     samples: options.samples,
     before: options.before,
     after,
-    truncated,
+    truncationDetails: {
+      raw_terminal: runtime.rawTerminalRetention(),
+      rendered_terminal: runtime.renderer.retention(),
+      filesystem_before: options.before.coverage,
+      filesystem_after: after.coverage,
+      process: sampling.coverage,
+    },
     scenario,
     rootPid: runtime.terminal.pid,
     samplingPartial,
@@ -546,7 +544,6 @@ const runProcessScenario = async (
       samples,
       interactions,
       exit,
-      initiallyTruncated: before.truncated,
       eventJournal,
       observationBuffer: observations,
       recordEvent,

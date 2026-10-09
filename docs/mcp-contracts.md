@@ -77,6 +77,15 @@ inventories, and do not claim that no short-lived descendant existed.
 
 ## Progress and cancellation
 
+Tool execution failures return `isError: true` and the complete canonical
+`{ "error": ... }` diagnostic as JSON in text `content`. Read that diagnostic
+for the error code, target details, partial observations, and remediation.
+Failures omit `structuredContent`, since each advertised `outputSchema`
+describes successful results. Successful replies retain their schema-validated
+structured data and matching text projection. Oversized errors are retained
+as Evidence before delivery of a bounded diagnostic with an export reference;
+if retention is unavailable or fails, the diagnostic reports that reason.
+
 REA accepts ordinary `tools/call` progress tokens. Updates are monotonic,
 rate-bounded to at most one intermediate update per 100 ms, and always allow a
 terminal update. Unknown totals are omitted; REA does not fabricate percentages.
@@ -179,6 +188,9 @@ increasing a client deadline alone does not fix those failures.
 
 ## Tool results
 
+Custom clients upgrading from 6.1 should follow the
+[6.2 migration guide](migration-6.2.md#mcp-results-and-evidence).
+
 Evidence-producing tools return the complete canonical Evidence record in both
 text and structured content. Read `structuredContent.normalized_result` for the
 operation result and `structuredContent.evidence_id` for its identity. The same
@@ -192,7 +204,8 @@ retained session history or an explicit bundle for transfer.
 
 REA prepares complete MCP results within the pinned stdio client's 10 MiB
 receive-buffer budget, including both text and structured representations and
-room for the JSON-RPC envelope. Response budget settings are captured at startup;
+room for the JSON-RPC envelope. Tool errors carry only their text
+representation, so only that text counts against the budget. Response budget settings are captured at startup;
 restart or recreate the server to apply changes. If a result cannot fit, REA returns
 `resource_constraint` with `details.resource: "transport"` before constructing
 a document-sized string. Analysis Evidence remains complete in the current

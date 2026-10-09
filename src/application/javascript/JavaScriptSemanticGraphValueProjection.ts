@@ -1,12 +1,12 @@
 import {
   semanticContainer,
   semanticPropertyPointer,
-  type JavaScriptSemanticSlot,
 } from "../../domain/javascript/javascriptSemanticSlots.js";
+import type { JavaScriptSemanticBinding } from "../../domain/javascript/javascriptSemanticIr.js";
 import type {
-  JavaScriptSemanticBinding,
+  JavaScriptSemanticProperty,
   JavaScriptSemanticValue,
-} from "../../domain/javascript/javascriptSemanticIr.js";
+} from "../../domain/javascript/javascriptSemanticValueTypes.js";
 import { createJavaScriptSemanticGraphUnknown } from "../../domain/javascript/javascriptSemanticGraph.js";
 import {
   retainSemanticGraphNode,
@@ -14,7 +14,10 @@ import {
   addSemanticGraphUnknown,
 } from "./JavaScriptSemanticGraphConstruction.js";
 import type { SemanticFlowProjectionContext } from "./JavaScriptSemanticGraphFlowProjection.js";
-import { observedSemanticEvidence } from "./JavaScriptSemanticGraphEvidence.js";
+import {
+  observedSemanticEvidence,
+  unknownSemanticEvidence,
+} from "./JavaScriptSemanticGraphEvidence.js";
 
 /** Project bounded literal values and object slots for exact query seeds. */
 export const projectSemanticValues = (
@@ -90,17 +93,41 @@ const projectValue = (input: ValueProjectionInput): void => {
           path: propertyPath,
         });
     }
-  } else if (value.status === "unknown" && value.resourceLimit !== undefined) {
+    if (container.coverage.status === "partial")
+      addSemanticGraphUnknown(
+        context.state,
+        createJavaScriptSemanticGraphUnknown({
+          node_id: target.node_id,
+          family: "object-flow",
+          relation_kinds: ["writes-property"],
+          reason: "ambiguous-target",
+          detail: `Initializer container has unknown ${
+            value.status === "object" ? "properties" : "items"
+          }${container.coverage.omitted === null ? " with an unknown omitted count" : `; ${container.coverage.omitted} omitted`}.`,
+          candidate_node_ids: [target.node_id],
+          evidence: unknownSemanticEvidence(
+            context.file,
+            binding.definitions[0]?.location ?? null,
+          ),
+        }),
+      );
+  } else if (
+    value.status === "unknown" ||
+    value.status === "ambiguous" ||
+    value.status === "cycle"
+  ) {
     const location = binding.definitions[0]?.location ?? null;
     const evidence = observedSemanticEvidence(context.file, location);
-    const isPropertyValue = role.startsWith("property:");
     addSemanticGraphUnknown(
       context.state,
       createJavaScriptSemanticGraphUnknown({
         node_id: target.node_id,
-        family: isPropertyValue ? "object-flow" : "data-flow",
-        relation_kinds: [isPropertyValue ? "writes-property" : "defines"],
-        reason: "resource-limit",
+        family: "data-flow",
+        relation_kinds: ["defines"],
+        reason:
+          value.resourceLimit === undefined
+            ? "unknown-value"
+            : "resource-limit",
         detail: `${value.reason} Unknown value at ${role}.`,
         candidate_node_ids: [target.node_id],
         evidence: {
@@ -136,7 +163,7 @@ export const semanticPropertySlot = (
   context: SemanticFlowProjectionContext,
   objectBindingId: string,
   path: readonly string[],
-  fact: JavaScriptSemanticSlot,
+  fact: JavaScriptSemanticProperty,
 ) =>
   retainSemanticGraphNode(context.state, context.file, {
     kind: "property-slot",

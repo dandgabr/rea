@@ -1,17 +1,19 @@
 import * as t from "@babel/types";
 
-import { compareCodePoints } from "../canonicalOrdering.js";
+import { compareUnicodeCodePoints } from "../unicodeCodePointOrder.js";
 import { stripQueryAndFragment } from "../artifactPathSyntax.js";
 import type { ElectronNativeAddonBindingFinding } from "./electronStaticAnalysisTypes.js";
 import { addLocatedFinding } from "./javascriptStaticAnalysisFindings.js";
 import {
   argumentNode,
   calleeName,
-  propertyName,
   range,
-  semanticStaticPropertyName,
   stringValue,
 } from "./javascriptStaticAnalysisHelpers.js";
+import {
+  propertyName,
+  semanticStaticPropertyName,
+} from "./javascriptAstValues.js";
 import type { JavaScriptFindingContext } from "./javascriptStaticAnalysisState.js";
 
 interface NativeBindingInput {
@@ -135,7 +137,7 @@ const addBinding = (input: NativeBindingInput): void => {
   const { context, node, specifier, kind } = input;
   const unique = [
     ...new Set(input.members.filter((member) => member !== "")),
-  ].sort(compareCodePoints);
+  ].sort(compareUnicodeCodePoints);
   const members = unique.length === 0 ? ["*"] : unique;
   addLocatedFinding(context, {
     collection: context.accumulator.nativeAddonBindings,

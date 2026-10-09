@@ -1,3 +1,4 @@
+import { parseMcpToolError } from "../../fixtures/mcpToolError.js";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -5,13 +6,13 @@ import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { expect, it, onTestFinished } from "vitest";
 
 import { compareProcessEvidenceFiles } from "../../../src/application/process/ProcessCli.js";
-import { PROCESS_PROVIDER } from "../../../src/application/process/ProcessEvidence.js";
+import { PROCESS_PROVIDER } from "../../../src/domain/process/processEvidenceProvider.js";
 import { FUNCTION_COMPARISON_EXAMPLE } from "../../../src/contracts/functionComparisonExample.js";
 import {
   FUNCTION_COMPARISON_EVIDENCE,
   INVESTIGATION_EXAMPLES,
 } from "../../../src/contracts/investigationExamples.js";
-import { EMPTY_PROCESS_CAPTURE_EXAMPLE } from "../../../src/contracts/process/processCaptureExample.js";
+import { EMPTY_PROCESS_CAPTURE_EXAMPLE } from "../../../src/domain/process/processCaptureExample.js";
 import { findChangedBehavior } from "../../../src/domain/changedBehavior.js";
 import {
   createEvidence,
@@ -19,12 +20,12 @@ import {
   type Evidence,
 } from "../../../src/domain/evidence.js";
 import { createEvidenceBundle } from "../../../src/domain/evidenceBundle.js";
-import { verifyReconstruction } from "../../../src/domain/reconstructionVerification.js";
 import { correlateStaticAndRuntime } from "../../../src/domain/staticRuntimeCorrelation.js";
 import { createServer } from "../../../src/server/createServer.js";
 import { createTestBinarySession } from "../../fixtures/binarySession.js";
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
 
+import { verifyReconstruction } from "../../../src/domain/reconstructionVerification.js";
 const providerNames = [
   "REA process capture",
   "REA deterministic process harness",
@@ -56,7 +57,7 @@ const connectedComparison = async () => {
   const session = createTestBinarySession(() => {
     throw new Error("Process comparison must not launch a provider");
   });
-  const server = createServer(session, session);
+  const server = createServer({ kind: "session", session });
   const client = new Client({
     name: "process-evidence-identity",
     version: "1",
@@ -290,7 +291,7 @@ for (const name of providerNames)
       for (const { expected: _expected, ...call } of consumerCalls(invalid)) {
         const response = await client.callTool(call);
         expect(response.isError, call.name).toBe(true);
-        expect(response.structuredContent, call.name).toMatchObject({
+        expect(parseMcpToolError(response), call.name).toMatchObject({
           error: { code: "invalid_request" },
         });
       }
@@ -329,7 +330,7 @@ it("separately rejects a tampered digest before admission to any consumer or ses
   )) {
     const response = await client.callTool(call);
     expect(response.isError, call.name).toBe(true);
-    expect(response.structuredContent).toMatchObject({
+    expect(parseMcpToolError(response)).toMatchObject({
       error: { code: "invalid_request" },
     });
   }

@@ -1,12 +1,15 @@
-import { canonicalDigest } from "../comparisonSemantics.js";
-import { compareCodePoints, uniqueSorted } from "../canonicalOrdering.js";
+import { digestCanonicalValue } from "../canonicalDigest.js";
+import { uniqueSorted } from "../canonicalOrdering.js";
+import { compareUnicodeCodePoints } from "../unicodeCodePointOrder.js";
 import type { Evidence } from "../evidence.js";
 import {
   createJavaScriptApplicationGraph,
-  type ApplicationEdge,
-  type ApplicationNode,
   type JavaScriptApplicationGraph,
 } from "./javascriptApplicationGraph.js";
+import type {
+  ApplicationEdge,
+  ApplicationNode,
+} from "./javascriptApplicationGraphSchemas.js";
 import {
   applicationFeatureTraceResultSchema,
   type ApplicationFeatureTraceResult,
@@ -84,7 +87,7 @@ export const traceApplicationFeature = (
   };
   return applicationFeatureTraceResultSchema.parse({
     ...semantic,
-    trace_id: `jatr_${canonicalDigest(semantic, "Feature trace")}`,
+    trace_id: `jatr_${digestCanonicalValue(semantic, "Feature trace")}`,
   });
 };
 
@@ -124,7 +127,7 @@ const noMatchResult = (
   };
   return applicationFeatureTraceResultSchema.parse({
     ...semantic,
-    trace_id: `jatr_${canonicalDigest(semantic, "Feature trace")}`,
+    trace_id: `jatr_${digestCanonicalValue(semantic, "Feature trace")}`,
   });
 };
 
@@ -168,7 +171,9 @@ const terminalPaths = (
     )
     .map((node) => pathTo(node, traversal.predecessors, edgeById))
     .filter((path): path is NonNullable<typeof path> => path !== null)
-    .sort((left, right) => compareCodePoints(left.path_id, right.path_id));
+    .sort((left, right) =>
+      compareUnicodeCodePoints(left.path_id, right.path_id),
+    );
 };
 
 const pathTo = (
@@ -205,7 +210,7 @@ const pathTo = (
   };
   return {
     ...semantic,
-    path_id: `jatp_${canonicalDigest(semantic, "Feature trace")}`,
+    path_id: `jatp_${digestCanonicalValue(semantic, "Feature trace")}`,
   };
 };
 

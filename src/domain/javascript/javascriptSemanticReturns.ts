@@ -9,14 +9,15 @@ import type {
   JavaScriptSemanticCallable,
   JavaScriptSemanticModuleLink,
   JavaScriptSemanticReturnSite,
-  JavaScriptSemanticValue,
 } from "./javascriptSemanticIr.js";
+import type { JavaScriptSemanticValue } from "./javascriptSemanticValueTypes.js";
 import type {
   ProjectedPropertyCoverage,
   ProjectedReturnField,
 } from "./javascriptExportShapeComparisonSchemas.js";
-import { compareCodePoints } from "../canonicalOrdering.js";
+import { compareUnicodeCodePoints } from "../unicodeCodePointOrder.js";
 import { semanticCallableIdForNode } from "./javascriptSemanticProjection.js";
+import { unwrapJavaScriptExpression } from "./javascriptAstValues.js";
 import {
   resolveSemanticBindingState,
   type JavaScriptSemanticAnalysisState,
@@ -177,6 +178,9 @@ const callableIdsForNode = (
   admitted: ReadonlySet<string>,
   seen: ReadonlySet<string>,
 ): string[] => {
+  const unwrapped = unwrapJavaScriptExpression(node).node;
+  if (unwrapped !== node)
+    return callableIdsForNode(unwrapped, state, admitted, seen);
   const direct = semanticCallableIdForNode(node);
   if (direct !== null && admitted.has(direct)) return [direct];
   if (t.isIdentifier(node)) {
@@ -185,12 +189,6 @@ const callableIdsForNode = (
       ? []
       : callableIdsForBinding(binding, state, admitted, seen);
   }
-  if (
-    t.isTSAsExpression(node) ||
-    t.isTSTypeAssertion(node) ||
-    t.isTSNonNullExpression(node)
-  )
-    return callableIdsForNode(node.expression, state, admitted, seen);
   return [];
 };
 
@@ -204,9 +202,9 @@ export const flattenSemanticReturnValue = (
   const fields: ProjectedReturnField[] = [];
   const propertyCoverage: ProjectedPropertyCoverage[] = [];
   flattenValue(value, "", fields, propertyCoverage);
-  fields.sort((left, right) => compareCodePoints(left.path, right.path));
+  fields.sort((left, right) => compareUnicodeCodePoints(left.path, right.path));
   propertyCoverage.sort((left, right) =>
-    compareCodePoints(left.path, right.path),
+    compareUnicodeCodePoints(left.path, right.path),
   );
   return { fields, propertyCoverage };
 };

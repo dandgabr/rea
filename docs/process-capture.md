@@ -112,20 +112,52 @@ same admitted PTY chunks rather than a second unbounded stream.
 
 Port normalization recognizes explicit `port`, `tcp_port`, `udp_port`, and
 `listen` fields, URL authorities, IP endpoints, and `localhost` endpoints, with
-ports from 0 through 65535. It preserves ordinary counters, dimensions, file
-line numbers, and ambiguous bare host labels. Use explicit literal `patterns`
+ports from 0 through 65535. A port may end a sentence, as in `port: 8080.`;
+a period followed by a letter or digit continues a decimal, version, or host
+name instead. Each PTY chunk is normalized on its own, so a port whose period
+ends the chunk is left unchanged because its continuation is not yet known. It preserves ordinary counters, dimensions, file line numbers,
+and ambiguous bare host labels. Use explicit literal `patterns`
 for a different application-specific spelling. Set `ports: false` to preserve
 all endpoint numbers in comparison text. Captures commit the port-normalization
 version so older broad numeric normalization cannot silently compare as the
 same contract.
 
-Output, file count, file size, process sampling, filesystem depth, total
+Output retention, file count, aggregate file-hashing bytes, process sampling, filesystem depth, total
 runtime, idle time, and post-exit settlement are bounded by the scenario's
 limits. The result marks truncated observations and residual unknowns rather
 than treating missing data as proof of equivalence. Cancellation and timeout
 run the same owned-process cleanup path. Settlement reports whether the
 sampled process group quiesced or whether cleanup was needed or unverifiable;
 sampling cannot prove that every short-lived or detached descendant was seen.
+
+Every capture requires `truncation_details`, with separate accounting for:
+
+- `raw_terminal`: original UTF-8 PTY chunk bytes and observed/retained chunk
+  counts. A chunk that does not fit `limits.output_bytes` is omitted whole;
+  a later smaller chunk can still fit.
+- `rendered_terminal`: cumulative UTF-8 serialized-state and visible-line
+  bytes, plus observed/retained frame counts. This is independent of the raw
+  chunk budget and does not count JSON encoding. Repeated screen snapshots can
+  exhaust it even when all raw output fits. Rendered states use retained PTY
+  input, so raw omissions also limit rendered coverage.
+- `filesystem_before` and `filesystem_after`: file-count/depth limits,
+  enumeration failures, whole-file hash budget and bytes successfully hashed.
+  Each retained regular file without a digest has an aliased path, size,
+  remaining budget and reason: `file_bytes_budget` or
+  `file_changed_or_short_read`. A file too large for the remaining budget is
+  skipped; a later smaller file can still be hashed. Hash omissions do not
+  imply incomplete path enumeration.
+- `process`: sampling limit and whether sampling ended partially. Coverage
+  remains `sampled`, including when that limit was not exhausted.
+
+The aggregate `truncated` flag summarizes these observations. Comparisons retain
+results for unaffected dimensions and mark affected dimensions unknown; an
+incomplete capture cannot locate the first divergence across all dimensions.
+Trace assertions use coverage for the sources they select, so an assertion
+about complete raw terminal output need not fail because rendered snapshots
+were omitted. Older truncated captures without these details retain the
+conservative comparison behavior. These diagnostics use the existing scenario
+budgets; they do not introduce a separate file-hashing budget.
 
 When the host withholds an unrelated process’s ownership token, REA leaves that
 process untouched and records its PID and reason in `cleanup.unverified_processes`

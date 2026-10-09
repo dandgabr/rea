@@ -11,13 +11,13 @@ import { CLI_COMMAND_NAMES } from "../../../src/cliCommandNames.js";
 import { createCli } from "../../../src/cli.js";
 import { TOOL_CONTRACTS } from "../../../src/contracts/toolContracts.js";
 import {
-  HOPPER_PROVIDER_IDENTITY,
   HOPPER_OPERATIONS,
-} from "../../../src/hopper/HopperProvider.js";
+  HOPPER_PROVIDER_IDENTITY,
+} from "../../../src/hopper/HopperProviderCapabilities.js";
 import {
   GHIDRA_PROVIDER_IDENTITY,
   GHIDRA_OPERATIONS,
-} from "../../../src/ghidra/GhidraProvider.js";
+} from "../../../src/ghidra/GhidraProviderCapabilities.js";
 import { OBJDUMP_PROVIDER_IDENTITY } from "../../../src/objdump/ObjdumpCommand.js";
 import { RIZIN_PROVIDER_IDENTITY } from "../../../src/rizin/RizinCommand.js";
 import { GDB_PROVIDER_IDENTITY } from "../../../src/gdb/GdbSessionManager.js";
@@ -32,8 +32,9 @@ import {
   createCliInventory,
   cliCommandDescriptionIssues,
   cliCommandOptionNames,
+} from "../../../scripts/lib/catalog-cli.mjs";
+import {
   createProductCatalog,
-  providerCatalogDigest,
   serializeProductCatalog,
 } from "../../../scripts/lib/product-catalog.mjs";
 
@@ -94,9 +95,6 @@ describe("canonical product catalog", () => {
       catalog.providers.find(({ id }) => id === GHIDRA_PROVIDER_IDENTITY.id)
         ?.capabilities,
     ).toEqual([...GHIDRA_OPERATIONS].sort());
-    expect(catalog.runtime_catalog.digests.providers_sha256).toBe(
-      providerCatalogDigest(catalog.providers),
-    );
     expect(
       JSON.parse(await readFile("docs/public/product-catalog.json", "utf8")),
     ).toEqual(catalog);
@@ -221,19 +219,6 @@ describe("canonical product catalog drift", () => {
     );
     expect(issues).toContain(
       "README_zh.md: documentation links differ from README.md",
-    );
-  });
-
-  it("changes the provider projection digest when provider facts drift", async () => {
-    const catalog = await createProductCatalog(root);
-    const firstProvider = catalog.providers[0];
-    if (firstProvider === undefined) throw new TypeError("Missing provider");
-    const driftedProviders = [
-      { ...firstProvider, name: `${firstProvider.name} drifted` },
-      ...catalog.providers.slice(1),
-    ];
-    expect(providerCatalogDigest(driftedProviders)).not.toBe(
-      catalog.runtime_catalog.digests.providers_sha256,
     );
   });
 

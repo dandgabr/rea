@@ -122,7 +122,18 @@ class ErrorEvidenceTransport implements Transport {
         : undefined;
     const tool = id === undefined ? undefined : this.pendingTools.get(id);
     try {
-      await this.transport.send(this.recoverError(message, tool), options);
+      const recovered = this.recoverError(message, tool);
+      if (
+        isJSONRPCResultResponse(recovered) &&
+        isCallToolResult(recovered.result) &&
+        recovered.result.isError === true
+      ) {
+        // Keep the complete typed JSON in content. Error projections are not
+        // success outputSchema data; oversized recovery must consume their
+        // private structured carrier before it is removed from the wire.
+        const { structuredContent: _diagnostic, ...result } = recovered.result;
+        await this.transport.send({ ...recovered, result }, options);
+      } else await this.transport.send(recovered, options);
     } finally {
       if (!isJSONRPCRequest(message) && id !== undefined)
         this.pendingTools.delete(id);
@@ -142,7 +153,8 @@ class ErrorEvidenceTransport implements Transport {
       return message;
     const structured = jsonObjectSchema.parse(message.result.structuredContent);
     const budget = this.delivery.resultBudgetBytes;
-    const encoded = encodeToolResult(structured, budget);
+    // The delivered error omits structuredContent, so only its text counts.
+    const encoded = encodeToolResult(structured, budget, "text");
     if (encoded.ok) return message;
     const operation = tool ?? "mcp_tool_error";
     const originalError = analysisErrorProjectionSchema.safeParse(

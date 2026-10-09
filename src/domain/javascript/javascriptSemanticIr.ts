@@ -5,13 +5,6 @@ import type {
   JavaScriptSemanticReturnCoverage,
 } from "./javascriptSemanticCoverage.js";
 
-export type {
-  JavaScriptSemanticPrimitive,
-  JavaScriptSemanticProperty,
-  JavaScriptSemanticResourceLimit,
-  JavaScriptSemanticValue,
-} from "./javascriptSemanticValueTypes.js";
-
 /** One exact module origin followed through imports, requires, or aliases. */
 export interface JavaScriptModuleOrigin {
   readonly specifier: string;
@@ -441,24 +434,6 @@ export interface JavaScriptSemanticIr {
   readonly coverage: JavaScriptSemanticCoverage;
   readonly limitations: readonly string[];
 }
-
-/** Find the innermost resolved reference at one source coordinate. */
-export const semanticReferenceAt = (
-  ir: JavaScriptSemanticIr,
-  line: number,
-  column: number,
-): JavaScriptSemanticReference | undefined =>
-  ir.references.find(
-    ({ location }) =>
-      location.start.line === line && location.start.column === column,
-  );
-
-/** Read one binding by its deterministic semantic identifier. */
-export const semanticBinding = (
-  ir: JavaScriptSemanticIr,
-  bindingId: string,
-): JavaScriptSemanticBinding | undefined =>
-  ir.bindings.find(({ bindingId: candidate }) => candidate === bindingId);
 
 /** Fail-closed result when Babel cannot produce an inert syntax tree. */
 export const failedJavaScriptSemanticIr = (): JavaScriptSemanticIr => ({

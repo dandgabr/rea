@@ -2,18 +2,13 @@ import { createHash } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import { lstat, open, readdir, readlink } from "node:fs/promises";
 import { dirname, join, relative, resolve } from "node:path";
+import type { ProcessScenario } from "../../domain/process/processScenario.js";
+import type { FilesystemCoverage } from "../../domain/process/processCaptureCoverage.js";
+import type { Stats } from "node:fs";
 import type {
   FileState,
-  ProcessScenario,
+  ProcessFilesystemSnapshot,
 } from "../../domain/process/processCapture.js";
-import type { Stats } from "node:fs";
-
-export interface SnapshotResult {
-  readonly files: readonly FileState[];
-  readonly truncated: boolean;
-  /** Root aliases whose path enumeration was exhausted, regardless of hash coverage. */
-  readonly completeRoots: readonly string[];
-}
 
 const hasSameIdentity = (
   before: Stats,
@@ -92,11 +87,15 @@ export const hashFile = async (
 export const snapshotRoots = async (
   scenario: ProcessScenario,
   signal?: AbortSignal,
-): Promise<SnapshotResult> => {
+): Promise<ProcessFilesystemSnapshot> => {
   const entries: FileState[] = [];
   const completeRoots: string[] = [];
   let remainingBytes = scenario.limits.file_bytes;
   let truncated = false;
+  const enumerationReasons = new Set<
+    FilesystemCoverage["enumeration_reasons"][number]
+  >();
+  const hashOmissions: FilesystemCoverage["hash_omissions"] = [];
   const visit = async (
     root: string,
     rootAlias: string,
@@ -109,6 +108,10 @@ export const snapshotRoots = async (
       depth > scenario.limits.filesystem_depth
     ) {
       truncated = true;
+      if (entries.length >= scenario.limits.files)
+        enumerationReasons.add("files_limit");
+      if (depth > scenario.limits.filesystem_depth)
+        enumerationReasons.add("depth_limit");
       return false;
     }
     const stats = await lstatIfPresent(path);
@@ -119,6 +122,7 @@ export const snapshotRoots = async (
       const afterRead = await lstat(path);
       if (!hasSameIdentity(stats, afterRead, "symlink")) {
         truncated = true;
+        enumerationReasons.add("identity_changed");
         return false;
       }
       entries.push({
@@ -137,7 +141,18 @@ export const snapshotRoots = async (
           ? await hashFile(path, stats, remainingBytes, signal)
           : null;
       remainingBytes -= sha256 === null ? 0 : stats.size;
-      if (sha256 === null) truncated = true;
+      if (sha256 === null) {
+        truncated = true;
+        hashOmissions.push({
+          path: `${rootAlias}:${relativePath}`,
+          size_bytes: stats.size,
+          remaining_budget_bytes: remainingBytes,
+          reason:
+            remainingBytes < stats.size
+              ? "file_bytes_budget"
+              : "file_changed_or_short_read",
+        });
+      }
       entries.push({
         path: `${rootAlias}:${relativePath}`,
         type: "file",
@@ -162,6 +177,7 @@ export const snapshotRoots = async (
     const afterRead = await lstat(path);
     if (!hasSameIdentity(stats, afterRead, "directory")) {
       truncated = true;
+      enumerationReasons.add("identity_changed");
       return false;
     }
     let complete = true;
@@ -179,5 +195,19 @@ export const snapshotRoots = async (
     }
     if (await visit(root, alias, root, 0)) completeRoots.push(alias);
   }
-  return { files: entries, truncated, completeRoots };
+  return {
+    files: entries,
+    truncated,
+    completeRoots,
+    coverage: {
+      files_limit: scenario.limits.files,
+      depth_limit: scenario.limits.filesystem_depth,
+      enumeration_truncated:
+        completeRoots.length !== scenario.filesystem_observation_paths.length,
+      enumeration_reasons: [...enumerationReasons],
+      hash_budget_bytes: scenario.limits.file_bytes,
+      hashed_bytes: scenario.limits.file_bytes - remainingBytes,
+      hash_omissions: hashOmissions,
+    },
+  };
 };

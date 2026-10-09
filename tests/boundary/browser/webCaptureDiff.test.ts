@@ -2,11 +2,11 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { CdpBrowserProvider } from "../../../src/browser/CdpBrowserProvider.js";
 import { inspectWebPageInputSchema } from "../../../src/domain/browserObservation.js";
+import { compareWebCaptures } from "../../../src/domain/webCaptureDiff.js";
 import {
-  compareWebCaptures,
   compareWebCapturesInputSchema,
   webCaptureDiffSchema,
-} from "../../../src/domain/webCaptureDiff.js";
+} from "../../../src/domain/webCaptureDiffSchemas.js";
 import {
   startFakeCdpBrowser,
   type FakeCdpBrowser,
@@ -91,17 +91,14 @@ describe("web capture diff", () => {
         scripts: { ...result.dimensions.scripts, total_changes: 2 },
       },
     });
-    const {
-      accessibility: _accessibility,
-      storage: _storage,
-      ...legacy
-    } = result.dimensions;
-    const parsedLegacy = webCaptureDiffSchema.parse({
+    const { accessibility: _accessibility, ...missingAccessibility } =
+      result.dimensions;
+    expectInvalidDiff({
       ...result,
-      dimensions: legacy,
+      dimensions: missingAccessibility,
     });
-    expect(parsedLegacy.dimensions.accessibility.status).toBe("unknown");
-    expect(parsedLegacy.dimensions.storage.status).toBe("unknown");
+    const { storage: _storage, ...missingStorage } = result.dimensions;
+    expectInvalidDiff({ ...result, dimensions: missingStorage });
   });
 
   it("does not claim unchanged when a relevant section is incomplete", async () => {

@@ -8,22 +8,32 @@ import {
 
 import { ProcessCaptureError } from "../../../src/process/capture/ProcessCaptureError.js";
 import { resolveProcessResult } from "../../../src/process/capture/ProcessCaptureLifecycle.js";
-import {
-  toolContract,
-  type ToolContract,
-} from "../../../src/contracts/toolContracts.js";
+import { toolContract } from "../../../src/contracts/toolContracts.js";
+import type { ToolContract } from "../../../src/contracts/toolContractTypes.js";
 import { err } from "../../../src/domain/result.js";
 import { HopperProcessError } from "../../../src/domain/hopperErrors.js";
-import type { IncompleteProcessCaptureObservations } from "../../../src/domain/process/processCapture.js";
 import { processScenarioSchema } from "../../../src/domain/process/processScenario.js";
 import { ToolResultDelivery } from "../../../src/server/toolResult.js";
 import { createEvidence, parseEvidence } from "../../../src/domain/evidence.js";
-import { emptyProcessCapture } from "../../../src/domain/process/processCapture.fixture.js";
+import {
+  accountFullyObservedProcessCapture,
+  emptyProcessCapture,
+} from "../../../src/domain/process/processCapture.fixture.js";
 import type { JsonValue } from "../../../src/domain/jsonValue.js";
-import { evidenceResultOf } from "../../../src/contracts/toolOutputSchemas.js";
+import { evidenceResultOf } from "../../../src/contracts/toolOutputSchemaPrimitives.js";
 import { toolRegistrationOptions } from "../../../src/server/toolRegistrationOptions.js";
 
+import type { IncompleteProcessCaptureObservations } from "../../../src/domain/process/processCapture.js";
 const delivery = new ToolResultDelivery(STDIO_DEFAULT_MAX_BUFFER_SIZE);
+const emptyFilesystemCoverage =
+  emptyProcessCapture().truncation_details.filesystem_before;
+
+const captureWithObservedOutput = () =>
+  accountFullyObservedProcessCapture({
+    ...emptyProcessCapture(),
+    frames: [{ sequence: 0, at_ms: 0, data: "observed output" }],
+    event_journal: [],
+  });
 
 const contract: ToolContract = {
   name: "provider_neutral_fixture",
@@ -58,11 +68,7 @@ describe("completed partial process capture MCP projection", () => {
       terminal_renderer: { state: "cleaned" as const, reason: null },
       temporary_root: { state: "cleaned" as const, reason: null },
     };
-    const capture = {
-      ...emptyProcessCapture(),
-      frames: [{ sequence: 0, at_ms: 0, data: "observed output" }],
-      event_journal: [],
-    };
+    const capture = captureWithObservedOutput();
     let failure: ProcessCaptureError | undefined;
     try {
       resolveProcessResult(
@@ -110,11 +116,7 @@ describe("completed partial process capture MCP projection", () => {
       terminal_renderer: { state: "cleaned" as const, reason: null },
       temporary_root: { state: "cleaned" as const, reason: null },
     };
-    const capture = {
-      ...emptyProcessCapture(),
-      frames: [{ sequence: 0, at_ms: 0, data: "observed output" }],
-      event_journal: [],
-    };
+    const capture = captureWithObservedOutput();
 
     let failure: ProcessCaptureError | undefined;
     try {
@@ -230,7 +232,15 @@ describe("incomplete partial process observations MCP projection", () => {
         ],
       },
       filesystem_snapshots: {
-        before: { state: "available", value: { files: [], truncated: false } },
+        before: {
+          state: "available",
+          value: {
+            files: [],
+            truncated: false,
+            completeRoots: [],
+            coverage: emptyFilesystemCoverage,
+          },
+        },
         after: {
           state: "unavailable",
           reason: "fixture final snapshot unavailable",

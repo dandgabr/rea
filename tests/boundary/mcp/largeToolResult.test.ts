@@ -25,6 +25,7 @@ import { registerOfficialTools } from "../../../src/server/registerOfficialTools
 import { ToolResultDelivery } from "../../../src/server/toolResult.js";
 import { EvidenceMcpServer } from "../../../src/server/EvidenceMcpServer.js";
 import { encodeToolResult } from "../../../src/server/toolResultEncoding.js";
+import { parseMcpToolError } from "../../fixtures/mcpToolError.js";
 
 const delivery = new ToolResultDelivery(STDIO_DEFAULT_MAX_BUFFER_SIZE);
 
@@ -48,20 +49,20 @@ const callPseudoCode = async (
     recordEvidence,
     delivery,
   );
-  registerOfficialTools(
-    server,
-    {
-      execute: () =>
-        Promise.resolve(
-          ok(createAnalysisExecution(payload, provider, { rawResult })),
-        ),
-    },
-    {
-      logger: silentLogger,
-      activeTarget: undefined,
-      recordEvidence,
-    },
-  );
+  registerOfficialTools(server, {
+    logger: silentLogger,
+    activeTarget: undefined,
+    recordEvidence,
+    withAdmittedAnalysis: async (_operationName, _signal, operation) =>
+      ok(
+        await operation({
+          execute: () =>
+            Promise.resolve(
+              ok(createAnalysisExecution(payload, provider, { rawResult })),
+            ),
+        }),
+      ),
+  });
   const client = new Client({ name: "complete-evidence-client", version: "1" });
   const [clientTransport, serverTransport] =
     InMemoryTransport.createLinkedPair();
@@ -188,7 +189,7 @@ describe("large complete Evidence MCP delivery", () => {
           }),
         }),
       })
-      .parse(result.structuredContent).error.details.reported_limits;
+      .parse(parseMcpToolError(result)).error.details.reported_limits;
     const retained = parseEvidence(
       records.get(limits.evidence_reference.evidence_id),
     );
@@ -217,13 +218,21 @@ describe("large complete Evidence MCP delivery", () => {
     const limits = z
       .object({
         error: z.object({
+          message: z.string(),
           details: z.object({
             reported_limits: z.record(z.string(), z.unknown()),
           }),
         }),
       })
-      .parse(detached.structuredContent).error.details.reported_limits;
-    expect(limits.evidence_id).toBe(evidence.evidence_id);
-    expect(limits).not.toHaveProperty("evidence_reference");
+      .parse(detached.structuredContent).error;
+    expect(limits.message).toContain("larger MCP response budget");
+    expect(limits.message).not.toContain("Export retained evidence");
+    expect(limits.details.reported_limits).not.toHaveProperty(
+      "evidence_reference",
+    );
+    expect(limits.details.reported_limits).toHaveProperty(
+      "evidence_id",
+      evidence.evidence_id,
+    );
   });
 });

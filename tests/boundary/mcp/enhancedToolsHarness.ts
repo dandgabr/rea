@@ -1,6 +1,10 @@
+import { parseMcpToolError } from "../../fixtures/mcpToolError.js";
 import { parseEvidence } from "../../../src/domain/evidence.js";
 import type { CallToolResult } from "@modelcontextprotocol/server";
-import { type JsonValue } from "../../../src/domain/jsonValue.js";
+import {
+  jsonValueSchema,
+  type JsonValue,
+} from "../../../src/domain/jsonValue.js";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import type { AnalysisOperationPort } from "../../../src/application/AnalysisProvider.js";
 import { createServer } from "../../../src/server/createServer.js";
@@ -20,7 +24,7 @@ export const inventory = (values: Readonly<Record<string, string>>) =>
 export const resources: Array<{ close(): Promise<void> }> = [];
 
 export const connect = async (analysis: AnalysisOperationPort) => {
-  const server = createServer(analysis);
+  const server = createServer({ kind: "fixed", analysis });
   const client = new Client({ name: "enhanced-test", version: "1.0.0" });
   const [clientTransport, serverTransport] =
     InMemoryTransport.createLinkedPair();
@@ -38,4 +42,6 @@ export const closeEnhancedToolResources = async (): Promise<void> => {
 };
 
 export const jsonResult = (result: CallToolResult): JsonValue =>
-  parseEvidence(result.structuredContent).normalized_result;
+  result.isError === true
+    ? jsonValueSchema.parse(parseMcpToolError(result))
+    : parseEvidence(result.structuredContent).normalized_result;

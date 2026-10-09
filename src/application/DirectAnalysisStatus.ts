@@ -1,10 +1,12 @@
 import { projectAnalysisError } from "../domain/analysisErrorProjection.js";
 import { jsonObjectSchema, type JsonValue } from "../domain/jsonValue.js";
 import { createServerIdentity } from "../serverIdentity.js";
-import { silentLogger, type Logger } from "../logger.js";
+import { silentLogger } from "../logger.js";
+import type { Logger } from "pino";
 import type { DirectAnalysisDependencies } from "./DirectAnalysisDependencies.js";
 
-const runSessionStatus = async (
+/** Read target-free provider status and operation availability. */
+export const runSessionStatus = async (
   dependencies: Pick<
     DirectAnalysisDependencies,
     "createBinarySession" | "readConfiguration"
@@ -25,21 +27,3 @@ const runSessionStatus = async (
     await session.close();
   }
 };
-
-/** List binary-session provider candidates and auxiliary operation availability. */
-export const runProviderStatus = (
-  dependencies: Pick<
-    DirectAnalysisDependencies,
-    "createBinarySession" | "readConfiguration"
-  >,
-  logger: Logger = silentLogger,
-) => runSessionStatus(dependencies, logger);
-
-/** List binary-session operation descriptors; this is not the full MCP catalog. */
-export const runCapabilityStatus = (
-  dependencies: Pick<
-    DirectAnalysisDependencies,
-    "createBinarySession" | "readConfiguration"
-  >,
-  logger: Logger = silentLogger,
-) => runSessionStatus(dependencies, logger);

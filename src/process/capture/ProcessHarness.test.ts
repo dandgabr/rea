@@ -1,32 +1,41 @@
 import { expect, it, vi } from "vitest";
 import { processScenarioSchema } from "../../domain/process/processScenario.js";
 import { AnalysisCapabilityUnavailableError } from "../../domain/analysisErrorCore.js";
-import {
-  captureProcessScenario,
-  ProcessCaptureError,
-} from "./ProcessHarness.js";
+import { captureProcessScenario } from "./ProcessHarness.js";
 import { settleProcessCaptureJournal } from "./ProcessCaptureLifecycle.js";
-import {
-  parseProcessCapture,
-  partialProcessCaptureObservationSchema,
-  processCaptureSchema,
-} from "../../domain/process/processCapture.js";
-import { EMPTY_PROCESS_CAPTURE_EXAMPLE } from "../../domain/process/processCapture.fixture.js";
+import { parseProcessCapture } from "../../domain/process/processCaptureParsing.js";
+import { EMPTY_PROCESS_CAPTURE_EXAMPLE } from "../../domain/process/processCaptureExample.js";
 import { projectAnalysisError } from "../../domain/analysisErrorProjection.js";
-import { emptyProcessCapture } from "../../domain/process/processCapture.fixture.js";
+import {
+  accountFullyObservedProcessCapture,
+  emptyProcessCapture,
+} from "../../domain/process/processCapture.fixture.js";
 import { analysisErrorProjectionSchema } from "../../contracts/errorSchemas.js";
 import {
+  ProcessCaptureError,
   normalizeCaptureFailure,
   processCaptureCancelled,
 } from "./ProcessCaptureError.js";
 import {
   releaseProcessResources,
+  createProcessCaptureObservationBuffer,
   prepareProcessCapture,
   resolveProcessResult,
   type ProcessCaptureCleanupHost,
 } from "./ProcessCaptureLifecycle.js";
 import { DarwinProcessOwnershipInspectionError } from "../DarwinProcessRunTokenReader.js";
 
+import {
+  partialProcessCaptureObservationSchema,
+  processCaptureSchema,
+} from "../../domain/process/processCapture.js";
+const emptyFilesystemCoverage =
+  emptyProcessCapture().truncation_details.filesystem_before;
+const incompleteFilesystemCoverage = {
+  ...emptyFilesystemCoverage,
+  enumeration_truncated: true,
+  enumeration_reasons: ["identity_changed"],
+} satisfies typeof emptyFilesystemCoverage;
 it("retains cancellation and cleanup facts when ownership baseline inspection aborts", async () => {
   const controller = new AbortController();
   const scenario = processScenarioSchema.parse({
@@ -36,7 +45,12 @@ it("retains cancellation and cleanup facts when ownership baseline inspection ab
     prepareProcessCapture(
       scenario,
       controller.signal,
-      async () => ({ files: [], truncated: false, completeRoots: [] }),
+      async () => ({
+        files: [],
+        truncated: false,
+        completeRoots: [],
+        coverage: emptyFilesystemCoverage,
+      }),
       {
         createTemporaryRoot: async () => "/fixture/allocated-root",
         captureOwnershipBaseline: async () => {
@@ -58,7 +72,12 @@ it("retains cancellation and cleanup facts when ownership baseline inspection ab
         filesystem_snapshots: {
           before: {
             state: "available",
-            value: { files: [], truncated: false },
+            value: {
+              files: [],
+              truncated: false,
+              completeRoots: [],
+              coverage: emptyFilesystemCoverage,
+            },
           },
         },
       },
@@ -70,12 +89,18 @@ it("keeps prelaunch snapshot evidence and the ownership failure when root cleanu
   const ownershipFailure = new Error("process identity baseline denied");
   const scenario = processScenarioSchema.parse({
     executable: process.execPath,
+    filesystem_observation_paths: ["/fixture/root"],
   });
   try {
     await prepareProcessCapture(
       scenario,
       undefined,
-      async () => ({ files: [], truncated: true, completeRoots: [] }),
+      async () => ({
+        files: [],
+        truncated: true,
+        completeRoots: [],
+        coverage: incompleteFilesystemCoverage,
+      }),
       {
         createTemporaryRoot: async () => "/fixture/allocated-root",
         captureOwnershipBaseline: async () => {
@@ -104,7 +129,12 @@ it("keeps prelaunch snapshot evidence and the ownership failure when root cleanu
             filesystem_snapshots: {
               before: {
                 state: "available",
-                value: { files: [], truncated: true },
+                value: {
+                  files: [],
+                  truncated: true,
+                  completeRoots: [],
+                  coverage: incompleteFilesystemCoverage,
+                },
               },
             },
           },
@@ -112,6 +142,76 @@ it("keeps prelaunch snapshot evidence and the ownership failure when root cleanu
       },
     });
   }
+});
+
+it("projects complete after-snapshot metadata when a later capture stage fails", () => {
+  const scenario = processScenarioSchema.parse({
+    executable: process.execPath,
+    filesystem_observation_paths: ["/fixture/root"],
+  });
+  const observations = createProcessCaptureObservationBuffer({
+    frames: [],
+    interactions: [],
+    samples: [],
+    eventJournal: [],
+    before: {
+      files: [],
+      truncated: false,
+      completeRoots: [],
+      coverage: emptyFilesystemCoverage,
+    },
+  });
+  observations.filesystem_snapshots.after = {
+    state: "available",
+    value: {
+      files: [],
+      truncated: true,
+      completeRoots: [],
+      coverage: incompleteFilesystemCoverage,
+    },
+  };
+  const cleanup = {
+    owned_process_group: { state: "cleaned" as const, reason: null },
+    terminal_renderer: { state: "cleaned" as const, reason: null },
+    temporary_root: { state: "cleaned" as const, reason: null },
+  };
+
+  let error: ProcessCaptureError | undefined;
+  try {
+    resolveProcessResult(
+      undefined,
+      new Error("capture manifest failed after final snapshot"),
+      cleanup,
+      observations,
+      { scenario },
+    );
+  } catch (cause: unknown) {
+    if (!(cause instanceof ProcessCaptureError)) throw cause;
+    error = cause;
+  }
+  if (error === undefined) throw new Error("expected capture failure");
+
+  expect(
+    analysisErrorProjectionSchema.parse(projectAnalysisError(error)),
+  ).toMatchObject({
+    details: {
+      partial_observation: {
+        observations: {
+          filesystem_snapshots: {
+            after: {
+              state: "available",
+              value: {
+                files: [],
+                truncated: true,
+                completeRoots: [],
+                coverage: incompleteFilesystemCoverage,
+              },
+            },
+          },
+        },
+      },
+    },
+  });
 });
 
 it("rejects legacy replay output instead of silently discarding it", () => {
@@ -232,8 +332,10 @@ it.each(["termination", "verification"] as const)(
 
     const executionFailure = new Error("capture snapshot failed");
     const capture = parseProcessCapture({
-      ...emptyProcessCapture(),
-      frames: [{ sequence: 0, at_ms: 0, data: "collected before failure" }],
+      ...accountFullyObservedProcessCapture({
+        ...emptyProcessCapture(),
+        frames: [{ sequence: 0, at_ms: 0, data: "collected before failure" }],
+      }),
       event_journal: [],
     });
     try {
@@ -443,18 +545,20 @@ it("passes sampled detached groups into cleanup even when their token is unknown
 it("retains observations and both causes when process cleanup is unverifiable", () => {
   const verified = emptyProcessCapture();
   const capture = parseProcessCapture({
-    ...verified,
-    frames: [{ sequence: 0, at_ms: 0, data: "observed output" }],
-    process_samples: [
-      {
-        at_ms: 1,
-        pid: 654,
-        parent_pid: 321,
-        command: "sanitized-detached-child",
-        process_group_id: 654,
-        session_id: 654,
-      },
-    ],
+    ...accountFullyObservedProcessCapture({
+      ...verified,
+      frames: [{ sequence: 0, at_ms: 0, data: "observed output" }],
+      process_samples: [
+        {
+          at_ms: 1,
+          pid: 654,
+          parent_pid: 321,
+          command: "sanitized-detached-child",
+          process_group_id: 654,
+          session_id: 654,
+        },
+      ],
+    }),
     event_journal: [],
   });
   const executionFailure = new Error("capture ended after a fixture error");
@@ -563,8 +667,10 @@ it("projects execution and cleanup failures when capture never completed", () =>
 
 it("retains completed observations when finalization fails after clean cleanup", () => {
   const capture = parseProcessCapture({
-    ...emptyProcessCapture(),
-    frames: [{ sequence: 0, at_ms: 0, data: "observed before finalization" }],
+    ...accountFullyObservedProcessCapture({
+      ...emptyProcessCapture(),
+      frames: [{ sequence: 0, at_ms: 0, data: "observed before finalization" }],
+    }),
     event_journal: [],
   });
   const executionFailure = new Error("final filesystem snapshot failed");
@@ -616,8 +722,10 @@ it("retains completed observations when finalization fails after clean cleanup",
 
 it("preserves cancellation while projecting observations and successful cleanup", () => {
   const capture = parseProcessCapture({
-    ...emptyProcessCapture(),
-    frames: [{ sequence: 0, at_ms: 0, data: "observed before cancellation" }],
+    ...accountFullyObservedProcessCapture({
+      ...emptyProcessCapture(),
+      frames: [{ sequence: 0, at_ms: 0, data: "observed before cancellation" }],
+    }),
     event_journal: [],
   });
   const cleanup = {

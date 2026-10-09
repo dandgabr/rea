@@ -1,3 +1,4 @@
+import { parseMcpToolError } from "../../fixtures/mcpToolError.js";
 import { ok as resultOk } from "../../../src/domain/result.js";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import type { CallToolResult } from "@modelcontextprotocol/server";
@@ -23,7 +24,7 @@ afterEach(async () => {
 });
 
 const connect = async (analysis: AnalysisOperationPort) => {
-  const server = createServer(analysis);
+  const server = createServer({ kind: "fixed", analysis });
   const client = new Client({
     name: "integration-test",
     version: "1.0.0",
@@ -37,6 +38,7 @@ const connect = async (analysis: AnalysisOperationPort) => {
 };
 
 const structured = (result: CallToolResult): Record<string, unknown> => {
+  if (result.isError === true) return parseMcpToolError(result);
   if (
     typeof result.structuredContent !== "object" ||
     result.structuredContent === null
@@ -105,10 +107,7 @@ it("advertises the complete currently available inventory with a session", async
         close: () => Promise.resolve(resultOk(null)),
       }) satisfies AnalysisClient,
   );
-  const server = createServer(
-    { execute: () => Promise.resolve(ok(null)) },
-    session,
-  );
+  const server = createServer({ kind: "session", session });
   const client = new Client({
     name: "integration-test",
     version: "1.0.0",

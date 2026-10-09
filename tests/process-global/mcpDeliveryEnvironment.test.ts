@@ -9,6 +9,7 @@ import { ok } from "../../src/domain/result.js";
 import { run } from "../../src/main.js";
 import { createServer } from "../../src/server/createServer.js";
 import type { EvidenceMcpServer } from "../../src/server/EvidenceMcpServer.js";
+import { parseMcpToolError } from "../fixtures/mcpToolError.js";
 
 const resources: Array<{ close(): Promise<void> }> = [];
 afterEach(async () => {
@@ -50,19 +51,26 @@ it("keeps independent server budgets for successful results and oversized errors
   };
 
   vi.stubEnv("REA_MCP_MAX_RESPONSE_BYTES", String(largeBudget));
-  const small = createServer(analysis, undefined, {
-    environment: smallEnvironment,
-  });
+  const small = createServer(
+    { kind: "fixed", analysis },
+    {
+      environment: smallEnvironment,
+    },
+  );
   vi.stubEnv("REA_MCP_MAX_RESPONSE_BYTES", String(smallBudget));
-  const large = createServer(analysis, undefined, {
-    environment: largeEnvironment,
-  });
+  const large = createServer(
+    { kind: "fixed", analysis },
+    {
+      environment: largeEnvironment,
+    },
+  );
   smallEnvironment.REA_MCP_MAX_RESPONSE_BYTES = "invalid-after-selection";
   largeEnvironment.REA_MCP_MAX_RESPONSE_BYTES = String(smallBudget);
   vi.stubEnv("REA_MCP_MAX_RESPONSE_BYTES", "invalid-ambient-after-selection");
 
+  // Error text alone exceeds the small budget and fits the large one.
   const diagnostic = "observed failure ".repeat(
-    Math.ceil((smallBudget / 2 + 65536) / 17),
+    Math.ceil((smallBudget + 65536) / 17),
   );
   for (const server of [small, large])
     server.registerTool("selected_failure", { inputSchema: {} }, async () =>
@@ -89,8 +97,10 @@ it("keeps independent server budgets for successful results and oversized errors
       }),
     ),
   );
+  if (smallResult === undefined || largeResult === undefined)
+    throw new Error("Missing result from selected-budget server");
   expect(smallResult?.isError).toBe(true);
-  expect(smallResult?.structuredContent).toMatchObject({
+  expect(parseMcpToolError(smallResult)).toMatchObject({
     error: {
       code: "resource_constraint",
       details: {
@@ -110,7 +120,9 @@ it("keeps independent server budgets for successful results and oversized errors
       client.callTool({ name: "selected_failure", arguments: {} }),
     ),
   );
-  expect(smallFailure?.structuredContent).toMatchObject({
+  if (smallFailure === undefined || largeFailure === undefined)
+    throw new Error("Missing failure from selected-budget server");
+  expect(parseMcpToolError(smallFailure)).toMatchObject({
     error: {
       code: "resource_constraint",
       details: {
@@ -122,7 +134,7 @@ it("keeps independent server budgets for successful results and oversized errors
       },
     },
   });
-  expect(largeFailure?.structuredContent).toMatchObject({
+  expect(parseMcpToolError(largeFailure)).toMatchObject({
     error: {
       code: "invalid_request",
       details: { issues: [{ message: diagnostic }] },
@@ -155,12 +167,12 @@ it("snapshots the runtime-selected environment before optional loading and reuse
       selected.REA_BROWSER_EXECUTABLE = "/mutated/browser";
       return {};
     },
-    createServer: (analysis, session, options) => {
+    createServer: (source, options) => {
       expect(options?.environment?.REA_BROWSER_EXECUTABLE).toBe(
         "/selected/browser",
       );
       expect(Object.isFrozen(options?.environment)).toBe(true);
-      const server = createServer(analysis, session, options);
+      const server = createServer(source, options);
       observed.push(server);
       return server;
     },

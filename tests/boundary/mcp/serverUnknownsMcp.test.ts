@@ -1,3 +1,4 @@
+import { parseMcpToolError } from "../../fixtures/mcpToolError.js";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import type { CallToolResult } from "@modelcontextprotocol/server";
 import { afterEach, expect, it } from "vitest";
@@ -5,7 +6,6 @@ import { afterEach, expect, it } from "vitest";
 import { createTestBinarySession } from "../../fixtures/binarySession.js";
 import type {
   AnalysisClient,
-  AnalysisOperationPort,
   AnalysisProvider,
   CapabilityDescriptor,
 } from "../../../src/application/AnalysisProvider.js";
@@ -15,11 +15,11 @@ import { observed as ok } from "../../fixtures/analysisExecution.js";
 import { createServer } from "../../../src/server/createServer.js";
 import { createEvidence, parseEvidence } from "../../../src/domain/evidence.js";
 import { parseEvidenceBundle } from "../../../src/domain/evidenceBundle.js";
-import { processCaptureSchema } from "../../../src/domain/process/processCapture.js";
-import { EMPTY_PROCESS_CAPTURE_EXAMPLE } from "../../../src/contracts/process/processCaptureExample.js";
+import { EMPTY_PROCESS_CAPTURE_EXAMPLE } from "../../../src/domain/process/processCaptureExample.js";
 import { jsonValueSchema } from "../../../src/domain/jsonValue.js";
-import { PROCESS_PROVIDER } from "../../../src/server/sessionToolPolicies.js";
+import { PROCESS_PROVIDER } from "../../../src/domain/process/processEvidenceProvider.js";
 
+import { processCaptureSchema } from "../../../src/domain/process/processCapture.js";
 const resources: Array<{ close(): Promise<void> }> = [];
 
 afterEach(async () => {
@@ -61,13 +61,24 @@ const providerWithCapabilities = (
     identity: () => identity,
     capabilities: () => capabilities,
     createClient: () => ({
-      execute: () => Promise.resolve(ok(null)),
+      execute: (operation) => {
+        return Promise.resolve(
+          err(
+            new AnalysisCapabilityUnavailableError(
+              "fixture",
+              operation,
+              "Decompiler is not installed.",
+            ),
+          ),
+        );
+      },
       close: () => Promise.resolve(resultOk(null)),
     }),
   };
 };
 
 const structured = (result: CallToolResult): Record<string, unknown> => {
+  if (result.isError === true) return parseMcpToolError(result);
   if (
     typeof result.structuredContent !== "object" ||
     result.structuredContent === null
@@ -77,25 +88,10 @@ const structured = (result: CallToolResult): Record<string, unknown> => {
 };
 
 it("does not record capability unavailability without supporting Evidence", async () => {
-  const received: Array<Readonly<Record<string, unknown>>> = [];
-  const analysis: AnalysisOperationPort = {
-    execute: (name, arguments_) => {
-      received.push(arguments_);
-      return Promise.resolve(
-        err(
-          new AnalysisCapabilityUnavailableError(
-            "partial",
-            name,
-            "Decompiler is not installed.",
-          ),
-        ),
-      );
-    },
-  };
   const session = createTestBinarySession(
     providerWithCapabilities(["procedure_pseudo_code"]),
   );
-  const server = createServer(analysis, session);
+  const server = createServer({ kind: "session", session });
   const client = new Client({ name: "unavailable-unknown", version: "1" });
   const [clientTransport, serverTransport] =
     InMemoryTransport.createLinkedPair();
@@ -116,10 +112,9 @@ it("does not record capability unavailability without supporting Evidence", asyn
   expect(unavailable.isError).toBe(true);
   expect(structured(unavailable)).toMatchObject({
     error: {
-      category: "unsupported_provider",
+      category: "unavailable",
     },
   });
-  expect(received[0]).toMatchObject({ procedure: "main" });
   expect(
     structured(await client.callTool({ name: "list_unknowns", arguments: {} })),
   ).toMatchObject({
@@ -164,10 +159,7 @@ it("records capture disagreement as a contradicted unknown", async () => {
   const rightEvidence = captureEvidence(right);
   expect(session.recordEvidence(leftEvidence).ok).toBe(true);
   expect(session.recordEvidence(rightEvidence).ok).toBe(true);
-  const server = createServer(
-    { execute: () => Promise.resolve(ok(null)) },
-    session,
-  );
+  const server = createServer({ kind: "session", session });
   const client = new Client({ name: "comparison-unknown", version: "1" });
   const [clientTransport, serverTransport] =
     InMemoryTransport.createLinkedPair();

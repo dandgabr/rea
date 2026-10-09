@@ -1,29 +1,26 @@
 import { z } from "zod";
 
 import type { JsonValue } from "../jsonValue.js";
-import type { ProcessCapture } from "./processCapture.js";
+import type { ProcessCapture } from "./processCaptureParsing.js";
+import { processSourceTruncated } from "./processCaptureCoverage.js";
 import {
+  comparableProcessObservationPayload,
   processObservationLocationSchema,
   projectProcessObservation,
   type ProcessObservationLocation,
+  type ProcessObservationSource,
 } from "./processObservation.js";
 import {
   canonicalTraceJson,
-  comparableTracePayload,
   processTraceCardinalityBounds,
-  type ProcessTraceSource,
   type ProcessTraceSpecification,
 } from "./processTraceSpecification.js";
 
 const identifierSchema = z.string().regex(/^[A-Za-z][A-Za-z0-9._\x2d]{0,63}$/u);
 
-export type ProcessTraceLocation = ProcessObservationLocation;
-
-const locationSchema = processObservationLocationSchema;
-
 const matchedEventSchema = z.strictObject({
   event_id: identifierSchema,
-  location: locationSchema,
+  location: processObservationLocationSchema,
 });
 
 const sideResultShape = {
@@ -57,7 +54,7 @@ const diagnosticSchema = z.strictObject({
   side: z.enum(["left", "right"]),
   message: z.string(),
   event_ids: z.array(identifierSchema),
-  locations: z.array(locationSchema),
+  locations: z.array(processObservationLocationSchema),
 });
 
 /** Structured verdict for one declared process trace language. */
@@ -72,13 +69,13 @@ export type ProcessTraceComparisonResult = z.infer<
 >;
 
 type TraceRecord = {
-  readonly source: ProcessTraceSource;
+  readonly source: ProcessObservationSource;
   readonly payload: JsonValue;
-  readonly location: ProcessTraceLocation;
+  readonly location: ProcessObservationLocation;
 };
 
 const scopesFor = (
-  sources: ReadonlySet<ProcessTraceSource>,
+  sources: ReadonlySet<ProcessObservationSource>,
 ): ReadonlySet<string> =>
   new Set(
     [...sources].map((source) => {
@@ -108,7 +105,7 @@ type FailureInput = {
   readonly kind: z.infer<typeof diagnosticSchema>["kind"];
   readonly message: string;
   readonly eventIds: readonly string[];
-  readonly locations: readonly ProcessTraceLocation[];
+  readonly locations: readonly ProcessObservationLocation[];
   readonly rawTrace: z.infer<typeof matchedEventSchema>[];
 };
 
@@ -154,12 +151,12 @@ const evaluateFiniteTrace = (
 
 type MatchedTrace = {
   readonly rawTrace: z.infer<typeof matchedEventSchema>[];
-  readonly locationsById: ReadonlyMap<string, ProcessTraceLocation[]>;
+  readonly locationsById: ReadonlyMap<string, ProcessObservationLocation[]>;
 };
 
 const collectRecords = (
   capture: ProcessCapture,
-  sources: ReadonlySet<ProcessTraceSource>,
+  sources: ReadonlySet<ProcessObservationSource>,
 ): readonly TraceRecord[] => {
   const records: TraceRecord[] = [];
   for (const location of capture.event_journal) {
@@ -179,9 +176,9 @@ const matchRecords = (
   specification: ProcessTraceSpecification,
 ): MatchedTrace | EvaluatedSide => {
   const rawTrace: z.infer<typeof matchedEventSchema>[] = [];
-  const locationsById = new Map<string, ProcessTraceLocation[]>();
+  const locationsById = new Map<string, ProcessObservationLocation[]>();
   const ignoredFieldsBySource = new Map<
-    ProcessTraceSource,
+    ProcessObservationSource,
     readonly string[]
   >();
   const eventsByKey = new Map<
@@ -193,7 +190,7 @@ const matchRecords = (
     ignoredFieldsBySource.set(event.source, ignoredFields);
     eventsByKey.set(
       `${event.source}\0${canonicalTraceJson(
-        comparableTracePayload(event.exact, ignoredFields),
+        comparableProcessObservationPayload(event.exact, ignoredFields),
       )}`,
       event,
     );
@@ -201,7 +198,7 @@ const matchRecords = (
   for (const record of records) {
     const match = eventsByKey.get(
       `${record.source}\0${canonicalTraceJson(
-        comparableTracePayload(
+        comparableProcessObservationPayload(
           record.payload,
           ignoredFieldsBySource.get(record.source),
         ),
@@ -414,7 +411,7 @@ export const evaluateProcessTraceSide = (
   const sources = new Set(specification.events.map(({ source }) => source));
   const relevantScopes = scopesFor(sources);
   const incomplete =
-    capture.truncated ||
+    [...sources].some((source) => processSourceTruncated(capture, source)) ||
     capture.residual_unknowns.some(({ scope }) => relevantScopes.has(scope));
   if (capture.event_journal.length === 0)
     return {

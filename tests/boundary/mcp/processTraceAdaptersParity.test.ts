@@ -8,11 +8,11 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createTestBinarySession } from "../../fixtures/binarySession.js";
 import type { AnalysisClient } from "../../../src/application/AnalysisProvider.js";
 import { compareProcessEvidenceFiles } from "../../../src/application/process/ProcessCli.js";
-import { PROCESS_PROVIDER } from "../../../src/application/process/ProcessEvidence.js";
-import { EMPTY_PROCESS_CAPTURE_EXAMPLE } from "../../../src/contracts/process/processCaptureExample.js";
+import { PROCESS_PROVIDER } from "../../../src/domain/process/processEvidenceProvider.js";
+import { EMPTY_PROCESS_CAPTURE_EXAMPLE } from "../../../src/domain/process/processCaptureExample.js";
 import { createEvidence, parseEvidence } from "../../../src/domain/evidence.js";
 import { jsonValueSchema } from "../../../src/domain/jsonValue.js";
-import type { ProcessTraceSpecification } from "../../../src/domain/process/processTraceComparison.js";
+import type { ProcessTraceSpecification } from "../../../src/domain/process/processTraceSpecification.js";
 import { createServer } from "../../../src/server/createServer.js";
 import { observed as ok } from "../../fixtures/analysisExecution.js";
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
@@ -126,10 +126,7 @@ describe("declared trace adapter parity", () => {
     );
     expect(session.recordEvidence(left).ok).toBe(true);
     expect(session.recordEvidence(right).ok).toBe(true);
-    const server = createServer(
-      { execute: () => Promise.resolve(ok(null)) },
-      session,
-    );
+    const server = createServer({ kind: "session", session });
     const client = new Client({ name: "trace-parity", version: "1" });
     const [clientTransport, serverTransport] =
       InMemoryTransport.createLinkedPair();

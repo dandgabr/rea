@@ -7,14 +7,9 @@ import { jsonValueSchema } from "../jsonValue.js";
 import {
   comparableProcessObservationPayload,
   processObservationSourceSchema,
-  type ProcessObservationSource,
 } from "./processObservation.js";
 
 const identifierSchema = z.string().regex(IDENTIFIER_PATTERN);
-
-/** Process observation families admitted by a declared trace specification. */
-export const processTraceSourceSchema = processObservationSourceSchema;
-export type ProcessTraceSource = ProcessObservationSource;
 
 const cardinalitySchema = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("required") }),
@@ -37,7 +32,7 @@ const cardinalitySchema = z.discriminatedUnion("kind", [
 
 const eventDeclarationSchema = z.strictObject({
   id: identifierSchema,
-  source: processTraceSourceSchema,
+  source: processObservationSourceSchema,
   exact: jsonValueSchema,
   ignore_fields: z
     .array(
@@ -117,12 +112,6 @@ export const canonicalTraceJson = (value: unknown): string => {
     throw new TypeError("Trace specification contains a non-JSON value");
   return serialized;
 };
-
-/** Remove only explicitly declared schedule metadata before exact matching. */
-export const comparableTracePayload = (
-  value: unknown,
-  ignoredFields: readonly string[] = [],
-): unknown => comparableProcessObservationPayload(value, ignoredFields);
 
 export const processTraceCardinalityBounds = (
   cardinality: ProcessTraceSpecification["events"][number]["cardinality"],
@@ -476,7 +465,7 @@ export const processTraceSpecificationSchema =
           path: ["events", index, "exact"],
         });
       const predicate = `${event.source}\0${canonicalTraceJson(
-        comparableTracePayload(event.exact, ignoredFields),
+        comparableProcessObservationPayload(event.exact, ignoredFields),
       )}`;
       if (predicates.has(predicate))
         context.addIssue({

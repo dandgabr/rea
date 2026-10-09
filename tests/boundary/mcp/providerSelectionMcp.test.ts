@@ -1,3 +1,4 @@
+import { parseMcpToolError } from "../../fixtures/mcpToolError.js";
 import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -42,7 +43,10 @@ describe("provider selection over MCP", () => {
         candidate("alpha", starts),
       ]),
     );
-    const server = createServer(session, session, { logger: silentLogger });
+    const server = createServer(
+      { kind: "session", session },
+      { logger: silentLogger },
+    );
     const mcp = new Client({ name: "provider-selection", version: "1.0.0" });
     const [clientTransport, serverTransport] =
       InMemoryTransport.createLinkedPair();
@@ -228,4 +232,6 @@ const capability = (provider: ProviderIdentity): CapabilityDescriptor => ({
 });
 
 const structured = (result: CallToolResult): Record<string, unknown> =>
-  z.record(z.string(), z.unknown()).parse(result.structuredContent);
+  result.isError === true
+    ? parseMcpToolError(result)
+    : z.record(z.string(), z.unknown()).parse(result.structuredContent);

@@ -3,7 +3,7 @@ import { z } from "incur";
 import type { DirectAnalysis } from "../composition/directAnalysis.js";
 import { importReferenceSource } from "../application/ReferenceSourceImport.js";
 import { projectReferenceSourceImportError } from "../application/ReferenceSourceImportTypes.js";
-import { parseConfig } from "../config.js";
+import { parseConfig } from "../config/parseConfig.js";
 import { projectAnalysisError } from "../domain/analysisErrorProjection.js";
 import { AnalysisInputError } from "../domain/analysisErrorCore.js";
 import { projectInputIssues } from "../domain/inputIssueProjection.js";
@@ -13,7 +13,7 @@ import { PRODUCT_IDENTITY } from "../identity.js";
 import { logCliCommand } from "../cliLogging.js";
 import { CLI_COMMANDS } from "../cliCommandNames.js";
 import { swiftSymbolsSchema } from "../contracts/native/nativeToolContracts.js";
-import type { Logger } from "../logger.js";
+import type { Logger } from "pino";
 import { isReferenceSourceImportCliFailure } from "./referenceSourceImportStatus.js";
 import type { CliInstance } from "./types.js";
 import { registerNativeCallCommands } from "./nativeCallCommands.js";
@@ -22,10 +22,7 @@ export const registerUtilityCommands = (
   cli: CliInstance,
   logger: Logger,
   environment: Readonly<Record<string, string | undefined>>,
-  analysis: Pick<
-    DirectAnalysis,
-    "runProviderAnalysis" | "runProviderStatus" | "runCapabilityStatus"
-  >,
+  analysis: Pick<DirectAnalysis, "runProviderAnalysis" | "runSessionStatus">,
 ): void => {
   const { runProviderAnalysis } = analysis;
   registerCapabilityCommands(cli, logger, analysis);
@@ -129,10 +126,7 @@ const invalidNativeUiScenarioInput = (
 const registerCapabilityCommands = (
   cli: CliInstance,
   logger: Logger,
-  {
-    runProviderStatus,
-    runCapabilityStatus,
-  }: Pick<DirectAnalysis, "runProviderStatus" | "runCapabilityStatus">,
+  { runSessionStatus }: Pick<DirectAnalysis, "runSessionStatus">,
 ): void => {
   for (const command of [
     CLI_COMMANDS.capabilities,
@@ -143,12 +137,7 @@ const registerCapabilityCommands = (
         command === "capabilities"
           ? "List provider capabilities and side effects"
           : "List configured analysis providers",
-      run: () =>
-        logCliCommand(logger, command, () =>
-          command === CLI_COMMANDS.providers
-            ? runProviderStatus(logger)
-            : runCapabilityStatus(logger),
-        ),
+      run: () => logCliCommand(logger, command, () => runSessionStatus(logger)),
     });
   }
 };

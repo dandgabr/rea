@@ -1,11 +1,9 @@
-import type {
-  BrowserScenario,
-  BrowserScenarioAction,
-} from "../domain/browserScenario.js";
+import type { BrowserScenario } from "../domain/browserScenario.js";
+import type { BrowserScenarioAction } from "../domain/browserScenarioValues.js";
 import type {
   BrowserScenarioEvent,
   BrowserStepArtifacts,
-} from "../domain/browserScenarioCapture.js";
+} from "../domain/browserScenarioCaptureValues.js";
 import type { SanitizedBrowserUrl } from "../domain/browserObservation.js";
 
 type SnapshotKind = BrowserScenario["capture"]["after_each_step"][number];
@@ -37,11 +35,8 @@ export interface BrowserScenarioSessionPort {
   redactError(error: unknown): string;
 }
 
-export interface BrowserScenarioSessionFactory {
-  open(
-    scenario: BrowserScenario,
-    options?: {
-      readonly signal?: AbortSignal;
-    },
-  ): Promise<BrowserScenarioSessionPort>;
-}
+/** Acquire one scenario session whose lifecycle the caller owns. */
+export type BrowserScenarioSessionOpener = (
+  scenario: BrowserScenario,
+  options: { readonly signal?: AbortSignal },
+) => Promise<BrowserScenarioSessionPort>;

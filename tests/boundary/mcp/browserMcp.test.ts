@@ -1,3 +1,4 @@
+import { parseMcpToolError } from "../../fixtures/mcpToolError.js";
 import { parseEvidence } from "../../../src/domain/evidence.js";
 import { ok as resultOk } from "../../../src/domain/result.js";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
@@ -5,7 +6,7 @@ import { afterEach, expect, it } from "vitest";
 
 import { createTestBinarySession } from "../../fixtures/binarySession.js";
 import { CdpBrowserProvider } from "../../../src/browser/CdpBrowserProvider.js";
-import { webPageInspectionSchema } from "../../../src/domain/browserObservation.js";
+import { webPageInspectionSchema } from "../../../src/domain/browserObservationSchemas.js";
 import { JAVASCRIPT_RUNTIME_RECONCILIATION_EXAMPLE } from "../../../src/contracts/javascript/javascriptRuntimeReconciliationExample.js";
 import { TOOL_CONTRACTS } from "../../../src/contracts/toolContracts.js";
 import { createServer } from "../../../src/server/createServer.js";
@@ -274,7 +275,7 @@ it("does not attach to a target outside the request's allowed origin scope", asy
     },
   });
   expect(result.isError).toBe(true);
-  expect(result.structuredContent).toMatchObject({
+  expect(parseMcpToolError(result)).toMatchObject({
     error: {
       details: {
         operation: "inspect_web_page",
@@ -290,13 +291,16 @@ const connectBrowser = async () => {
     execute: () => Promise.resolve(observed(null)),
     close: () => Promise.resolve(resultOk(null)),
   }));
-  const server = createServer(session, session, {
-    browserObservation: new CdpBrowserProvider(),
-    availabilityPolicy: () => ({
-      processCaptureEnabled: false,
-      investigationInputRoots: 0,
-    }),
-  });
+  const server = createServer(
+    { kind: "session", session },
+    {
+      browserObservation: new CdpBrowserProvider(),
+      availabilityPolicy: () => ({
+        processCaptureEnabled: false,
+        investigationInputRoots: 0,
+      }),
+    },
+  );
   const client = new Client({ name: "browser-mcp-test", version: "1" });
   const [clientTransport, serverTransport] =
     InMemoryTransport.createLinkedPair();

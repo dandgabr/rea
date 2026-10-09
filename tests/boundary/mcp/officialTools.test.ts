@@ -1,3 +1,4 @@
+import { parseMcpToolError } from "../../fixtures/mcpToolError.js";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { afterEach, describe, expect, it } from "vitest";
@@ -71,7 +72,7 @@ afterEach(async () => {
 });
 
 const connect = async (analysis: AnalysisOperationPort) => {
-  const server = createServer(analysis);
+  const server = createServer({ kind: "fixed", analysis });
   const client = new Client({ name: "contract-test", version: "1.0.0" });
   const [clientTransport, serverTransport] =
     InMemoryTransport.createLinkedPair();
@@ -140,7 +141,7 @@ describe("official Hopper proxy tools", () => {
     expect(result.isError).toBe(true);
     expect(result.content[0]).toEqual({
       type: "text",
-      text: JSON.stringify(result.structuredContent),
+      text: JSON.stringify(parseMcpToolError(result)),
     });
   });
 

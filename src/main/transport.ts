@@ -3,7 +3,7 @@ import type { AndroidAnalysisPort } from "../application/android/AndroidAnalysis
 import type { StdioServerHandle } from "@modelcontextprotocol/server/stdio";
 
 import type { BinarySession } from "../application/binary/BinarySession.js";
-import type { Logger } from "../logger.js";
+import type { Logger } from "pino";
 import { createServer } from "../server/createServer.js";
 import type { ToolResultDelivery } from "../server/toolResult.js";
 import type { RuntimeDependencies } from "./types.js";
@@ -14,15 +14,12 @@ import {
   MCP_CONNECTION_START_FAILED,
 } from "./messages.js";
 
-/** Optional adapters whose absence must not prevent the core MCP server. */
-export type OptionalProviders = OptionalProviderLoadResult;
-
 interface ServerContext {
   readonly environment: Readonly<NodeJS.ProcessEnv>;
   readonly delivery: ToolResultDelivery;
   readonly logger: Logger;
   readonly serverLogger: Logger;
-  readonly loadOptionalProviders: () => Promise<OptionalProviders>;
+  readonly loadOptionalProviders: () => Promise<OptionalProviderLoadResult>;
 }
 
 export const startMcpTransport = async (
@@ -38,7 +35,7 @@ export const startMcpTransport = async (
   | { readonly ok: false }
 > => {
   const { serverLogger } = serverContext;
-  let optionalProviders: OptionalProviders = {};
+  let optionalProviders: OptionalProviderLoadResult = {};
   try {
     optionalProviders = await serverContext.loadOptionalProviders();
   } catch (cause: unknown) {
@@ -74,14 +71,17 @@ export const startMcpTransport = async (
           serverContext.environment,
         );
         androidProviders.push(android);
-        return (dependencies.createServer ?? createServer)(session, session, {
-          logger: serverContext.logger,
-          providerEnvironment: dependencies.env,
-          environment: serverContext.environment,
-          delivery: serverContext.delivery,
-          ...optionalProviders,
-          androidAnalysis: android,
-        });
+        return (dependencies.createServer ?? createServer)(
+          { kind: "session", session },
+          {
+            logger: serverContext.logger,
+            providerEnvironment: dependencies.env,
+            environment: serverContext.environment,
+            delivery: serverContext.delivery,
+            ...optionalProviders,
+            androidAnalysis: android,
+          },
+        );
       },
       {
         onerror: () => {

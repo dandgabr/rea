@@ -201,9 +201,6 @@ const isRequireCallee = (callee: Node | null | undefined): boolean => {
   return false;
 };
 
-const isImportCallee = (callee: Node | null | undefined): boolean =>
-  isImport(callee);
-
 const collectModuleExpressions = (
   node: unknown,
   targets: Array<CallExpression | ImportExpression>,
@@ -272,7 +269,7 @@ const extractRequireAndDynamicImports = (
       continue;
     }
 
-    if (isImportCallee(call.callee) && isModuleExpression(first)) {
+    if (isImport(call.callee) && isModuleExpression(first)) {
       const result = moduleSpecifierFromExpression(first);
       if (result !== undefined) {
         appendRelationship(relationships, {
@@ -334,7 +331,22 @@ export const parseReferenceSourceImports = (
   if (language !== null && !codeSourceLanguages.has(language))
     return { relationships: [], parse_failures: [] };
 
-  const source = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+  let source: string;
+  try {
+    source = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return {
+      relationships: [],
+      parse_failures: [
+        {
+          path,
+          parser: "utf-8",
+          reason:
+            "Source bytes are not valid UTF-8; import targets were not parsed.",
+        },
+      ],
+    };
+  }
   const { ast, reasons } = parseWithBabel(path, source, language);
   const parseFailures = reasons.map((reason) => ({
     path,

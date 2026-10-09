@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import type { BinaryTarget } from "../../domain/binaryTarget.js";
+import type { BinaryTarget } from "../../domain/binaryTargetTypes.js";
 import {
   analysisProfilesEqual,
   type AnalysisProfileCommitment,
@@ -48,7 +48,6 @@ import {
   analysisErrorWithCleanupFailure,
   closeAnalysisClient,
 } from "./AnalysisClientCleanup.js";
-export type { BinarySessionPort } from "./BinarySessionPort.js";
 const OFFICIAL_OPERATIONS: ReadonlySet<string> = new Set(
   OFFICIAL_TOOL_CONTRACTS.map(({ name }) => name),
 );
@@ -504,6 +503,33 @@ export class BinarySession
   ): Promise<Result<AnalysisExecution, AnalysisError>> {
     const generation = this.#transitionGeneration;
     const call = this.#execute(name, arguments_, options, this.#transition);
+    this.#calls.set(call, generation);
+    return call.finally(() => this.#calls.delete(call));
+  }
+
+  /** Admit one composed request until its result and session bookkeeping settle. */
+  withAdmittedAnalysis<Value>(
+    operationName: string,
+    signal: AbortSignal | undefined,
+    operation: (analysis: AnalysisOperationPort) => Promise<Value>,
+  ): Promise<Result<Value, AnalysisError>> {
+    const generation = this.#transitionGeneration;
+    const transition = this.#transition;
+    const call = (async (): Promise<Result<Value, AnalysisError>> => {
+      const admission = await this.#waitForTransition(
+        operationName,
+        signal,
+        transition,
+      );
+      if (!admission.ok) return admission;
+      return ok(
+        await operation({
+          execute: (name, arguments_, options) =>
+            this.#execute(name, arguments_, options, Promise.resolve()),
+        }),
+      );
+    })();
+    // Register synchronously before a lifecycle transition can snapshot calls.
     this.#calls.set(call, generation);
     return call.finally(() => this.#calls.delete(call));
   }

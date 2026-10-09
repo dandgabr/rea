@@ -14,13 +14,9 @@ import type {
 import {
   readExactJavaScriptLiteral,
   semanticStaticPropertyName,
+  unwrapJavaScriptExpression,
 } from "./javascriptAstValues.js";
-import { compareCodePoints } from "../canonicalOrdering.js";
-
-export {
-  propertyName,
-  semanticStaticPropertyName,
-} from "./javascriptAstValues.js";
+import { compareUnicodeCodePoints } from "../unicodeCodePointOrder.js";
 
 /** Explicit result for source text that Babel cannot parse. */
 export const failedJavaScriptStaticAnalysis = (): JavaScriptStaticAnalysis => ({
@@ -105,8 +101,8 @@ const findChunkRuntime = (node: t.Node): string | undefined => {
       pending.push(current.right, current.left);
       continue;
     }
-    if (t.isParenthesizedExpression(current) || t.isTSAsExpression(current))
-      pending.push(current.expression);
+    const unwrapped = unwrapJavaScriptExpression(current).node;
+    if (unwrapped !== current) pending.push(unwrapped);
   }
   return undefined;
 };
@@ -161,16 +157,12 @@ export const staticArrayValues = (
     const value = argumentValue(element);
     return value === undefined ? [] : [value];
   });
-  const values = [...new Set(staticValues)].sort(compareCodePoints);
+  const values = [...new Set(staticValues)].sort(compareUnicodeCodePoints);
   return {
     values,
     unknown: array.elements.length - staticValues.length,
   };
 };
-
-/** Resolve a path composed only from inert literal syntax. */
-export const staticPath = (node: t.Node): string | undefined =>
-  staticPathAt(node);
 
 /** Classify whether inert path syntax is a module specifier or file expression. */
 export const staticPathResolutionContext = (
@@ -180,13 +172,14 @@ export const staticPathResolutionContext = (
     ? "filesystem-expression"
     : "module-specifier";
 
-const staticPathAt = (node: t.Node): string | undefined => {
+/** Resolve a path composed only from inert literal syntax. */
+export const staticPath = (node: t.Node): string | undefined => {
   if (t.isStringLiteral(node)) return node.value;
   if (t.isTemplateLiteral(node) && node.expressions.length === 0)
     return stringValue(node);
   if (t.isBinaryExpression(node, { operator: "+" })) {
-    const left = staticPathAt(node.left);
-    const right = staticPathAt(node.right);
+    const left = staticPath(node.left);
+    const right = staticPath(node.right);
     return left === undefined || right === undefined
       ? undefined
       : `${left}${right}`;
@@ -220,7 +213,7 @@ const staticCallPath = (
   const parts: string[] = [];
   for (const argument of node.arguments) {
     if (isDirectoryIdentity(argumentNode(argument))) continue;
-    const value = t.isNode(argument) ? staticPathAt(argument) : undefined;
+    const value = t.isNode(argument) ? staticPath(argument) : undefined;
     if (value === undefined) return undefined;
     parts.push(value);
   }
@@ -233,7 +226,7 @@ const staticFileUrlPath = (
   if (argument === undefined) return undefined;
   return isSourceFileUrl(argument)
     ? sourceRelativeFileUrlPath(argument)
-    : staticPathAt(argument);
+    : staticPath(argument);
 };
 
 /** Project a known source-relative URL through the actual file URL decoder. */
@@ -289,7 +282,7 @@ const staticResolvedPath = (
       parts.push(null);
       continue;
     }
-    const value = t.isNode(argument) ? staticPathAt(argument) : undefined;
+    const value = t.isNode(argument) ? staticPath(argument) : undefined;
     // Validate every argument, including those before the last anchor.
     if (value === undefined) return undefined;
     parts.push(value);
@@ -689,7 +682,7 @@ export const sortedUnique = <Value>(
   key: (value: Value) => string,
 ): Value[] =>
   [...new Map(values.map((value) => [key(value), value])).values()].sort(
-    (left, right) => compareCodePoints(key(left), key(right)),
+    (left, right) => compareUnicodeCodePoints(key(left), key(right)),
   );
 
 /** Hash exact UTF-8 source text. */

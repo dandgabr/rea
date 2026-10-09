@@ -1,3 +1,4 @@
+import { parseMcpToolError } from "../../fixtures/mcpToolError.js";
 import { createHash } from "node:crypto";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -89,7 +90,7 @@ it("routes observe_native_calls through MCP with schema-checked input and output
   const session = createTestBinarySession(
     new NativeMacOSProvider({}, new NativeFixtureRunner(), "darwin", tracer),
   );
-  const server = createServer(session, session);
+  const server = createServer({ kind: "session", session });
   const client = new Client({ name: "native-calls-mcp-test", version: "1" });
   const [clientTransport, serverTransport] =
     InMemoryTransport.createLinkedPair();
@@ -232,7 +233,7 @@ it.each([
     const session = createTestBinarySession(
       new NativeMacOSProvider({}, new NativeFixtureRunner(), "darwin", tracer),
     );
-    const server = createServer(session, session);
+    const server = createServer({ kind: "session", session });
     const client = new Client({
       name: "native-calls-partial-mcp-test",
       version: "1",
@@ -260,7 +261,7 @@ it.each([
       });
 
       expect(called.isError).toBe(true);
-      expect(called.structuredContent).toMatchObject({
+      expect(parseMcpToolError(called)).toMatchObject({
         error: {
           code: expectedCode,
           details: {

@@ -5,8 +5,8 @@ import {
   nativeUiScenarioInputSchema,
 } from "../../domain/native/nativeUiObservation.js";
 
-import type { ToolContract } from "../toolContracts.js";
-import { nativeOutputSchemas } from "../toolOutputSchemas.js";
+import type { ToolContract } from "../toolContractTypes.js";
+import { nativeOutputSchemas } from "../toolOutputSchemaGroups.js";
 import { jsonValueSchema } from "../../domain/jsonValue.js";
 import { localPathStringSchema } from "../../domain/localPath.js";
 import { toolContractMetadata } from "../toolEffects.js";
@@ -71,7 +71,7 @@ export const swiftSymbolsSchema = z
       .string()
       .min(1)
       .regex(/^[^\n]*$/u, "Each Swift symbol must be one line.")
-      .regex(/^[^\u0000]*$/u, "Swift symbols cannot contain NUL."),
+      .regex(/^[^\x00]*$/u, "Swift symbols cannot contain NUL."),
   )
   .min(1);
 
