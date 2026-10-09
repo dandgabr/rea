@@ -6,6 +6,10 @@ import { z } from "zod";
 import { ENHANCED_TOOL_CONTRACTS } from "./enhancedToolContracts.js";
 import { OFFICIAL_TOOL_CONTRACTS } from "./officialToolContracts.js";
 import { SESSION_TOOL_CONTRACTS } from "./sessionToolContracts.js";
+import { REVERSE_ENGINEERING_TOOL_CONTRACTS } from "./reverseEngineeringToolContracts.js";
+import { GDB_TOOL_CONTRACTS } from "./gdbToolContracts.js";
+import { RIZIN_DEBUG_TOOL_CONTRACTS } from "./rizinDebugToolContracts.js";
+import { CUTTER_TOOL_CONTRACTS } from "./cutterToolContracts.js";
 import { NATIVE_TOOL_CONTRACTS } from "./native/nativeToolContracts.js";
 import { ARTIFACT_TOOL_CONTRACTS } from "./artifactToolContracts.js";
 import { FIRMWARE_TOOL_CONTRACTS } from "./firmware/firmwareToolContracts.js";
@@ -88,6 +92,10 @@ describe("tool contract surface", () => {
       ...WEB_NETWORK_CAPTURE_TOOL_CONTRACTS,
       ...JAVASCRIPT_RECOVERY_TOOL_CONTRACTS,
       ...SESSION_TOOL_CONTRACTS,
+      ...REVERSE_ENGINEERING_TOOL_CONTRACTS,
+      ...GDB_TOOL_CONTRACTS,
+      ...RIZIN_DEBUG_TOOL_CONTRACTS,
+      ...CUTTER_TOOL_CONTRACTS,
     ].map(({ name }) => name);
     expect(Object.keys(TOOL_EFFECTS).sort()).toEqual(names.sort());
   });

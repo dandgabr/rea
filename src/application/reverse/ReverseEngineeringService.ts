@@ -27,10 +27,6 @@ import {
 import { rizinCommand } from "../../rizin/RizinCommand.js";
 import { RIZIN_PROVIDER_IDENTITY } from "../../rizin/RizinCommand.js";
 
-export type {
-  ObjdumpInput,
-  RizinInput,
-} from "../../domain/reverseEngineering.js";
 export type ReverseEngineeringOperation =
   | "inspect_with_objdump"
   | "execute_rizin_command";

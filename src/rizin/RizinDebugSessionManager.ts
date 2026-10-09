@@ -14,6 +14,10 @@ import {
   spawnOwnedProviderProcess,
   type SpawnedOwnedProviderProcess,
 } from "../process/ProviderProcess.js";
+import {
+  closeOwnedDebuggerSessions,
+  stopOwnedDebuggerProcess,
+} from "../process/ownedDebuggerSession.js";
 
 const FRAME_TIMEOUT_MS = 120_000;
 const STARTUP_TIMEOUT_MS = 30_000;
@@ -274,9 +278,7 @@ export class RizinDebugSessionManager {
     }
   }
 
-  status(
-    sessionId: string,
-  ):
+  status(sessionId: string):
     | {
         readonly session_id: string;
         readonly state: "ready" | "closed";
@@ -320,26 +322,11 @@ export class RizinDebugSessionManager {
   }
 
   async closeAll(): Promise<void> {
-    const results = await Promise.all(
-      [...this.#sessions.values()].map(async (session) => ({
-        session,
-        result: await stopDebuggerOnly(session),
-      })),
+    return closeOwnedDebuggerSessions(
+      this.#sessions,
+      stopDebuggerOnly,
+      "Rizin",
     );
-    const failures = results.filter(
-      ({ result }) => result.status === "incomplete",
-    );
-    for (const { session, result } of results)
-      if (result.status !== "incomplete") this.#sessions.delete(session.id);
-    if (failures.length > 0)
-      throw new AggregateError(
-        failures.map(({ result }) =>
-          result.status === "incomplete"
-            ? new Error(result.reason)
-            : new Error("Unknown Rizin shutdown failure"),
-        ),
-        "One or more owned Rizin processes did not stop cleanly",
-      );
   }
 
   #receive(session: RizinDebugSession, chunk: Buffer): void {
@@ -498,26 +485,5 @@ const waitForFrame = (
 /** Stop only the directly owned debugger process, never its process group or target. */
 const stopDebuggerOnly = async (
   session: RizinDebugSession,
-): Promise<
-  | { readonly status: "stopped" | "already_exited" }
-  | { readonly status: "incomplete"; readonly reason: string }
-> => {
-  if (session.exited) {
-    session.supervisor.dispose();
-    return { status: "already_exited" };
-  }
-  session.launched.process.kill("SIGTERM");
-  if (!(await session.supervisor.waitForExit(300))) {
-    session.launched.process.kill("SIGKILL");
-    if (!(await session.supervisor.waitForExit(1_000))) {
-      session.supervisor.dispose();
-      return {
-        status: "incomplete",
-        reason:
-          "Owned Rizin debugger process did not exit after direct termination.",
-      };
-    }
-  }
-  session.supervisor.dispose();
-  return { status: "stopped" };
-};
+): ReturnType<typeof stopOwnedDebuggerProcess> =>
+  stopOwnedDebuggerProcess(session, "Rizin debugger");

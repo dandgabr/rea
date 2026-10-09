@@ -13,6 +13,10 @@ import {
   spawnOwnedProviderProcess,
   type SpawnedOwnedProviderProcess,
 } from "../process/ProviderProcess.js";
+import {
+  closeOwnedDebuggerSessions,
+  stopOwnedDebuggerProcess,
+} from "../process/ownedDebuggerSession.js";
 
 const STARTUP_TIMEOUT_MS = 10_000;
 const COMMAND_TIMEOUT_MS = 120_000;
@@ -359,9 +363,7 @@ export class GdbSessionManager {
     });
   }
 
-  status(
-    sessionId: string,
-  ):
+  status(sessionId: string):
     | {
         readonly session_id: string;
         readonly mi_version: "mi3" | "mi2";
@@ -452,26 +454,7 @@ export class GdbSessionManager {
   }
 
   async closeAll(): Promise<void> {
-    const results = await Promise.all(
-      [...this.#sessions.values()].map(async (session) => ({
-        session,
-        result: await stopDebuggerOnly(session),
-      })),
-    );
-    const failures = results.filter(
-      ({ result }) => result.status === "incomplete",
-    );
-    for (const { session, result } of results)
-      if (result.status !== "incomplete") this.#sessions.delete(session.id);
-    if (failures.length > 0)
-      throw new AggregateError(
-        failures.map(({ result }) =>
-          result.status === "incomplete"
-            ? new Error(result.reason)
-            : new Error("Unknown GDB shutdown failure"),
-        ),
-        "One or more owned GDB processes did not stop cleanly",
-      );
+    return closeOwnedDebuggerSessions(this.#sessions, stopDebuggerOnly, "GDB");
   }
 
   async #serialize<Value>(
@@ -602,25 +585,5 @@ const miQuote = (value: string): string =>
 /** Terminate only the directly owned debugger process, never its process group or inferiors. */
 const stopDebuggerOnly = async (
   session: GdbSession,
-): Promise<
-  | { readonly status: "stopped" | "already_exited" }
-  | { readonly status: "incomplete"; readonly reason: string }
-> => {
-  if (session.exited) {
-    session.supervisor.dispose();
-    return { status: "already_exited" };
-  }
-  session.launched.process.kill("SIGTERM");
-  if (!(await session.supervisor.waitForExit(300))) {
-    session.launched.process.kill("SIGKILL");
-    if (!(await session.supervisor.waitForExit(1_000))) {
-      session.supervisor.dispose();
-      return {
-        status: "incomplete",
-        reason: "Owned GDB process did not exit after direct termination.",
-      };
-    }
-  }
-  session.supervisor.dispose();
-  return { status: "stopped" };
-};
+): ReturnType<typeof stopOwnedDebuggerProcess> =>
+  stopOwnedDebuggerProcess(session, "GDB");

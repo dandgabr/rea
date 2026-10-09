@@ -248,10 +248,10 @@ static Handle openPrivateBridgeDescriptor(HANDLE parent, const std::wstring& nam
   require(!standard.Directory && standard.EndOfFile.QuadPart >= 0 &&
               standard.EndOfFile.QuadPart <= 64 * 1024,
           "Cutter bridge descriptor exceeds its byte limit or is not a file", path, ERROR_FILE_TOO_LARGE);
-  FILE_ATTRIBUTE_TAG_INFO attributes{};
-  require(GetFileInformationByHandleEx(descriptor.get(), FileAttributeTagInfo, &attributes, sizeof(attributes)),
+  FILE_ATTRIBUTE_TAG_INFO fileAttributes{};
+  require(GetFileInformationByHandleEx(descriptor.get(), FileAttributeTagInfo, &fileAttributes, sizeof(fileAttributes)),
           "Read Cutter bridge descriptor attributes failed", path);
-  require((attributes.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0,
+  require((fileAttributes.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0,
           "Cutter bridge descriptor cannot be a reparse point", path, ERROR_REPARSE_TAG_INVALID);
   verifyPrivate(descriptor.get(), path, false);
   return descriptor;

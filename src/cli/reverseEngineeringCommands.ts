@@ -24,19 +24,31 @@ export const registerReverseEngineeringCommands = (
     description:
       "Inspect a local artifact with GNU objdump and retain its raw output as Evidence",
     args: z.object({
-      path: z.string().min(1),
-      operation: z.enum([
-        "file_headers",
-        "section_headers",
-        "symbols",
-        "relocations",
-        "dwarf",
-        "disassemble",
-        "disassemble_all",
-        "architectures",
-      ]),
+      path: z
+        .string()
+        .min(1)
+        .describe("Path to the local artifact to inspect."),
+      operation: z
+        .enum([
+          "file_headers",
+          "section_headers",
+          "symbols",
+          "relocations",
+          "dwarf",
+          "disassemble",
+          "disassemble_all",
+          "architectures",
+        ])
+        .describe("GNU objdump inspection operation to run."),
     }),
-    options: z.object({ followDebugLinks: z.boolean().default(true) }),
+    options: z.object({
+      followDebugLinks: z
+        .boolean()
+        .default(true)
+        .describe(
+          "Follow local DWARF debug links; network access stays disabled.",
+        ),
+    }),
     run: ({ args, options }) =>
       withCommandCancellation((signal) =>
         logCliCommand(logger, CLI_COMMANDS.inspectWithObjdump, async () => {
@@ -53,7 +65,13 @@ export const registerReverseEngineeringCommands = (
   });
   cli.command(CLI_COMMANDS.executeRizinCommand, {
     description: "Execute one Rizin command against a local artifact",
-    args: z.object({ path: z.string().min(1), command: z.string().min(1) }),
+    args: z.object({
+      path: z
+        .string()
+        .min(1)
+        .describe("Path to the local artifact to analyze."),
+      command: z.string().min(1).describe("One caller-selected Rizin command."),
+    }),
     run: ({ args }) =>
       withCommandCancellation((signal) =>
         logCliCommand(logger, CLI_COMMANDS.executeRizinCommand, async () => {
@@ -65,7 +83,12 @@ export const registerReverseEngineeringCommands = (
   cli.command(CLI_COMMANDS.debugWithGdb, {
     description:
       "Run one unrestricted GDB console command in an ephemeral MI session",
-    args: z.object({ command: z.string().min(1) }),
+    args: z.object({
+      command: z
+        .string()
+        .min(1)
+        .describe("One unrestricted GDB console command."),
+    }),
     run: ({ args }) =>
       withCommandCancellation((signal) =>
         logCliCommand(logger, CLI_COMMANDS.debugWithGdb, async () => {
@@ -112,13 +135,20 @@ export const registerReverseEngineeringCommands = (
     description:
       "Run one unrestricted Rizin debugger command in an ephemeral session",
     args: z.object({
-      path: z.string().min(1),
+      path: z.string().min(1).describe("Path to the local artifact to debug."),
       command: z
         .string()
         .min(1)
+        .describe("One unrestricted Rizin debugger command.")
         .refine((value) => !/[\r\n]/u.test(value)),
     }),
-    options: z.object({ backend: z.string().min(1).optional() }),
+    options: z.object({
+      backend: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Optional Rizin IO debugger backend name."),
+    }),
     run: ({ args, options }) =>
       withCommandCancellation((signal) =>
         logCliCommand(logger, CLI_COMMANDS.debugWithRizin, async () => {
@@ -181,14 +211,27 @@ export const registerReverseEngineeringCommands = (
   cli.command(CLI_COMMANDS.cutterCommand, {
     description: "Execute one Rizin command in a selected live Cutter instance",
     args: z.object({
-      sessionId: z.string().uuid(),
-      expectedGeneration: z.number().int().nonnegative(),
+      sessionId: z
+        .string()
+        .uuid()
+        .describe("Session ID copied from list-cutter-sessions."),
+      expectedGeneration: z
+        .number()
+        .int()
+        .nonnegative()
+        .describe("Session generation returned by list-cutter-sessions."),
       command: z
         .string()
         .min(1)
+        .describe("One unrestricted Rizin command to run in Cutter.")
         .refine((value) => !/[\r\n]/u.test(value)),
     }),
-    options: z.object({ json: z.boolean().default(false) }),
+    options: z.object({
+      json: z
+        .boolean()
+        .default(false)
+        .describe("Return command-specific JSON output when available."),
+    }),
     run: ({ args, options }) =>
       logCliCommand(logger, CLI_COMMANDS.cutterCommand, async () => {
         const result = await cutter.execute({

@@ -48,6 +48,11 @@ import {
 } from "../../../src/ghidra/GhidraProvider.js";
 import { NATIVE_MACOS_PROVIDER_IDENTITY } from "../../../src/native/NativeMacOSProvider.js";
 import { IDA_PROVIDER_IDENTITY } from "../../../src/ida/IdaProvider.js";
+import { OBJDUMP_PROVIDER_IDENTITY } from "../../../src/objdump/ObjdumpCommand.js";
+import { RIZIN_PROVIDER_IDENTITY } from "../../../src/rizin/RizinCommand.js";
+import { GDB_PROVIDER_IDENTITY } from "../../../src/gdb/GdbSessionManager.js";
+import { RIZIN_DEBUGGER_PROVIDER_IDENTITY } from "../../../src/rizin/RizinDebugSessionManager.js";
+import { CUTTER_PROVIDER_IDENTITY } from "../../../src/cutter/CutterBridgeClient.js";
 import {
   assertDocumentationFacts,
   documentationFactIssues,
@@ -133,6 +138,11 @@ describe("canonical product catalog", () => {
         JAVASCRIPT_RUNTIME_RECONCILIATION_PROVIDER,
         JAVASCRIPT_APPLICATION_WORKFLOW_PROVIDER,
         WEB_SCRIPT_EXPORT_PROVIDER,
+        OBJDUMP_PROVIDER_IDENTITY,
+        RIZIN_PROVIDER_IDENTITY,
+        GDB_PROVIDER_IDENTITY,
+        RIZIN_DEBUGGER_PROVIDER_IDENTITY,
+        CUTTER_PROVIDER_IDENTITY,
       ]
         .map(({ id }) => id)
         .sort(),

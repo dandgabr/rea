@@ -8,6 +8,104 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { CutterBridgeClient } from "../../../src/cutter/CutterBridgeClient.js";
 
+const listen = async (
+  server: ReturnType<typeof createServer>,
+): Promise<number> => {
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (address === null || typeof address === "string")
+    throw new Error("Expected an ephemeral IPv4 listener");
+  return address.port;
+};
+
+const statusServer = (
+  token: string,
+  currentFile: string | null,
+  documentGeneration: number,
+): ReturnType<typeof createServer> =>
+  createServer((connection) => {
+    connection.setEncoding("utf8");
+    let requestText = "";
+    connection.on("data", (chunk: string) => {
+      requestText += chunk;
+      const newline = requestText.indexOf("\n");
+      if (newline < 0) return;
+      const request = JSON.parse(requestText.slice(0, newline)) as Record<
+        string,
+        unknown
+      >;
+      connection.end(
+        `${JSON.stringify({
+          ok: request.token === token,
+          session_id: request.session_id,
+          current_file: currentFile,
+          document_generation: documentGeneration,
+          cutter_version: "Cutter fixture version",
+          identity_status: "partial",
+        })}\n`,
+      );
+    });
+  });
+
+const createStatusHarness = (
+  token: string,
+  currentFile: string | null,
+  documentGeneration: number,
+) => {
+  let requestText = "";
+  const server = statusServer(token, currentFile, documentGeneration);
+  server.on("connection", (connection) => {
+    connection.on("data", (chunk: Buffer) => {
+      requestText += chunk.toString("utf8");
+    });
+  });
+  return { server, requestText: () => requestText };
+};
+
+const writeDescriptor = async (
+  directory: string,
+  sessionId: string,
+  port: number,
+  token: string,
+  currentFile: string | null = null,
+  documentGeneration = 0,
+): Promise<void> =>
+  writeFile(
+    join(directory, `cutter-${process.pid}-${sessionId}.json`),
+    JSON.stringify({
+      session_id: sessionId,
+      pid: process.pid,
+      host: "127.0.0.1",
+      port,
+      token,
+      document_generation: documentGeneration,
+      current_file: currentFile,
+      cutter_version: "Cutter fixture version",
+      identity_status: "partial",
+    }),
+    { mode: 0o600 },
+  );
+
+const expectDiscoveredSession = (
+  result: unknown,
+  sessionId: string,
+  documentGeneration: number,
+  currentFile: string,
+): void => {
+  expect(result).toMatchObject({
+    discovery_status: "sessions_found",
+    bridge_directory_security: "private_verified",
+    sessions: [
+      {
+        session_id: sessionId,
+        document_generation: documentGeneration,
+        current_file: currentFile,
+        cutter_version: "Cutter fixture version",
+      },
+    ],
+  });
+};
+
 const createClient = (environment: NodeJS.ProcessEnv): CutterBridgeClient => {
   if (process.platform !== "win32") return new CutterBridgeClient(environment);
   return new CutterBridgeClient(environment, {
@@ -40,68 +138,17 @@ describe("CutterBridgeClient", () => {
     directory = await mkdtemp(join(tmpdir(), "rea-cutter-bridge-test-"));
     const sessionId = "27d3e3f1-f1e5-49ae-91ec-95af1f343a5a";
     const token = "synthetic-cutter-bridge-token-for-test";
-    let requestText = "";
-    server = createServer((connection) => {
-      connection.setEncoding("utf8");
-      connection.on("data", (chunk: string) => {
-        requestText += chunk;
-        const newline = requestText.indexOf("\n");
-        if (newline < 0) return;
-        const request = JSON.parse(requestText.slice(0, newline)) as Record<
-          string,
-          unknown
-        >;
-        connection.end(
-          `${JSON.stringify({
-            ok: request.token === token,
-            session_id: request.session_id,
-            current_file: "/tmp/sample.bin",
-            document_generation: 4,
-            cutter_version: "Cutter fixture version",
-            identity_status: "partial",
-          })}\n`,
-        );
-      });
-    });
-    await new Promise<void>((resolve) =>
-      server?.listen(0, "127.0.0.1", resolve),
-    );
-    const address = server.address();
-    if (address === null || typeof address === "string")
-      throw new Error("Expected an ephemeral IPv4 listener");
-    await writeFile(
-      join(directory, `cutter-${process.pid}-${sessionId}.json`),
-      JSON.stringify({
-        session_id: sessionId,
-        pid: process.pid,
-        host: "127.0.0.1",
-        port: address.port,
-        token,
-        document_generation: 0,
-        current_file: null,
-        cutter_version: "Cutter fixture version",
-        identity_status: "partial",
-      }),
-      { mode: 0o600 },
-    );
+    const harness = createStatusHarness(token, "/tmp/sample.bin", 4);
+    server = harness.server;
+    const port = await listen(server);
+    await writeDescriptor(directory, sessionId, port, token);
 
     const result = await createClient({
       REA_CUTTER_BRIDGE_DIR: directory,
     }).listSessions();
 
-    expect(result).toMatchObject({
-      discovery_status: "sessions_found",
-      bridge_directory_security: "private_verified",
-      sessions: [
-        {
-          session_id: sessionId,
-          document_generation: 4,
-          current_file: "/tmp/sample.bin",
-          cutter_version: "Cutter fixture version",
-        },
-      ],
-    });
-    expect(JSON.parse(requestText)).toMatchObject({
+    expectDiscoveredSession(result, sessionId, 4, "/tmp/sample.bin");
+    expect(JSON.parse(harness.requestText())).toMatchObject({
       kind: "status",
       session_id: sessionId,
     });
@@ -129,26 +176,12 @@ describe("CutterBridgeClient", () => {
     server = createServer((connection) =>
       connection.on("data", () => connection.destroy()),
     );
-    await new Promise<void>((resolve) =>
-      server?.listen(0, "127.0.0.1", resolve),
-    );
-    const address = server.address();
-    if (address === null || typeof address === "string")
-      throw new Error("Expected an ephemeral IPv4 listener");
-    await writeFile(
-      join(directory, `cutter-${process.pid}-${sessionId}.json`),
-      JSON.stringify({
-        session_id: sessionId,
-        pid: process.pid,
-        host: "127.0.0.1",
-        port: address.port,
-        token: "synthetic-cutter-bridge-token-for-test",
-        document_generation: 0,
-        current_file: null,
-        cutter_version: "Cutter fixture version",
-        identity_status: "partial",
-      }),
-      { mode: 0o600 },
+    const port = await listen(server);
+    await writeDescriptor(
+      directory,
+      sessionId,
+      port,
+      "synthetic-cutter-bridge-token-for-test",
     );
 
     await expect(
@@ -165,58 +198,20 @@ describe("CutterBridgeClient", () => {
       documentGeneration: 0,
     });
   });
-});
-
-describe("CutterBridgeClient Windows descriptor security", () => {
-  let directory: string | undefined;
-  let server: ReturnType<typeof createServer> | undefined;
-
-  afterEach(async () => {
-    if (server !== undefined)
-      await new Promise<void>((resolve) => server?.close(() => resolve()));
-    if (directory !== undefined)
-      await rm(directory, { recursive: true, force: true });
-    server = undefined;
-    directory = undefined;
-  });
-
   it("uses verified Windows handle reads before trusting Cutter descriptors", async () => {
     directory = await mkdtemp(
       join(tmpdir(), "rea-cutter-windows-bridge-test-"),
     );
     const sessionId = "27d3e3f1-f1e5-49ae-91ec-95af1f343a5a";
     const token = "synthetic-cutter-bridge-token-for-test";
-    server = createServer((connection) => {
-      connection.setEncoding("utf8");
-      connection.on("data", (chunk: string) => {
-        const request = JSON.parse(chunk.split("\n", 1)[0] ?? "{}") as Record<
-          string,
-          unknown
-        >;
-        connection.end(
-          `${JSON.stringify({
-            ok: request.token === token,
-            session_id: request.session_id,
-            current_file: "C:\\fixtures\\sample.exe",
-            document_generation: 1,
-            cutter_version: "Cutter fixture version",
-            identity_status: "partial",
-          })}\n`,
-        );
-      });
-    });
-    await new Promise<void>((resolve) =>
-      server?.listen(0, "127.0.0.1", resolve),
-    );
-    const address = server.address();
-    if (address === null || typeof address === "string")
-      throw new Error("Expected an ephemeral IPv4 listener");
+    server = statusServer(token, "C:\\fixtures\\sample.exe", 1);
+    const port = await listen(server);
     const entry = `cutter-${process.pid}-${sessionId}.json`;
     const descriptor = {
       session_id: sessionId,
       pid: process.pid,
       host: "127.0.0.1",
-      port: address.port,
+      port,
       token,
       document_generation: 0,
       current_file: null,
@@ -246,18 +241,7 @@ describe("CutterBridgeClient Windows descriptor security", () => {
     ).listSessions();
 
     expect(reads).toBe(1);
-    expect(result).toMatchObject({
-      discovery_status: "sessions_found",
-      bridge_directory_security: "private_verified",
-      sessions: [
-        {
-          session_id: sessionId,
-          document_generation: 1,
-          current_file: "C:\\fixtures\\sample.exe",
-          cutter_version: "Cutter fixture version",
-        },
-      ],
-    });
+    expectDiscoveredSession(result, sessionId, 1, "C:\\fixtures\\sample.exe");
   });
 
   it("fails closed when Windows ACL verification is unavailable", async () => {
