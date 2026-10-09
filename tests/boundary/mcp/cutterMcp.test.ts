@@ -71,10 +71,13 @@ it("preserves live Cutter command Evidence and parity through the MCP boundary",
   );
 
   const session = createTestBinarySession(createCacheProvider([]));
-  const server = createServer(session, session, {
-    logger: silentLogger,
-    providerEnvironment: { ...process.env, REA_CUTTER_BRIDGE_DIR: directory },
-  });
+  const server = createServer(
+    { kind: "session", session },
+    {
+      logger: silentLogger,
+      providerEnvironment: { ...process.env, REA_CUTTER_BRIDGE_DIR: directory },
+    },
+  );
   const client = new Client({ name: "cutter-mcp-boundary", version: "1" });
   onTestFinished(async () => {
     await client.close();

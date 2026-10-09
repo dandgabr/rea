@@ -1,11 +1,11 @@
 import type { McpServer, ServerContext } from "@modelcontextprotocol/server";
+import type { Logger } from "pino";
 
 import type { GdbSessionManager } from "../gdb/GdbSessionManager.js";
 import type { EvidenceWriter } from "../application/investigation/InvestigationRecordPort.js";
 import { toolContract } from "../contracts/toolContracts.js";
 import { err } from "../domain/result.js";
 import { AnalysisInputError } from "../domain/analysisErrorCore.js";
-import type { Logger } from "../logger.js";
 import { logToolExecution } from "./toolLogging.js";
 import { toolRegistrationOptions } from "./toolRegistrationOptions.js";
 import type { ToolResultDelivery } from "./toolResult.js";

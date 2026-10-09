@@ -1,9 +1,9 @@
 import { z } from "incur";
+import type { Logger } from "pino";
 
 import { createReverseEngineeringService } from "../composition/reverseEngineering.js";
 import { projectAnalysisError } from "../domain/analysisErrorProjection.js";
 import { logCliCommand } from "../cliLogging.js";
-import type { Logger } from "../logger.js";
 import type { CliInstance } from "./types.js";
 import { withCommandCancellation } from "./commandCancellation.js";
 import { CLI_COMMANDS } from "../cliCommandNames.js";

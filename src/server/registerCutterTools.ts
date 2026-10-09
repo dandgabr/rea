@@ -1,10 +1,10 @@
 import type { McpServer } from "@modelcontextprotocol/server";
+import type { Logger } from "pino";
 
 import type { CutterBridgeService } from "../cutter/CutterBridgeService.js";
 import type { EvidenceWriter } from "../application/investigation/InvestigationRecordPort.js";
 import { toolContract } from "../contracts/toolContracts.js";
 import { ok } from "../domain/result.js";
-import type { Logger } from "../logger.js";
 import { logToolExecution } from "./toolLogging.js";
 import { toolRegistrationOptions } from "./toolRegistrationOptions.js";
 import type { ToolResultDelivery } from "./toolResult.js";

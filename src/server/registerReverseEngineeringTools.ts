@@ -1,9 +1,9 @@
 import type { McpServer, ServerContext } from "@modelcontextprotocol/server";
+import type { Logger } from "pino";
 
 import type { ReverseEngineeringService } from "../application/reverse/ReverseEngineeringService.js";
 import type { EvidenceWriter } from "../application/investigation/InvestigationRecordPort.js";
 import { toolContract } from "../contracts/toolContracts.js";
-import type { Logger } from "../logger.js";
 import { logToolExecution } from "./toolLogging.js";
 import { toolRegistrationOptions } from "./toolRegistrationOptions.js";
 import type { ToolResultDelivery } from "./toolResult.js";
