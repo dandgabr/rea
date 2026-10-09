@@ -222,7 +222,9 @@ export const createServer = (
     fridaInstrumentation,
     toolLogger,
     delivery,
-    session === undefined ? undefined : (input) => session.recordEvidence(input),
+    session === undefined
+      ? undefined
+      : (input) => session.recordEvidence(input),
   );
   const previousOnclose = server.server.onclose;
   server.server.onclose = () => {
