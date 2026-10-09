@@ -6,7 +6,6 @@ import { err, ok, type Result } from "./result.js";
 import { nativeApiBoundarySchema } from "./native/nativeApiBoundary.js";
 import { nativeValueFlowSchema } from "./native/nativeValueFlow.js";
 import { AnalysisOutputError } from "./analysisErrorCore.js";
-import { HopperProtocolError } from "./hopperErrors.js";
 
 export interface AddressedName {
   readonly address: string;
@@ -377,10 +376,10 @@ export const parseFunctionDossier = (
       );
 };
 
-/** Parse Hopper's direct or wrapped procedure map into stable entries. */
+/** Parse a provider's direct or wrapped procedure map into stable entries. */
 export const parseProcedures = (
   value: JsonValue,
-): Result<readonly AddressedName[], HopperProtocolError> => {
+): Result<readonly AddressedName[], AnalysisOutputError> => {
   const parsed = procedureMapSchema.safeParse(
     unwrapProperty(value, "procedures"),
   );
@@ -394,10 +393,10 @@ export const parseProcedures = (
     : invalid("procedure map", parsed.error);
 };
 
-/** Parse Hopper's direct or wrapped list of address/name records. */
+/** Parse a provider's direct or wrapped list of address/name records. */
 export const parseNames = (
   value: JsonValue,
-): Result<readonly AddressedName[], HopperProtocolError> => {
+): Result<readonly AddressedName[], AnalysisOutputError> => {
   const unwrapped = unwrapProperty(value, "names");
   const records = addressedNamesSchema.safeParse(unwrapped);
   if (records.success) return ok(records.data);
@@ -407,21 +406,21 @@ export const parseNames = (
     : invalid("name list", map.error);
 };
 
-/** Parse callee/caller strings from direct or wrapped Hopper results. */
+/** Parse callee/caller strings from direct or wrapped provider results. */
 export const parseRelatedAddresses = (
   value: JsonValue,
   relation: "callees" | "callers",
-): Result<readonly string[], HopperProtocolError> => {
+): Result<readonly string[], AnalysisOutputError> => {
   const parsed = z.array(z.string()).safeParse(unwrapProperty(value, relation));
   return parsed.success
     ? ok(parsed.data)
     : invalid(`${relation} list`, parsed.error);
 };
 
-/** Parse direct or wrapped Hopper segment records. */
+/** Parse direct or wrapped provider segment records. */
 export const parseSegments = (
   value: JsonValue,
-): Result<readonly SegmentSummary[], HopperProtocolError> => {
+): Result<readonly SegmentSummary[], AnalysisOutputError> => {
   const parsed = z
     .array(segmentSchema)
     .safeParse(unwrapProperty(value, "segments"));
@@ -430,10 +429,10 @@ export const parseSegments = (
     : invalid("segment list", parsed.error);
 };
 
-/** Parse direct or wrapped Hopper document names. */
+/** Parse direct or wrapped provider document names. */
 export const parseDocuments = (
   value: JsonValue,
-): Result<readonly string[], HopperProtocolError> => {
+): Result<readonly string[], AnalysisOutputError> => {
   const parsed = z
     .array(z.string())
     .safeParse(unwrapProperty(value, "documents"));
@@ -446,7 +445,7 @@ export const parseDocuments = (
 export const parseListCount = (
   value: JsonValue,
   property: string,
-): Result<number, HopperProtocolError> => {
+): Result<number, AnalysisOutputError> => {
   const unwrapped = unwrapProperty(value, property);
   const list = z.array(z.unknown()).safeParse(unwrapped);
   if (list.success) return ok(list.data.length);
@@ -471,9 +470,13 @@ const unwrapProperty = (value: JsonValue, property: string): JsonValue => {
 const invalid = <T>(
   expected: string,
   cause: z.ZodError,
-): Result<T, HopperProtocolError> =>
+): Result<T, AnalysisOutputError> =>
   err(
-    new HopperProtocolError(`Hopper returned an invalid ${expected}`, {
-      cause,
-    }),
+    new AnalysisOutputError(
+      "provider_analysis",
+      `Provider returned an invalid ${expected}`,
+      {
+        cause,
+      },
+    ),
   );
