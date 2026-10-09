@@ -4,6 +4,117 @@ import { TOOL_CONTRACTS } from "./toolContracts.js";
 import { isValidFridaRemoteAddress } from "./fridaRemoteAddress.js";
 
 describe("Frida tool contracts", () => {
+  it("rejects incomplete or conflicting mode and source selectors", () => {
+    const contract = (name: string) => {
+      const found = TOOL_CONTRACTS.find((candidate) => candidate.name === name);
+      if (found === undefined) throw new Error(`Missing contract ${name}`);
+      return found.inputSchema;
+    };
+    const start = contract("start_frida_session");
+    const load = contract("load_frida_script");
+    const instrument = contract("instrument_with_frida");
+    const processList = contract("list_frida_processes");
+
+    expect(start.safeParse({ mode: "attach", pid: 7 }).success).toBe(true);
+    expect(start.safeParse({ mode: "spawn", program: "app" }).success).toBe(
+      true,
+    );
+    for (const input of [
+      { mode: "attach" },
+      { mode: "attach", pid: 7, program: "app" },
+      { mode: "spawn" },
+      { mode: "spawn", program: "app", pid: 7 },
+      {
+        mode: "attach",
+        pid: 7,
+        device_id: "local",
+        remote: { address: "host" },
+      },
+    ])
+      expect(start.safeParse(input).success).toBe(false);
+
+    expect(
+      load.safeParse({
+        session_id: "00000000-0000-4000-8000-000000000001",
+        source_kind: "inline",
+        source: "",
+      }).success,
+    ).toBe(true);
+    expect(
+      load.safeParse({
+        session_id: "00000000-0000-4000-8000-000000000001",
+        source_kind: "file",
+        path: "script.js",
+      }).success,
+    ).toBe(true);
+    for (const input of [
+      {
+        session_id: "00000000-0000-4000-8000-000000000001",
+        source_kind: "inline",
+      },
+      {
+        session_id: "00000000-0000-4000-8000-000000000001",
+        source_kind: "inline",
+        source: "",
+        path: "script.js",
+      },
+      {
+        session_id: "00000000-0000-4000-8000-000000000001",
+        source_kind: "file",
+      },
+    ])
+      expect(load.safeParse(input).success).toBe(false);
+
+    expect(
+      instrument.safeParse({
+        mode: "attach",
+        pid: 7,
+        source_kind: "inline",
+        source: "",
+      }).success,
+    ).toBe(true);
+    expect(
+      instrument.safeParse({
+        mode: "spawn",
+        program: "app",
+        source_kind: "file",
+        path: "script.js",
+      }).success,
+    ).toBe(true);
+    for (const input of [
+      {
+        mode: "attach",
+        pid: 7,
+        source_kind: "file",
+        path: "script.js",
+        source: "",
+      },
+      { mode: "spawn", program: "app", source_kind: "inline" },
+      {
+        mode: "spawn",
+        program: "app",
+        pid: 7,
+        source_kind: "inline",
+        source: "",
+      },
+      {
+        mode: "attach",
+        source_kind: "inline",
+        source: "",
+        device_id: "local",
+        remote: { address: "host" },
+      },
+    ])
+      expect(instrument.safeParse(input).success).toBe(false);
+
+    expect(processList.safeParse({ device_id: "local" }).success).toBe(true);
+    expect(processList.safeParse({}).success).toBe(false);
+    expect(
+      processList.safeParse({ device_id: "local", remote: { address: "host" } })
+        .success,
+    ).toBe(false);
+  });
+
   it("publishes the Frida device, process, and session operations", () => {
     expect(TOOL_CONTRACTS.map(({ name }) => name)).toEqual(
       expect.arrayContaining([
