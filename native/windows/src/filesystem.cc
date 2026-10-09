@@ -236,9 +236,12 @@ static Handle openPrivateBridgeDescriptor(HANDLE parent, const std::wstring& nam
   InitializeObjectAttributes(&attributes, &coordinate, OBJ_CASE_INSENSITIVE, parent, nullptr);
   IO_STATUS_BLOCK observation{};
   HANDLE raw = INVALID_HANDLE_VALUE;
+  // Immutable runtime files retain their original writer handle so later
+  // opens cannot acquire write or delete access. This read-only handle must
+  // share those granted rights for Windows' symmetric share check to pass.
   const auto status = NtCreateFile(&raw, GENERIC_READ | READ_CONTROL | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
                                    &attributes, &observation, nullptr, FILE_ATTRIBUTE_NORMAL,
-                                   FILE_SHARE_READ | FILE_SHARE_DELETE, FILE_OPEN,
+                                   FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, FILE_OPEN,
                                    FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT |
                                        FILE_NON_DIRECTORY_FILE,
                                    nullptr, 0);
