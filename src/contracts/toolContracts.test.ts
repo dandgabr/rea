@@ -24,6 +24,7 @@ import { REVERSE_ENGINEERING_TOOL_CONTRACTS } from "./reverseEngineeringToolCont
 import { GDB_TOOL_CONTRACTS } from "./gdbToolContracts.js";
 import { RIZIN_DEBUG_TOOL_CONTRACTS } from "./rizinDebugToolContracts.js";
 import { CUTTER_TOOL_CONTRACTS } from "./cutterToolContracts.js";
+import { FRIDA_TOOL_CONTRACTS } from "./fridaToolContracts.js";
 
 const GROUPS = {
   official: OFFICIAL_TOOL_CONTRACTS,
@@ -49,6 +50,7 @@ const GROUPS = {
   gdb: GDB_TOOL_CONTRACTS,
   rizin_debug: RIZIN_DEBUG_TOOL_CONTRACTS,
   cutter: CUTTER_TOOL_CONTRACTS,
+  frida: FRIDA_TOOL_CONTRACTS,
 } as const;
 
 /**

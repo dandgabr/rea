@@ -18,6 +18,7 @@ import type { BrowserScenarioCapturePort } from "../application/BrowserScenarioC
 import type { ElectronActiveObservationPort } from "../application/javascript/ElectronActiveObservationPort.js";
 import type { ElectronObservationPort } from "../application/javascript/ElectronObservationPort.js";
 import type { JavaScriptRuntimeObservationPort } from "../application/javascript/JavaScriptRuntimeObservationPort.js";
+import type { FridaInstrumentationPort } from "../application/frida/FridaInstrumentationPort.js";
 import type { OptionalProviderLoadFailures } from "../application/OptionalObservationProviders.js";
 import { PRODUCT_IDENTITY } from "../identity.js";
 import { silentLogger, type Logger } from "../logger.js";
@@ -70,6 +71,8 @@ import { registerRizinDebugTools } from "./registerRizinDebugTools.js";
 import { CutterBridgeService } from "../cutter/CutterBridgeService.js";
 import { CutterBridgeClient } from "../cutter/CutterBridgeClient.js";
 import { registerCutterTools } from "./registerCutterTools.js";
+import { FridaInstrumentationManager } from "../frida/FridaInstrumentationManager.js";
+import { registerFridaTools } from "./registerFridaTools.js";
 
 const TARGET_FREE_INSTRUCTIONS =
   "REA provides reverse-engineering tools for local artifacts, native binaries, managed code, browser pages, and runtimes. Use the tool that directly answers the question; discover targets or inspect inventory only when needed. Tool results include inline Evidence and report their coverage and limitations.";
@@ -95,6 +98,7 @@ export interface CreateServerOptions {
   readonly electronObservation?: ElectronObservationPort;
   readonly electronActiveObservation?: ElectronActiveObservationPort;
   readonly javascriptRuntimeObservation?: JavaScriptRuntimeObservationPort;
+  readonly fridaInstrumentation?: FridaInstrumentationPort;
   readonly availabilityPolicy?: () => SessionAvailability;
   readonly optionalProviderLoadFailures?: OptionalProviderLoadFailures;
 }
@@ -219,6 +223,8 @@ export const createServer = (
   const rizinDebugSessions = new RizinDebugSessionManager(
     options.providerEnvironment,
   );
+  const fridaInstrumentation =
+    options.fridaInstrumentation ?? new FridaInstrumentationManager();
   registerGdbTools(
     server,
     gdbSessions,
@@ -230,6 +236,14 @@ export const createServer = (
   registerRizinDebugTools(
     server,
     rizinDebugSessions,
+    toolLogger,
+    session === undefined
+      ? undefined
+      : (evidence) => session.recordEvidence(evidence),
+  );
+  registerFridaTools(
+    server,
+    fridaInstrumentation,
     toolLogger,
     session === undefined
       ? undefined
@@ -260,6 +274,12 @@ export const createServer = (
         "Rizin cleanup after MCP close failed",
       );
     });
+    void fridaInstrumentation.closeAll().catch((cause: unknown) => {
+      logger.error(
+        { error: cause instanceof Error ? cause.message : String(cause) },
+        "Frida session cleanup after MCP close failed",
+      );
+    });
     void android.close().catch((cause: unknown) => {
       logger.error(
         { error: cause instanceof Error ? cause.message : String(cause) },
@@ -274,6 +294,7 @@ export const createServer = (
       android.close(),
       gdbSessions.closeAll(),
       rizinDebugSessions.closeAll(),
+      fridaInstrumentation.closeAll(),
     ]);
     for (const result of results)
       if (result.status === "rejected") throw result.reason;

@@ -329,6 +329,17 @@ then verifies and uses it on Windows. Each successful host job uploads
 evidence of platform support. Only successful real results establish coverage
 for the specific OS and Cutter build.
 
+### Frida remote target
+
+`npm run verify:frida -- --address HOST:PORT --pid PID` builds REA, enumerates
+the explicitly selected remote device, confirms that PID is visible, attaches
+with Frida, sends a harmless marker from the target, captures the message, and
+detaches. Optional per-run flags are `--token`, `--certificate`, `--origin`,
+and `--keepalive-interval`; they are not written to files or included in the
+report. Use a disposable target and an explicitly selected process. This lane
+requires Linux on the REA host and a reachable Frida server; a local binding
+smoke or a mocked device manager does not establish remote target coverage.
+
 Objdump, GDB, and Rizin currently have no dedicated real-provider workflow
 lane. Run their documented CLI commands against host-installed tools and
 representative local fixtures for each claimed host. The Cutter lane does not

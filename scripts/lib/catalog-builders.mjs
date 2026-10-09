@@ -24,6 +24,7 @@ export const toolFamilyCatalog = (sources) => {
         ...sources.gdbContracts.GDB_TOOL_CONTRACTS,
         ...sources.rizinDebugContracts.RIZIN_DEBUG_TOOL_CONTRACTS,
         ...sources.cutterContracts.CUTTER_TOOL_CONTRACTS,
+        ...sources.fridaContracts.FRIDA_TOOL_CONTRACTS,
       ],
     },
     {
@@ -157,6 +158,10 @@ export const providerCatalog = (sources) => {
     {
       identity: sources.cutterProvider.CUTTER_PROVIDER_IDENTITY,
       contracts: sources.cutterContracts.CUTTER_TOOL_CONTRACTS,
+    },
+    {
+      identity: sources.fridaProvider.FRIDA_PROVIDER_IDENTITY,
+      contracts: sources.fridaContracts.FRIDA_TOOL_CONTRACTS,
     },
     {
       identity: sources.hopperProvider.HOPPER_PROVIDER_IDENTITY,

@@ -98,6 +98,39 @@ export const TOOL_EXAMPLE_OVERRIDES: Readonly<
   close_rizin_debug_session: {
     session_id: "00000000-0000-4000-8000-000000000001",
   },
+  list_frida_devices: {},
+  list_frida_processes: { device_id: "local" },
+  start_frida_session: {
+    mode: "attach",
+    device_id: "local",
+    pid: 1234,
+  },
+  load_frida_script: {
+    session_id: "00000000-0000-4000-8000-000000000001",
+    source_kind: "inline",
+    source: "send(Process.id);",
+  },
+  resume_frida_session: {
+    session_id: "00000000-0000-4000-8000-000000000001",
+  },
+  unload_frida_script: {
+    session_id: "00000000-0000-4000-8000-000000000001",
+    script_id: "00000000-0000-4000-8000-000000000002",
+  },
+  frida_session_status: {
+    session_id: "00000000-0000-4000-8000-000000000001",
+  },
+  close_frida_session: {
+    session_id: "00000000-0000-4000-8000-000000000001",
+  },
+  instrument_with_frida: {
+    mode: "attach",
+    device_id: "local",
+    pid: 1234,
+    source_kind: "inline",
+    source: "send(Process.id);",
+    duration_ms: 1_000,
+  },
   list_cutter_sessions: {},
   cutter_command: {
     session_id: "00000000-0000-4000-8000-000000000001",
