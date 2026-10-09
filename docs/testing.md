@@ -996,3 +996,13 @@ npm run evidence:check
 
 The records preserve unsupported and unverified coverage as explicit unknowns.
 Run the matching real-tool prerequisites described in this guide.
+
+## Frida remote target
+
+`npm run verify:frida -- --address HOST:PORT --pid PID` builds REA, enumerates
+the explicitly selected remote device, confirms that PID is visible, attaches
+with Frida, sends a harmless marker from the target, captures the message, and
+detaches. Optional per-run flags are `--token`, `--certificate`, `--origin`,
+and `--keepalive-interval`; they are not written to files or included in the
+report. This lane requires Linux on the REA host and a reachable Frida server.
+Mock tests do not establish real device/server compatibility.

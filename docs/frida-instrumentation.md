@@ -1,0 +1,11 @@
+# Frida instrumentation
+
+REA exposes Frida device and process discovery, attach or spawn sessions, and caller-authored JavaScript instrumentation through the CLI and MCP. The Node bindings are an optional package dependency and load only when a Frida operation runs. REA does not install Frida server on a target.
+
+For remote devices, pass a host with an optional port (`host[:port]`; bracket IPv6 addresses) and any token, certificate, origin, or keepalive options on that operation. Authentication values are held only for the active call or session and are excluded from Evidence. Do not embed credentials in the endpoint address.
+
+MCP exposes `list_frida_devices`, `list_frida_processes`, `start_frida_session`, `load_frida_script`, `resume_frida_session`, `unload_frida_script`, `frida_session_status`, and `close_frida_session`. A spawned process starts paused so scripts can load first. Closing unloads session scripts and detaches; if the spawn remains paused, REA resumes it before detach. REA never kills the target. MCP sessions end with the server process. The one-shot CLI command `instrument-with-frida` accepts one inline script or script file, observes messages for a bounded duration, and returns Evidence with the source hash and captured messages.
+
+Frida scripts execute inside the selected target with that process's memory, filesystem, and network authority. Message capture is bounded to 16 MiB and reports truncation. Script source is not stored in Evidence; its selected path and SHA-256 digest are. Results report the observed session and messages, while unsupported platform metadata remains unknown. If cancellation arrives during a native Frida call, REA waits for that call to return, then closes any session it created and reports cancellation. Remote discovery retains its observations and reports a separate cleanup error if the temporary connection cannot be removed.
+
+The [Frida Core API](https://frida.re/docs/frida-core-api/) documents device management, sessions, and script loading; the [JavaScript API](https://frida.re/docs/javascript-api/) documents target-side instrumentation. [Luma](https://luma.frida.re/) is Frida's standalone GUI; REA does not automate or control it. The real-provider verifier requires a Linux host and an explicitly supplied Frida target; mock tests do not establish real device/server compatibility.
