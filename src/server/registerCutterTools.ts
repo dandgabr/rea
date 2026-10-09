@@ -35,9 +35,9 @@ export const registerCutterTools = (
   server.registerTool(
     command.name,
     toolRegistrationOptions(command),
-    async (input) => {
+    async (input, context) => {
       const result = await logToolExecution(logger, command.name, () =>
-        service.execute(input),
+        service.execute(input, { signal: context.mcpReq.signal }),
       );
       if (!result.ok) return delivery.toCallToolResult(result, command);
       return delivery.toEvidenceToolResult(

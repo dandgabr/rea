@@ -194,16 +194,23 @@ export class CutterBridgeClient {
     readonly expectedGeneration: number;
     readonly command: string;
     readonly json: boolean;
+    readonly signal?: AbortSignal;
   }): Promise<CutterBridgeExecution> {
+    input.signal?.throwIfAborted();
     const descriptor = await this.#find(input.sessionId);
+    input.signal?.throwIfAborted();
     let rawResponse: unknown;
     try {
-      rawResponse = await this.#request(descriptor, {
-        kind: "command",
-        expected_generation: input.expectedGeneration,
-        command: input.command,
-        json: input.json,
-      });
+      rawResponse = await this.#request(
+        descriptor,
+        {
+          kind: "command",
+          expected_generation: input.expectedGeneration,
+          command: input.command,
+          json: input.json,
+        },
+        input.signal,
+      );
     } catch (cause) {
       if (!(cause instanceof CutterBridgeRequestFailure) || !cause.requestSent)
         throw cause;
@@ -421,6 +428,7 @@ export class CutterBridgeClient {
   #request(
     descriptor: z.infer<typeof descriptorSchema>,
     request: Readonly<Record<string, unknown>>,
+    signal?: AbortSignal,
   ): Promise<unknown> {
     return new Promise((resolve, reject) => {
       const connection = createConnection({
@@ -434,6 +442,7 @@ export class CutterBridgeClient {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
         complete();
       };
       const rejectRequest = (message: string): void =>
@@ -444,6 +453,12 @@ export class CutterBridgeClient {
         rejectRequest("Cutter bridge request timed out");
         connection.destroy();
       }, 25_000);
+      const onAbort = (): void => {
+        rejectRequest("Cutter bridge request was cancelled");
+        connection.destroy();
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
+      if (signal?.aborted) onAbort();
       connection.setEncoding("utf8");
       connection.once("connect", () => {
         requestSent = true;

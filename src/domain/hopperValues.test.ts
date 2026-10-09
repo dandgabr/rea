@@ -87,6 +87,7 @@ describe("Hopper boundary values", () => {
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error._tag).toBe("AnalysisOutputError");
+      expect(result.error.operation).toBe("list_segments");
       expect(result.error.reason).toBe(
         "Provider returned an invalid segment list",
       );

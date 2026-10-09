@@ -28,7 +28,7 @@ export const REVERSE_ENGINEERING_TOOL_CONTRACTS = [
     ...toolContractMetadata("inspect_with_objdump"),
     kind: "native-provider",
     description:
-      "Run caller-selected GNU objdump inspection against a local artifact. Preserves captured stdout and stderr inline with SHA-256 Evidence, up to 16 MiB per stream (32 MiB combined); output_truncated reports provider output beyond a stream limit. The raw output is authoritative and REA does not claim a stable normalized format. DWARF mode follows local debug links by default and always disables debuginfod network access; follow_debug_links selects whether links are followed. BFD targets are those compiled into the installed binary.",
+      "Run caller-selected GNU objdump inspection against a local artifact. Preserves captured stdout and stderr inline with SHA-256 Evidence, up to 16 MiB per stream (32 MiB combined); output_truncated reports provider output beyond a stream limit. The raw output is authoritative and REA does not claim a stable normalized format. DWARF mode follows local debug links by default; follow_debug_links selects whether links are followed. REA clears DEBUGINFOD_URLS for objdump so DWARF processing does not make debuginfod network requests. BFD targets are those compiled into the installed binary.",
     inputSchema: objdumpInputSchema,
     outputSchema: evidenceResultOf(commandObservationSchema),
     examples: [

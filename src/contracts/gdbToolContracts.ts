@@ -23,7 +23,7 @@ export const GDB_TOOL_CONTRACTS = [
     ...toolContractMetadata("start_gdb_session"),
     kind: "native-provider",
     description:
-      "Start a BYO GDB process in MI3 mode when available, suppress startup files, and disable auto-loading. The session persists in this REA MCP server process and receives an explicit session ID.",
+      "Start a BYO GDB process in MI3 mode when available, suppress startup files, and disable auto-loading. The session persists in this REA MCP server process and receives an explicit session ID. Persistent sessions are unavailable on Windows because the owned Job Object cleanup cannot safely distinguish the debugger from its inferior processes.",
     inputSchema: z.strictObject({}),
     outputSchema: z.strictObject({
       session_id: sessionId,

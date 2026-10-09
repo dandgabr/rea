@@ -121,6 +121,50 @@ const createClient = (environment: NodeJS.ProcessEnv): CutterBridgeClient => {
   });
 };
 
+const verifyCutterCancellationAfterDispatch = async (): Promise<void> => {
+  const directory = await mkdtemp(join(tmpdir(), "rea-cutter-cancel-test-"));
+  const sessionId = "27d3e3f1-f1e5-49ae-91ec-95af1f343a5a";
+  const token = "synthetic-cutter-bridge-token-for-test";
+  let markDispatched: (() => void) | undefined;
+  const dispatched = new Promise<void>((resolve) => {
+    markDispatched = resolve;
+  });
+  const server = createServer((connection) => {
+    connection.once("data", (chunk: Buffer) => {
+      const request = JSON.parse(chunk.toString("utf8")) as {
+        kind?: string;
+      };
+      expect(request.kind).toBe("command");
+      markDispatched?.();
+    });
+  });
+  try {
+    const port = await listen(server);
+    await writeDescriptor(directory, sessionId, port, token);
+    const controller = new AbortController();
+    const execution = createClient({
+      REA_CUTTER_BRIDGE_DIR: directory,
+    }).execute({
+      sessionId,
+      expectedGeneration: 0,
+      command: "Ps /tmp/possibly-saved.rzdb",
+      json: false,
+      signal: controller.signal,
+    });
+    await dispatched;
+    controller.abort();
+    await expect(execution).resolves.toMatchObject({
+      executionState: "unknown",
+      error: "transport-response-missing",
+      message: expect.stringContaining("do not retry automatically"),
+      documentGeneration: 0,
+    });
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(directory, { recursive: true, force: true });
+  }
+};
+
 describe("CutterBridgeClient", () => {
   let directory: string | undefined;
   let server: ReturnType<typeof createServer> | undefined;
@@ -198,6 +242,10 @@ describe("CutterBridgeClient", () => {
       documentGeneration: 0,
     });
   });
+  it(
+    "reports unknown completion when cancellation follows Cutter command dispatch",
+    verifyCutterCancellationAfterDispatch,
+  );
   it("uses verified Windows handle reads before trusting Cutter descriptors", async () => {
     directory = await mkdtemp(
       join(tmpdir(), "rea-cutter-windows-bridge-test-"),

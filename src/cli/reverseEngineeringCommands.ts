@@ -235,14 +235,19 @@ export const registerReverseEngineeringCommands = (
         .describe("Return command-specific JSON output when available."),
     }),
     run: ({ args, options }) =>
-      logCliCommand(logger, CLI_COMMANDS.cutterCommand, async () => {
-        const result = await cutter.execute({
-          session_id: args.sessionId,
-          expected_generation: args.expectedGeneration,
-          command: args.command,
-          json: options.json,
-        });
-        return result.ok ? result.value : projectAnalysisError(result.error);
-      }),
+      withCommandCancellation((signal) =>
+        logCliCommand(logger, CLI_COMMANDS.cutterCommand, async () => {
+          const result = await cutter.execute(
+            {
+              session_id: args.sessionId,
+              expected_generation: args.expectedGeneration,
+              command: args.command,
+              json: options.json,
+            },
+            { signal },
+          );
+          return result.ok ? result.value : projectAnalysisError(result.error);
+        }),
+      ),
   });
 };

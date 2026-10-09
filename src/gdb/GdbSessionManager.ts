@@ -77,11 +77,13 @@ export class GdbSessionManager {
   readonly #sessions = new Map<string, GdbSession>();
   readonly #command: string;
   readonly #commandTimeoutMs: number;
+  readonly #platform: NodeJS.Platform;
 
   constructor(
     options: {
       readonly environment?: Readonly<NodeJS.ProcessEnv>;
       readonly commandTimeoutMs?: number;
+      readonly platform?: NodeJS.Platform;
     } = {},
   ) {
     this.#command =
@@ -89,6 +91,7 @@ export class GdbSessionManager {
       process.env.REA_GDB_COMMAND ??
       "gdb";
     this.#commandTimeoutMs = options.commandTimeoutMs ?? COMMAND_TIMEOUT_MS;
+    this.#platform = options.platform ?? process.platform;
   }
 
   async start(
@@ -99,6 +102,16 @@ export class GdbSessionManager {
       AnalysisError
     >
   > {
+    if (signal?.aborted)
+      return err(new AnalysisCancelledError("start_gdb_session"));
+    if (this.#platform === "win32")
+      return err(
+        new AnalysisCapabilityUnavailableError(
+          "gdb",
+          "start_gdb_session",
+          "Persistent Windows GDB sessions are unavailable because the owned Job Object cleanup can terminate debugger inferiors.",
+        ),
+      );
     const id = randomUUID();
     const mi3 = await this.#startProtocol(id, "mi3", signal);
     return mi3.ok || signal?.aborted || this.#sessions.has(id)
@@ -334,14 +347,7 @@ export class GdbSessionManager {
               return err(new AnalysisCancelledError("gdb_console", { cause }));
             if (cause instanceof AnalysisTimeoutError) return err(cause);
             if (session.protocolError !== undefined)
-              return err(
-                new AnalysisCapabilityUnavailableError(
-                  "gdb",
-                  "gdb_console",
-                  session.protocolError,
-                  { cause },
-                ),
-              );
+              return err(await this.#stopAfterProtocolFailure(session, cause));
             if (session.exited) {
               const result: GdbCommandResult = {
                 command,
@@ -554,8 +560,10 @@ export class GdbSessionManager {
         session.recentRecordsTruncated = true;
       } else session.lines.push(line);
     }
-    if (session.lines.length > 256)
+    if (session.lines.length > 256) {
       session.lines.splice(0, session.lines.length - 256);
+      session.recentRecordsTruncated = true;
+    }
     if (combined.includes("(gdb)")) session.startupResolve?.();
     for (const line of lines) {
       for (const pending of session.pending.values()) {
@@ -598,6 +606,21 @@ export class GdbSessionManager {
     session.pending.clear();
     session.startupReject?.(new Error(message));
     session.launched.process.kill("SIGTERM");
+  }
+
+  async #stopAfterProtocolFailure(
+    session: GdbSession,
+    cause: unknown,
+  ): Promise<AnalysisCapabilityUnavailableError> {
+    const stopped = await stopDebuggerOnly(session);
+    return new AnalysisCapabilityUnavailableError(
+      "gdb",
+      "gdb_console",
+      stopped.status === "incomplete"
+        ? `${session.protocolError} The owned process could not be confirmed stopped: ${stopped.reason}`
+        : (session.protocolError ?? "GDB protocol failed."),
+      { cause },
+    );
   }
 
   #request(
@@ -645,12 +668,44 @@ export class GdbSessionManager {
         session.pending.delete(token);
         session.protocolError =
           "A GDB MI command timed out; untagged stream output can no longer be safely correlated with later commands.";
-        session.launched.process.kill("SIGTERM");
         pending.cleanup();
-        reject(
-          new AnalysisTimeoutError("gdb_console", this.#commandTimeoutMs, {
-            cause: new Error(`GDB MI command timed out: ${command}`),
-          }),
+        void stopDebuggerOnly(session).then(
+          (stopped) =>
+            pending.reject(
+              stopped.status === "incomplete"
+                ? new AnalysisCapabilityUnavailableError(
+                    "gdb",
+                    "gdb_console",
+                    `GDB command output could not be correlated and its owned process could not be confirmed stopped: ${stopped.reason}`,
+                    {
+                      cause: new AnalysisTimeoutError(
+                        "gdb_console",
+                        this.#commandTimeoutMs,
+                        {
+                          cause: new Error(
+                            `GDB MI command timed out: ${command}`,
+                          ),
+                        },
+                      ),
+                    },
+                  )
+                : new AnalysisTimeoutError(
+                    "gdb_console",
+                    this.#commandTimeoutMs,
+                    {
+                      cause: new Error(`GDB MI command timed out: ${command}`),
+                    },
+                  ),
+            ),
+          (cause: unknown) =>
+            pending.reject(
+              new AnalysisCapabilityUnavailableError(
+                "gdb",
+                "gdb_console",
+                "GDB command output could not be correlated and owned process shutdown failed.",
+                { cause },
+              ),
+            ),
         );
       }, this.#commandTimeoutMs);
       session.pending.set(token, pending);

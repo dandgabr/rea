@@ -66,6 +66,7 @@ export class ReverseEngineeringService {
       input.path,
       input,
       options.signal,
+      { DEBUGINFOD_URLS: "" },
     );
   }
 
@@ -96,6 +97,7 @@ export class ReverseEngineeringService {
     path: string,
     parameters: Readonly<Record<string, JsonValue>>,
     signal?: AbortSignal,
+    environmentOverrides: Readonly<NodeJS.ProcessEnv> = {},
   ): Promise<Result<Evidence, AnalysisError>> {
     if (signal?.aborted) return err(new AnalysisCancelledError(operation));
     const absolutePath = resolve(path);
@@ -125,7 +127,11 @@ export class ReverseEngineeringService {
     let outputTruncated = false;
     try {
       const output = await this.#run(command, args, {
-        env: { ...process.env, ...this.#environment },
+        env: {
+          ...process.env,
+          ...this.#environment,
+          ...environmentOverrides,
+        },
         signal,
         timeout: DEFAULT_TIMEOUT_MS,
         stopSignal: "SIGTERM",

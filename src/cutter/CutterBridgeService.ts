@@ -1,5 +1,6 @@
 import { jsonValueSchema } from "../domain/jsonValue.js";
 import {
+  AnalysisCancelledError,
   AnalysisCapabilityUnavailableError,
   AnalysisInputError,
 } from "../domain/analysisErrorCore.js";
@@ -21,6 +22,7 @@ interface CutterBridgePort {
     readonly expectedGeneration: number;
     readonly command: string;
     readonly json: boolean;
+    readonly signal?: AbortSignal;
   }): Promise<CutterBridgeExecution>;
 }
 
@@ -32,9 +34,14 @@ export class CutterBridgeService {
     return this.client.listSessions();
   }
 
-  async execute(rawInput: unknown): Promise<Result<Evidence, AnalysisError>> {
+  async execute(
+    rawInput: unknown,
+    options: { readonly signal?: AbortSignal } = {},
+  ): Promise<Result<Evidence, AnalysisError>> {
     const parsed = cutterCommandInputSchema.safeParse(rawInput);
     if (!parsed.success) return err(new AnalysisInputError("cutter_command"));
+    if (options.signal?.aborted)
+      return err(new AnalysisCancelledError("cutter_command"));
     const input = parsed.data;
     try {
       const output = await this.client.execute({
@@ -42,6 +49,7 @@ export class CutterBridgeService {
         expectedGeneration: input.expected_generation,
         command: input.command,
         json: input.json,
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
       });
       const normalizedOutput = jsonValueSchema.parse(output.output);
       return ok(
@@ -98,6 +106,8 @@ export class CutterBridgeService {
         cause instanceof Error
           ? cause.message
           : "Unknown Cutter bridge failure";
+      if (options.signal?.aborted && !message.includes("may have completed"))
+        return err(new AnalysisCancelledError("cutter_command", { cause }));
       return err(
         message.includes("generation changed") ||
           message.includes("unavailable or stale")

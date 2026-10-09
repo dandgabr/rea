@@ -372,7 +372,7 @@ export class EnhancedTools {
         });
         continue;
       }
-      const related = parseRelatedAddresses(result.value, relation);
+      const related = parseRelatedAddresses(result.value, relation, tool);
       if (!related.ok) {
         graph[level].push({
           address: current.address,
@@ -476,11 +476,19 @@ export class EnhancedTools {
     if (!proceduresResult.ok) return proceduresResult;
     if (!stringsResult.ok) return stringsResult;
 
-    const segments = parseSegments(segmentsResult.value);
+    const segments = parseSegments(segmentsResult.value, "list_segments");
     if (!segments.ok) return segments;
-    const procedureCount = parseListCount(proceduresResult.value, "procedures");
+    const procedureCount = parseListCount(
+      proceduresResult.value,
+      "procedures",
+      "list_procedures",
+    );
     if (!procedureCount.ok) return procedureCount;
-    const stringCount = parseListCount(stringsResult.value, "strings");
+    const stringCount = parseListCount(
+      stringsResult.value,
+      "strings",
+      "list_strings",
+    );
     if (!stringCount.ok) return stringCount;
 
     return ok({

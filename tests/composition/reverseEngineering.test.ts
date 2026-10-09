@@ -8,15 +8,22 @@ import { describe, expect, it } from "vitest";
 import { ReverseEngineeringService } from "../../src/application/reverse/ReverseEngineeringService.js";
 
 describe("reverse engineering command services", () => {
-  it("uses explicit local DWARF link and debuginfod flags and retains captured output as Evidence", async () => {
+  it("uses compatible local DWARF link flags and disables debuginfod through the environment", async () => {
     const directory = await mkdtemp(join(tmpdir(), "rea-reverse-tools-"));
     const path = join(directory, "fixture.bin");
     await writeFile(path, Buffer.from([0x7f, 0x45, 0x4c, 0x46]));
-    const calls: { command: string; args: readonly string[] }[] = [];
+    const calls: {
+      command: string;
+      args: readonly string[];
+      env: NodeJS.ProcessEnv | undefined;
+    }[] = [];
     const service = new ReverseEngineeringService({
-      environment: { REA_OBJDUMP_COMMAND: "/tools/objdump" },
-      run: async (command, args) => {
-        calls.push({ command, args });
+      environment: {
+        REA_OBJDUMP_COMMAND: "/tools/objdump",
+        DEBUGINFOD_URLS: "https://debug.example.invalid",
+      },
+      run: async (command, args, options) => {
+        calls.push({ command, args, env: options?.env });
         return { stdout: "DWARF output\n", stderr: "diagnostic\n" };
       },
     });
@@ -32,7 +39,8 @@ describe("reverse engineering command services", () => {
       expect(calls).toEqual([
         {
           command: "/tools/objdump",
-          args: ["-W", "-WK", "-WE", path],
+          args: ["-W", "-WK", path],
+          env: expect.objectContaining({ DEBUGINFOD_URLS: "" }),
         },
       ]);
       expect(result.value.raw_result).toMatchObject({
@@ -97,8 +105,11 @@ describe("reverse engineering command services", () => {
         operation: "file_headers",
       });
       expect(result.ok).toBe(false);
-      if (!result.ok)
+      if (!result.ok) {
         expect(result.error._tag).toBe("AnalysisCapabilityUnavailableError");
+        expect(result.error.message).toContain("ENOENT");
+        expect(result.error.message).not.toContain("stdout");
+      }
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

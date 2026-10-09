@@ -9,6 +9,8 @@ const commandResult = z.strictObject({
   command: z.string(),
   output: z.string(),
   output_scope: z.literal("command_and_interleaved_session_output"),
+  output_truncated: z.boolean(),
+  completion_status: z.enum(["complete", "unknown"]),
   backend: z.string().nullable(),
 });
 
@@ -19,7 +21,7 @@ export const RIZIN_DEBUG_TOOL_CONTRACTS = [
     ...toolContractMetadata("start_rizin_debug_session"),
     kind: "native-provider",
     description:
-      "Start a persistent Rizin debugger session using `-N` to suppress user settings and scripts while retaining plugins, `-0` for NUL framing, and `-d` with an optional caller-selected IO debugger backend. Backend and target capabilities depend on the installed build. The session lives in this REA MCP process.",
+      "Start a persistent Rizin debugger session using `-N` to suppress user settings and scripts while retaining plugins, `-0` for NUL framing, and `-d` with an optional caller-selected IO debugger backend. Backend and target capabilities depend on the installed build. The session lives in this REA MCP process. Persistent sessions are unavailable on Windows because the owned Job Object cleanup cannot safely distinguish the debugger from its inferior processes.",
     inputSchema: z.strictObject({
       path: z.string().min(1),
       backend: z.string().min(1).optional(),
@@ -37,7 +39,7 @@ export const RIZIN_DEBUG_TOOL_CONTRACTS = [
     ...toolContractMetadata("rizin_debug_command"),
     kind: "native-provider",
     description:
-      "Execute one unrestricted command in a persistent Rizin debugger session. Returns raw output through an explicit completion marker inline with Evidence, including any backend output interleaved before that marker; `output_scope` identifies this combined scope. Unsolicited frames already queued before the command make the session unavailable because correlation is ambiguous. Commands can access local files, shell, network, plugins, and target state; effects depend on the active backend and target.",
+      "Execute one unrestricted command in a persistent Rizin debugger session. Returns raw output inline with Evidence, including backend output interleaved before the completion marker. If the command exceeds the output or frame limit, `output_truncated` is true and `completion_status` is `unknown`; retained partial output is returned and the owned debugger session is stopped. Unsolicited frames already queued before the command make the session unavailable because correlation is ambiguous. Commands can access local files, shell, network, plugins, and target state; effects depend on the active backend and target.",
     inputSchema: z.strictObject({
       session_id: sessionId,
       command: z
