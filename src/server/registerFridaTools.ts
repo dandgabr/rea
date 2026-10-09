@@ -93,7 +93,7 @@ export const registerFridaTools = (
         ...(remote === undefined ? {} : { remote }),
       };
       const result = await logToolExecution(logger, start.name, () =>
-        input.mode === "attach"
+        input.mode === "attach" && input.pid !== undefined
           ? service.startSession(
               {
                 ...selected,
@@ -102,15 +102,20 @@ export const registerFridaTools = (
               },
               context.mcpReq.signal,
             )
-          : service.startSession(
-              {
-                ...selected,
-                mode: input.mode,
-                program: input.program,
-                ...(input.argv === undefined ? {} : { argv: input.argv }),
-              },
-              context.mcpReq.signal,
-            ),
+          : input.mode === "spawn" && input.program !== undefined
+            ? service.startSession(
+                {
+                  ...selected,
+                  mode: input.mode,
+                  program: input.program,
+                  ...(input.argv === undefined ? {} : { argv: input.argv }),
+                },
+                context.mcpReq.signal,
+              )
+            : Promise.resolve({
+                ok: false as const,
+                error: new AnalysisInputError(start.name),
+              }),
       );
       if (!result.ok) return toCallToolResult(result, start);
       return toCallToolResult(
@@ -127,12 +132,20 @@ export const registerFridaTools = (
     toolRegistrationOptions(load),
     async (input) => {
       const result = await logToolExecution(logger, load.name, () =>
-        service.loadScript(
-          input.session_id,
-          input.source_kind === "inline"
-            ? { sourceKind: "inline", source: input.source }
-            : { sourceKind: "file", path: input.path },
-        ),
+        input.source_kind === "inline" && input.source !== undefined
+          ? service.loadScript(input.session_id, {
+              sourceKind: "inline",
+              source: input.source,
+            })
+          : input.source_kind === "file" && input.path !== undefined
+            ? service.loadScript(input.session_id, {
+                sourceKind: "file",
+                path: input.path,
+              })
+            : Promise.resolve({
+                ok: false as const,
+                error: new AnalysisInputError(load.name),
+              }),
       );
       if (!result.ok) return toCallToolResult(result, load);
       return toEvidenceToolResult(
@@ -174,7 +187,7 @@ export const registerFridaTools = (
       if (evidence === undefined)
         return toCallToolResult(
           {
-            ok: false,
+            ok: false as const,
             error: new AnalysisInputError(status.name),
           },
           status,
@@ -207,29 +220,48 @@ export const registerFridaTools = (
         ...(remote === undefined ? {} : { remote }),
       };
       const source =
-        input.source_kind === "inline"
+        input.source_kind === "inline" && input.source !== undefined
           ? { sourceKind: "inline" as const, source: input.source }
-          : { sourceKind: "file" as const, path: input.path };
-      const result = await logToolExecution(logger, instrument.name, () =>
-        service.instrument(
-          input.mode === "attach"
-            ? {
+          : input.source_kind === "file" && input.path !== undefined
+            ? { sourceKind: "file" as const, path: input.path }
+            : undefined;
+      if (source === undefined)
+        return toCallToolResult(
+          { ok: false, error: new AnalysisInputError(instrument.name) },
+          instrument,
+        );
+      const operation =
+        input.mode === "attach" && input.pid !== undefined
+          ? service.instrument(
+              {
                 ...selected,
                 mode: "attach",
                 pid: input.pid,
                 source,
                 durationMs: input.duration_ms,
-              }
-            : {
-                ...selected,
-                mode: "spawn",
-                program: input.program,
-                ...(input.argv === undefined ? {} : { argv: input.argv }),
-                source,
-                durationMs: input.duration_ms,
               },
-          context.mcpReq.signal,
-        ),
+              context.mcpReq.signal,
+            )
+          : input.mode === "spawn" && input.program !== undefined
+            ? service.instrument(
+                {
+                  ...selected,
+                  mode: "spawn",
+                  program: input.program,
+                  ...(input.argv === undefined ? {} : { argv: input.argv }),
+                  source,
+                  durationMs: input.duration_ms,
+                },
+                context.mcpReq.signal,
+              )
+            : Promise.resolve({
+                ok: false as const,
+                error: new AnalysisInputError(instrument.name),
+              });
+      const result = await logToolExecution(
+        logger,
+        instrument.name,
+        () => operation,
       );
       if (!result.ok) return toCallToolResult(result, instrument);
       return toEvidenceToolResult(

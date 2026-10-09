@@ -28,11 +28,21 @@ export const registerFridaCommands = (
       .min(1)
       .max(2048)
       .refine(isValidFridaRemoteAddress)
+      .describe("Remote Frida host address, optionally with a port")
       .optional(),
-    token: z.string().min(1).optional(),
-    certificate: z.string().min(1).optional(),
-    origin: z.string().min(1).optional(),
-    keepaliveInterval: z.number().int().positive().optional(),
+    token: z.string().min(1).describe("Remote authentication token").optional(),
+    certificate: z
+      .string()
+      .min(1)
+      .describe("Remote TLS certificate")
+      .optional(),
+    origin: z.string().min(1).describe("Remote connection origin").optional(),
+    keepaliveInterval: z
+      .number()
+      .int()
+      .positive()
+      .describe("Remote keepalive interval in milliseconds")
+      .optional(),
   });
   const remoteFrom = (
     options: z.infer<typeof remoteOptions>,
@@ -82,7 +92,13 @@ export const registerFridaCommands = (
     description: "List processes visible through a Frida device",
     args: z.object({}),
     options: remoteOptions
-      .extend({ deviceId: z.string().min(1).optional() })
+      .extend({
+        deviceId: z
+          .string()
+          .min(1)
+          .describe("Frida device identifier")
+          .optional(),
+      })
       .refine(
         (options) =>
           options.remoteAddress === undefined || options.deviceId === undefined,
@@ -112,16 +128,38 @@ export const registerFridaCommands = (
   cli.command(CLI_COMMANDS.instrumentWithFrida, {
     description: "Run one Frida script against a selected process and detach",
     args: z.object({
-      mode: z.enum(["attach", "spawn"]),
-      target: z.string().min(1),
+      mode: z
+        .enum(["attach", "spawn"])
+        .describe("Attach to a PID or spawn a program"),
+      target: z
+        .string()
+        .min(1)
+        .describe("Process ID for attach or program path for spawn"),
     }),
     options: remoteOptions
       .extend({
-        deviceId: z.string().min(1).optional(),
-        script: z.string().optional(),
-        scriptFile: z.string().min(1).optional(),
-        argument: z.array(z.string()).optional(),
-        durationMs: z.number().int().min(0).max(60_000).default(1_000),
+        deviceId: z
+          .string()
+          .min(1)
+          .describe("Frida device identifier")
+          .optional(),
+        script: z.string().describe("Inline JavaScript to load").optional(),
+        scriptFile: z
+          .string()
+          .min(1)
+          .describe("Path to JavaScript source file")
+          .optional(),
+        argument: z
+          .array(z.string())
+          .describe("Arguments passed to a spawned target")
+          .optional(),
+        durationMs: z
+          .number()
+          .int()
+          .min(0)
+          .max(60_000)
+          .describe("Instrumentation duration in milliseconds")
+          .default(1_000),
       })
       .refine(
         (options) =>

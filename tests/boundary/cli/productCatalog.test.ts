@@ -53,6 +53,7 @@ import { RIZIN_PROVIDER_IDENTITY } from "../../../src/rizin/RizinCommand.js";
 import { GDB_PROVIDER_IDENTITY } from "../../../src/gdb/GdbSessionManager.js";
 import { RIZIN_DEBUGGER_PROVIDER_IDENTITY } from "../../../src/rizin/RizinDebugSessionManager.js";
 import { CUTTER_PROVIDER_IDENTITY } from "../../../src/cutter/CutterBridgeClient.js";
+import { FRIDA_PROVIDER_IDENTITY } from "../../../src/frida/FridaInstrumentationManager.js";
 import {
   assertDocumentationFacts,
   documentationFactIssues,
@@ -143,6 +144,7 @@ describe("canonical product catalog", () => {
         GDB_PROVIDER_IDENTITY,
         RIZIN_DEBUGGER_PROVIDER_IDENTITY,
         CUTTER_PROVIDER_IDENTITY,
+        FRIDA_PROVIDER_IDENTITY,
       ]
         .map(({ id }) => id)
         .sort(),
