@@ -1,5 +1,7 @@
 import { registerEvmCommands } from "./cli/evmCommands.js";
 import { registerBinaryDiagnosticsCommands } from "./cli/binaryDiagnosticsCommands.js";
+import { registerFridaCommands } from "./cli/fridaCommands.js";
+import type { FridaInstrumentationPort } from "./application/frida/FridaInstrumentationPort.js";
 import { Cli } from "incur";
 
 import { createLogger, parseLogLevel } from "./logger.js";
@@ -39,6 +41,7 @@ import { registerReverseEngineeringCommands } from "./cli/reverseEngineeringComm
 export const createCli = (
   environment: Readonly<Record<string, string | undefined>> = process.env,
   resultOutput?: CliResultOutput,
+  fridaInstrumentation?: FridaInstrumentationPort,
 ): CliInstance => {
   const logger = createLogger(
     "cli",
@@ -67,6 +70,7 @@ export const createCli = (
   registerAndroidCommands(cli, logger, environment);
   registerFirmwareCommands(cli, logger, environment);
   registerBinaryDiagnosticsCommands(cli, logger, environment);
+  registerFridaCommands(cli, logger, fridaInstrumentation);
   registerEvidenceCommands(cli, logger);
   registerProcessCommands(cli, logger, environment);
   registerBrowserCommands(cli, logger);

@@ -45,6 +45,9 @@ export const CLI_COMMANDS = Object.freeze({
   executeRizinCommand: "execute-rizin-command",
   debugWithGdb: "debug-with-gdb",
   debugWithRizin: "debug-with-rizin",
+  listFridaDevices: "list-frida-devices",
+  listFridaProcesses: "list-frida-processes",
+  instrumentWithFrida: "instrument-with-frida",
   listCutterSessions: "list-cutter-sessions",
   cutterCommand: "cutter-command",
   inspectFirmwareRegions: "inspect-firmware-regions",
@@ -125,6 +128,9 @@ export const CLI_COMMAND_TOOL_ALIASES = Object.freeze({
   "debug-with-rizin": ["rizin_debug_command"],
   "list-cutter-sessions": ["list_cutter_sessions"],
   "cutter-command": ["cutter_command"],
+  "list-frida-devices": ["list_frida_devices"],
+  "list-frida-processes": ["list_frida_processes"],
+  "instrument-with-frida": ["instrument_with_frida"],
 });
 
 /** MCP operations without a dedicated CLI command or direct command alias. */
@@ -188,4 +194,10 @@ export const MCP_TOOLS_WITHOUT_DEDICATED_CLI = Object.freeze([
   "start_rizin_debug_session",
   "rizin_debug_session_status",
   "close_rizin_debug_session",
+  "start_frida_session",
+  "load_frida_script",
+  "resume_frida_session",
+  "unload_frida_script",
+  "frida_session_status",
+  "close_frida_session",
 ]);
