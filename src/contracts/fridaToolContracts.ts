@@ -109,21 +109,26 @@ export const FRIDA_TOOL_CONTRACTS = [
     kind: "native-provider",
     description:
       "Attach Frida to one selected process or spawn one selected target. Spawned targets remain paused until resume_frida_session, allowing scripts to load before execution. Closing a session detaches instrumentation; it does not kill the target.",
-    inputSchema: exclusiveDeviceSelector(
-      z.discriminatedUnion("mode", [
-        z.strictObject({
-          mode: z.literal("attach"),
-          ...deviceSelector.shape,
-          pid: z.number().int().positive(),
-        }),
-        z.strictObject({
-          mode: z.literal("spawn"),
-          ...deviceSelector.shape,
-          program: z.string().min(1),
-          argv: z.array(z.string()).optional(),
-        }),
-      ]),
-    ),
+    inputSchema: z
+      .strictObject({
+        mode: z.enum(["attach", "spawn"]),
+        ...deviceSelector.shape,
+        pid: z.number().int().positive().optional(),
+        program: z.string().min(1).optional(),
+        argv: z.array(z.string()).optional(),
+      })
+      .refine(
+        (value) =>
+          ((value.mode === "attach" &&
+            value.pid !== undefined &&
+            value.program === undefined &&
+            value.argv === undefined) ||
+            (value.mode === "spawn" &&
+              value.program !== undefined &&
+              value.pid === undefined)) &&
+          !(value.device_id !== undefined && value.remote !== undefined),
+        "Select one device; attach requires pid; spawn requires program and rejects pid",
+      ),
     outputSchema: sessionOutput,
     examples: [
       {
@@ -138,18 +143,23 @@ export const FRIDA_TOOL_CONTRACTS = [
     kind: "native-provider",
     description:
       "Load caller-supplied JavaScript into a Frida session. Scripts can read or change target memory and behavior and can access the target process's capabilities. Messages and script errors are returned inline as Evidence; source content is not persisted.",
-    inputSchema: z.discriminatedUnion("source_kind", [
-      z.strictObject({
+    inputSchema: z
+      .strictObject({
         session_id: sessionId,
-        source_kind: z.literal("inline"),
-        source: z.string(),
-      }),
-      z.strictObject({
-        session_id: sessionId,
-        source_kind: z.literal("file"),
-        path: z.string().min(1),
-      }),
-    ]),
+        source_kind: z.enum(["inline", "file"]),
+        source: z.string().optional(),
+        path: z.string().min(1).optional(),
+      })
+      .refine(
+        (value) =>
+          (value.source_kind === "inline" &&
+            value.source !== undefined &&
+            value.path === undefined) ||
+          (value.source_kind === "file" &&
+            value.path !== undefined &&
+            value.source === undefined),
+        "Inline source requires source; file source requires path",
+      ),
     outputSchema: evidenceResultOf(scriptOutput),
     examples: [
       {
@@ -246,44 +256,36 @@ export const FRIDA_TOOL_CONTRACTS = [
     kind: "native-provider",
     description:
       "Run one caller-authored Frida script against an explicitly selected process and detach when the observation window ends. The CLI and MCP share this ephemeral workflow; use MCP session operations for persistent sessions. Remote authentication is used only for this call and excluded from Evidence.",
-    inputSchema: exclusiveDeviceSelector(
-      z.union([
-        z.strictObject({
-          mode: z.literal("attach"),
-          ...deviceSelector.shape,
-          pid: z.number().int().positive(),
-          source_kind: z.literal("inline"),
-          source: z.string(),
-          duration_ms: z.number().int().min(0).max(60_000).default(1_000),
-        }),
-        z.strictObject({
-          mode: z.literal("attach"),
-          ...deviceSelector.shape,
-          pid: z.number().int().positive(),
-          source_kind: z.literal("file"),
-          path: z.string().min(1),
-          duration_ms: z.number().int().min(0).max(60_000).default(1_000),
-        }),
-        z.strictObject({
-          mode: z.literal("spawn"),
-          ...deviceSelector.shape,
-          program: z.string().min(1),
-          argv: z.array(z.string()).optional(),
-          source_kind: z.literal("inline"),
-          source: z.string(),
-          duration_ms: z.number().int().min(0).max(60_000).default(1_000),
-        }),
-        z.strictObject({
-          mode: z.literal("spawn"),
-          ...deviceSelector.shape,
-          program: z.string().min(1),
-          argv: z.array(z.string()).optional(),
-          source_kind: z.literal("file"),
-          path: z.string().min(1),
-          duration_ms: z.number().int().min(0).max(60_000).default(1_000),
-        }),
-      ]),
-    ),
+    inputSchema: z
+      .strictObject({
+        mode: z.enum(["attach", "spawn"]),
+        ...deviceSelector.shape,
+        pid: z.number().int().positive().optional(),
+        program: z.string().min(1).optional(),
+        argv: z.array(z.string()).optional(),
+        source_kind: z.enum(["inline", "file"]),
+        source: z.string().optional(),
+        path: z.string().min(1).optional(),
+        duration_ms: z.number().int().min(0).max(60_000).default(1_000),
+      })
+      .refine(
+        (value) =>
+          !(value.device_id !== undefined && value.remote !== undefined) &&
+          ((value.mode === "attach" &&
+            value.pid !== undefined &&
+            value.program === undefined &&
+            value.argv === undefined) ||
+            (value.mode === "spawn" &&
+              value.program !== undefined &&
+              value.pid === undefined)) &&
+          ((value.source_kind === "inline" &&
+            value.source !== undefined &&
+            value.path === undefined) ||
+            (value.source_kind === "file" &&
+              value.path !== undefined &&
+              value.source === undefined)),
+        "Select one device and provide fields matching the mode and source_kind",
+      ),
     outputSchema: evidenceResultOf(
       z.strictObject({
         ...sessionOutput.shape,

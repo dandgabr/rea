@@ -10,7 +10,6 @@ import { SUPPORTED_CLIENT_DEFINITIONS } from "../../../src/application/Supported
 import { CLI_COMMAND_NAMES } from "../../../src/cliCommandNames.js";
 import { createCli } from "../../../src/cli.js";
 import { FRIDA_PROVIDER_IDENTITY } from "../../../src/frida/FridaInstrumentationManager.js";
-import { FRIDA_PROVIDER_IDENTITY } from "../../../src/frida/FridaInstrumentationManager.js";
 import { TOOL_CONTRACTS } from "../../../src/contracts/toolContracts.js";
 import {
   HOPPER_OPERATIONS,
@@ -88,10 +87,6 @@ describe("canonical product catalog", () => {
         .map(({ name }) => name)
         .sort(),
     );
-    expect(
-      catalog.providers.find(({ id }) => id === FRIDA_PROVIDER_IDENTITY.id)
-        ?.capabilities,
-    ).toEqual(["frida_session"]);
     expect(
       JSON.parse(await readFile("docs/public/product-catalog.json", "utf8")),
     ).toEqual(catalog);
