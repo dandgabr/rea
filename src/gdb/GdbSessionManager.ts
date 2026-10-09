@@ -52,6 +52,16 @@ export interface GdbCommandResult {
   readonly log: string;
   readonly process_exit_observed?: boolean;
   readonly output_truncated: boolean;
+  readonly completion_status: "complete" | "unknown";
+}
+
+class GdbCommandTimeoutError extends AnalysisTimeoutError {
+  constructor(
+    readonly partial: GdbCommandResult,
+    timeoutMs: number,
+  ) {
+    super("gdb_console", timeoutMs);
+  }
 }
 
 interface GdbSession {
@@ -323,6 +333,7 @@ export class GdbSessionManager {
                   target: result.target,
                   log: result.log,
                   output_truncated: result.output_truncated,
+                  completion_status: result.completion_status,
                 },
                 rawResult: {
                   command,
@@ -332,6 +343,7 @@ export class GdbSessionManager {
                   target: result.target,
                   log: result.log,
                   output_truncated: result.output_truncated,
+                  completion_status: result.completion_status,
                 },
                 subjectUnavailableReason:
                   "The active GDB inferior identity is not established by the debugger session identifier.",
@@ -345,6 +357,28 @@ export class GdbSessionManager {
           } catch (cause) {
             if (signal?.aborted || cause instanceof AnalysisCancelledError)
               return err(new AnalysisCancelledError("gdb_console", { cause }));
+            if (cause instanceof GdbCommandTimeoutError) {
+              const result = cause.partial;
+              const evidence = createEvidence(
+                undefined,
+                GDB_PROVIDER_IDENTITY,
+                {
+                  predicateType: "rea.debugger.console-observation",
+                  operation: "gdb_console",
+                  parameters: { session_id: sessionId, command },
+                  result: { ...result, records: [...result.records] },
+                  rawResult: { ...result, records: [...result.records] },
+                  subjectUnavailableReason:
+                    "The active GDB inferior identity is not established by the debugger session identifier.",
+                  limitations: [
+                    "The GDB command exceeded its deadline; retained MI and stream records are partial and command completion is unknown.",
+                    "The owned GDB process was stopped because output correlation could no longer be guaranteed.",
+                    "The unrestricted GDB console can access local shell, filesystem, network, and target controls.",
+                  ],
+                },
+              );
+              return ok({ result, evidence });
+            }
             if (cause instanceof AnalysisTimeoutError) return err(cause);
             if (session.protocolError !== undefined)
               return err(await this.#stopAfterProtocolFailure(session, cause));
@@ -363,7 +397,8 @@ export class GdbSessionManager {
                   .filter((line) => line.startsWith("&"))
                   .join("\n"),
                 process_exit_observed: true,
-                output_truncated: false,
+                output_truncated: session.recentRecordsTruncated,
+                completion_status: "unknown",
               };
               const evidence = createEvidence(
                 undefined,
@@ -380,7 +415,8 @@ export class GdbSessionManager {
                     target: result.target,
                     log: result.log,
                     process_exit_observed: true,
-                    output_truncated: false,
+                    output_truncated: result.output_truncated,
+                    completion_status: "unknown",
                   },
                   rawResult: {
                     command: result.command,
@@ -390,12 +426,18 @@ export class GdbSessionManager {
                     target: result.target,
                     log: result.log,
                     process_exit_observed: true,
-                    output_truncated: false,
+                    output_truncated: result.output_truncated,
+                    completion_status: "unknown",
                   },
                   subjectUnavailableReason:
                     "The active GDB inferior identity is not established by the debugger session identifier.",
                   limitations: [
                     "GDB exited before returning a correlated MI result record; all retained MI and stream records are returned raw.",
+                    ...(result.output_truncated
+                      ? [
+                          "Retained MI records are a truncated suffix; output completeness is unknown.",
+                        ]
+                      : []),
                   ],
                 },
               );
@@ -519,14 +561,21 @@ export class GdbSessionManager {
   ): Promise<Value> {
     const previous = session.commandTail;
     let release: (() => void) | undefined;
+    let acquired = false;
     session.commandTail = new Promise<void>((resolve) => {
       release = resolve;
     });
     try {
       await waitForTurn(previous, signal);
+      acquired = true;
       return await operation();
     } finally {
-      release?.();
+      if (acquired) release?.();
+      else
+        void previous.then(
+          () => release?.(),
+          () => release?.(),
+        );
     }
   }
 
@@ -592,6 +641,7 @@ export class GdbSessionManager {
         target: records.filter((record) => record.startsWith("@")).join("\n"),
         log: records.filter((record) => record.startsWith("&")).join("\n"),
         output_truncated: pending.outputTruncated,
+        completion_status: "complete",
       });
     }
   }
@@ -689,12 +739,24 @@ export class GdbSessionManager {
                       ),
                     },
                   )
-                : new AnalysisTimeoutError(
-                    "gdb_console",
-                    this.#commandTimeoutMs,
+                : new GdbCommandTimeoutError(
                     {
-                      cause: new Error(`GDB MI command timed out: ${command}`),
+                      command,
+                      mi: "",
+                      records: [...pending.lines],
+                      console: pending.lines
+                        .filter((line) => line.startsWith("~"))
+                        .join("\n"),
+                      target: pending.lines
+                        .filter((line) => line.startsWith("@"))
+                        .join("\n"),
+                      log: pending.lines
+                        .filter((line) => line.startsWith("&"))
+                        .join("\n"),
+                      output_truncated: pending.outputTruncated,
+                      completion_status: "unknown",
                     },
+                    this.#commandTimeoutMs,
                   ),
             ),
           (cause: unknown) =>

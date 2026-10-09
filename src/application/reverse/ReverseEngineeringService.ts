@@ -125,6 +125,7 @@ export class ReverseEngineeringService {
     let exitCode: number | string | null = 0;
     let signalName: string | null = null;
     let outputTruncated = false;
+    let completionStatus: "complete" | "unknown" = "complete";
     try {
       const output = await this.#run(command, args, {
         env: {
@@ -168,6 +169,10 @@ export class ReverseEngineeringService {
       exitCode = capture.code;
       signalName = capture.signal;
       outputTruncated = capture.outputTruncated;
+      if (code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") {
+        exitCode = null;
+        completionStatus = "unknown";
+      }
     }
     let digestAfter: string | null = null;
     try {
@@ -183,12 +188,18 @@ export class ReverseEngineeringService {
       exit_code: exitCode,
       signal: signalName,
       output_truncated: outputTruncated,
+      completion_status: completionStatus,
       artifact_sha256_after: digestAfter,
       artifact_changed: artifactChanged,
     };
     const limitations = [
       "The executable version and supported formats are reported as unknown because no reliable version probe was performed.",
       "A non-zero process exit is preserved as an observed command result.",
+      ...(completionStatus === "unknown"
+        ? [
+            "The output buffer limit terminated the child process; captured output is partial and command completion is unknown.",
+          ]
+        : []),
       "Pre-run and post-run digests detect artifact changes across the provider call but cannot prove the exact bytes consumed during the call.",
       ...(artifactChanged === true
         ? [

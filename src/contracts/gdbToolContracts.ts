@@ -14,6 +14,7 @@ const gdbCommandResult = z.strictObject({
   log: z.string(),
   process_exit_observed: z.boolean().optional(),
   output_truncated: z.boolean(),
+  completion_status: z.enum(["complete", "unknown"]),
 });
 
 /** Persistent GDB/MI session contracts hosted by the existing REA MCP server. */
@@ -36,7 +37,7 @@ export const GDB_TOOL_CONTRACTS = [
     ...toolContractMetadata("gdb_console"),
     kind: "native-provider",
     description:
-      "Run one unrestricted GDB CLI command through MI interpreter-exec console and return raw MI, console, target, and log records inline with Evidence. Commands can execute shell, alter target state, access files, and use network. Closing the debugger never implies target termination.",
+      "Run one unrestricted GDB CLI command through MI interpreter-exec console and return raw MI, console, target, and log records inline with Evidence. A command timeout preserves collected records with completion_status unknown and stops the owned debugger session. Commands can execute shell, alter target state, access files, and use network. Closing the debugger never implies target termination.",
     inputSchema: z.strictObject({
       session_id: sessionId,
       command: z.string().min(1),

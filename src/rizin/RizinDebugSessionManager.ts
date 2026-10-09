@@ -67,6 +67,12 @@ interface RizinFrame {
   readonly truncated: boolean;
 }
 
+class RizinCommandTimeoutError extends Error {
+  constructor(readonly partialOutput: string) {
+    super("Timed out waiting for Rizin's command-completion marker");
+  }
+}
+
 /** Owns persistent Rizin debugger processes independently from BinarySession. */
 export class RizinDebugSessionManager {
   readonly #sessions = new Map<string, RizinDebugSession>();
@@ -251,6 +257,7 @@ export class RizinDebugSessionManager {
     if (signal?.aborted)
       return err(new AnalysisCancelledError("rizin_debug_command"));
     let release: (() => void) | undefined;
+    let acquired = false;
     let commandSent = false;
     const previous = session.commandTail;
     session.commandTail = new Promise<void>((resolve) => {
@@ -258,6 +265,7 @@ export class RizinDebugSessionManager {
     });
     try {
       await waitForTurn(previous, signal);
+      acquired = true;
       if (signal?.aborted)
         return err(new AnalysisCancelledError("rizin_debug_command"));
       if (session.frames.length > 0) {
@@ -382,6 +390,47 @@ export class RizinDebugSessionManager {
       }
       if (session.protocolError !== undefined)
         return err(await this.#stopAfterProtocolFailure(session, cause));
+      if (cause instanceof RizinCommandTimeoutError) {
+        session.protocolError =
+          "Rizin command timed out before its completion marker; output correlation is no longer safe.";
+        const stopped = await stopDebuggerOnly(session);
+        if (stopped.status === "incomplete")
+          return err(
+            new AnalysisCapabilityUnavailableError(
+              "rizin",
+              "rizin_debug_command",
+              `Rizin timed out and the owned process could not be confirmed stopped: ${stopped.reason}`,
+              { cause },
+            ),
+          );
+        const result: RizinDebugCommandResult = {
+          command,
+          output: cause.partialOutput,
+          output_scope: "command_and_interleaved_session_output",
+          output_truncated: true,
+          completion_status: "unknown",
+          backend: session.backend,
+        };
+        const evidence = createEvidence(
+          undefined,
+          RIZIN_DEBUGGER_PROVIDER_IDENTITY,
+          {
+            predicateType: "rea.debugger.command-observation",
+            operation: "rizin_debug_command",
+            parameters: { session_id: sessionId, command },
+            result: { ...result },
+            rawResult: { ...result },
+            subjectUnavailableReason:
+              "The current debugger target identity is not established by the Rizin session identifier.",
+            limitations: [
+              "The command timed out before its completion marker; retained output is partial and completion is unknown.",
+              "The owned debugger process was stopped because output correlation could no longer be guaranteed.",
+              "The command is unrestricted and may access local files, the shell, network, or mutate the target.",
+            ],
+          },
+        );
+        return ok({ result, evidence });
+      }
       if (session.exited)
         return err(
           new AnalysisCapabilityUnavailableError(
@@ -409,8 +458,14 @@ export class RizinDebugSessionManager {
         }),
       );
     } finally {
-      session.commandCaptureActive = false;
-      release?.();
+      if (acquired) {
+        session.commandCaptureActive = false;
+        release?.();
+      } else
+        void previous.then(
+          () => release?.(),
+          () => release?.(),
+        );
     }
   }
 
@@ -620,7 +675,13 @@ const waitForCommandFrames = async (
       throw new Error(
         "Timed out waiting for Rizin's command-completion marker",
       );
-    const received = await waitForFrame(session, remaining, signal);
+    let received: RizinFrame;
+    try {
+      received = await waitForFrame(session, remaining, signal);
+    } catch (cause) {
+      if (cause instanceof AnalysisCancelledError) throw cause;
+      throw new RizinCommandTimeoutError(output.join("\n"));
+    }
     frameCount += 1;
     if (frameCount > MAX_COMMAND_FRAMES) {
       const message =

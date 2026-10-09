@@ -114,6 +114,40 @@ describe("reverse engineering command services", () => {
       await rm(directory, { recursive: true, force: true });
     }
   });
+
+  it("marks max-buffer termination as unknown completion while retaining output", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "rea-objdump-max-buffer-"));
+    const path = join(directory, "fixture.bin");
+    await writeFile(path, "fixture");
+    const service = new ReverseEngineeringService({
+      run: async () => {
+        throw Object.assign(new Error("max buffer exceeded"), {
+          stdout: "captured partial output",
+          stderr: "",
+          code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
+          signal: "SIGTERM",
+          killed: true,
+        });
+      },
+    });
+
+    try {
+      const result = await service.executeRizinCommand({
+        path,
+        command: "wx 00 @ 0",
+      });
+      expect(result.ok).toBe(true);
+      if (result.ok)
+        expect(result.value.raw_result).toMatchObject({
+          stdout: "captured partial output",
+          exit_code: null,
+          output_truncated: true,
+          completion_status: "unknown",
+        });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("Rizin command service", () => {

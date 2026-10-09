@@ -108,7 +108,7 @@ process.stdin.on("data", (chunk) => {
 );
 
 it.skipIf(process.platform === "win32")(
-  "returns a timeout error for a GDB command deadline",
+  "returns partial GDB observations with unknown completion on command timeout",
   async () => {
     directory = await mkdtemp(join(tmpdir(), "rea-gdb-command-timeout-"));
     const provider = join(directory, "fake-gdb-command-timeout.mjs");
@@ -127,6 +127,7 @@ process.stdin.on("data", (chunk) => {
     const line = input.slice(0, boundary); input = input.slice(boundary + 1);
     const match = /^(\\d+)/.exec(line);
     if (match && line.includes("auto-load off")) process.stdout.write(match[1] + "^done\\n");
+    else if (match) process.stdout.write("~\\"partial output\\n\\"\\n");
   }
 });
 `,
@@ -146,17 +147,178 @@ process.stdin.on("data", (chunk) => {
       "shell sleep 5",
     );
 
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.error._tag).toBe("AnalysisTimeoutError");
-      expect(
-        "timeoutMs" in result.error ? result.error.timeoutMs : undefined,
-      ).toBe(40);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value.result).toMatchObject({
+        completion_status: "unknown",
+        records: ['~"partial output', '"'],
+      });
+      expect(result.value.evidence.limitations.join(" ")).toContain("partial");
     }
     await expectOwnedProcessExited(
       await readFile(join(directory, "pid"), "utf8"),
     );
     expect(manager.status(started.value.session_id)?.state).toBe("closed");
+  },
+);
+
+it.skipIf(process.platform === "win32")(
+  "keeps queued GDB commands serialized when a waiting request is cancelled",
+  async () => {
+    directory = await mkdtemp(join(tmpdir(), "rea-gdb-queue-cancel-"));
+    const provider = join(directory, "fake-gdb-queue-cancel.mjs");
+    const overlapPath = join(directory, "overlap");
+    await writeFile(
+      provider,
+      `#!/usr/bin/env node
+process.stdout.write("(gdb)\\n");
+let input = "";
+let firstActive = false;
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => {
+  input += chunk;
+  for (;;) {
+    const boundary = input.indexOf("\\n"); if (boundary < 0) break;
+    const line = input.slice(0, boundary); input = input.slice(boundary + 1);
+    const match = /^(\\d+)/.exec(line); if (!match) continue;
+    if (line.includes("auto-load off")) process.stdout.write(match[1] + "^done\\n");
+    else if (line.includes("first")) {
+      firstActive = true;
+      setTimeout(() => { firstActive = false; process.stdout.write(match[1] + "^done\\n"); }, 100);
+    } else {
+      if (line.includes("third") && firstActive) import("node:fs/promises").then((fs) => fs.writeFile(${JSON.stringify(overlapPath)}, "overlap"));
+      process.stdout.write(match[1] + "^done\\n");
+    }
+  }
+});
+`,
+    );
+    await chmod(provider, 0o700);
+    const manager = new GdbSessionManager({
+      environment: { REA_GDB_COMMAND: provider },
+    });
+    managers.push(manager);
+    const started = await manager.start();
+    expect(started.ok).toBe(true);
+    if (!started.ok) return;
+    const first = manager.execute(started.value.session_id, "first");
+    const controller = new AbortController();
+    const second = manager.execute(
+      started.value.session_id,
+      "second",
+      controller.signal,
+    );
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 20));
+    controller.abort();
+    const third = manager.execute(started.value.session_id, "third");
+    expect((await second).ok).toBe(false);
+    expect((await first).ok).toBe(true);
+    expect((await third).ok).toBe(true);
+    await expect(readFile(overlapPath, "utf8")).rejects.toThrow();
+  },
+);
+
+it.skipIf(process.platform === "win32")(
+  "marks GDB exit-fallback output truncated when MI history was bounded",
+  async () => {
+    directory = await mkdtemp(join(tmpdir(), "rea-gdb-exit-truncated-"));
+    const provider = join(directory, "fake-gdb-exit-truncated.mjs");
+    await writeFile(
+      provider,
+      `#!/usr/bin/env node
+process.stdout.write("(gdb)\\n");
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => {
+  input += chunk;
+  for (;;) {
+    const boundary = input.indexOf("\\n"); if (boundary < 0) break;
+    const line = input.slice(0, boundary); input = input.slice(boundary + 1);
+    const match = /^(\\d+)/.exec(line); if (!match) continue;
+    if (line.includes("auto-load off")) process.stdout.write(match[1] + "^done\\n");
+    else {
+      process.stdout.write(Array.from({ length: 300 }, (_, index) => "=thread-created,id=\\"" + index + "\\"\\n").join(""));
+      process.exit(0);
+    }
+  }
+});
+`,
+    );
+    await chmod(provider, 0o700);
+    const manager = new GdbSessionManager({
+      environment: { REA_GDB_COMMAND: provider },
+    });
+    managers.push(manager);
+    const started = await manager.start();
+    expect(started.ok).toBe(true);
+    if (!started.ok) return;
+
+    const result = await manager.execute(
+      started.value.session_id,
+      "info threads",
+    );
+
+    expect(result.ok).toBe(true);
+    if (result.ok)
+      expect(result.value.result).toMatchObject({
+        process_exit_observed: true,
+        output_truncated: true,
+        completion_status: "unknown",
+      });
+  },
+);
+
+it.skipIf(process.platform === "win32")(
+  "keeps queued Rizin commands serialized when a waiting request is cancelled",
+  async () => {
+    directory = await mkdtemp(join(tmpdir(), "rea-rizin-queue-cancel-"));
+    const provider = join(directory, "fake-rizin-queue-cancel.mjs");
+    const overlapPath = join(directory, "overlap");
+    await writeFile(
+      provider,
+      `#!/usr/bin/env node
+process.stdout.write("\\0");
+let input = "";
+let firstActive = false;
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => {
+  input += chunk;
+  for (;;) {
+    const boundary = input.indexOf("\\n"); if (boundary < 0) break;
+    const line = input.slice(0, boundary); input = input.slice(boundary + 1);
+    if (line === "first") firstActive = true;
+    if (line === "third" && firstActive) import("node:fs/promises").then((fs) => fs.writeFile(${JSON.stringify(overlapPath)}, "overlap"));
+    if (line.startsWith("!echo ")) {
+      const marker = line.slice(6);
+      if (firstActive) setTimeout(() => { firstActive = false; process.stdout.write(marker + "\\0"); }, 100);
+      else process.stdout.write(marker + "\\0");
+    }
+  }
+});
+`,
+    );
+    await chmod(provider, 0o700);
+    const manager = new RizinDebugSessionManager({
+      REA_RIZIN_COMMAND: provider,
+    });
+    managers.push(manager);
+    const started = await manager.start({ path: "/tmp/fixture.bin" });
+    expect(started.ok).toBe(true);
+    if (!started.ok) return;
+    const first = manager.execute(started.value.session_id, "first");
+    const controller = new AbortController();
+    const second = manager.execute(
+      started.value.session_id,
+      "second",
+      controller.signal,
+    );
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 20));
+    controller.abort();
+    const third = manager.execute(started.value.session_id, "third");
+    expect((await second).ok).toBe(false);
+    expect((await first).ok).toBe(true);
+    expect((await third).ok).toBe(true);
+    await expect(readFile(overlapPath, "utf8")).rejects.toThrow();
   },
 );
 
@@ -266,7 +428,8 @@ it.skipIf(process.platform === "win32")(
       `#!/usr/bin/env node
 await import("node:fs/promises").then((fs) => fs.writeFile(${JSON.stringify(join(directory ?? "", "pid"))}, String(process.pid)));
 process.stdout.write("\\0");
-process.stdin.resume();
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", () => process.stdout.write("retained\\0"));
 `,
     );
     await chmod(provider, 0o700);
@@ -281,8 +444,13 @@ process.stdin.resume();
 
     const result = await manager.execute(started.value.session_id, "dr");
 
-    expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.error._tag).toBe("AnalysisTimeoutError");
+    expect(result.ok).toBe(true);
+    if (result.ok)
+      expect(result.value.result).toMatchObject({
+        output: "retained",
+        output_truncated: true,
+        completion_status: "unknown",
+      });
     await expectOwnedProcessExited(
       await readFile(join(directory, "pid"), "utf8"),
     );
