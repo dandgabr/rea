@@ -20,6 +20,10 @@ import { JAVASCRIPT_RECOVERY_TOOL_CONTRACTS } from "./javascript/javascriptRecov
 import { WEB_SCRIPT_TOOL_CONTRACTS } from "./webScriptToolContracts.js";
 import { WEB_RUNTIME_TOOL_CONTRACTS } from "./webRuntimeToolContracts.js";
 import { WEB_NETWORK_CAPTURE_TOOL_CONTRACTS } from "./webNetworkCaptureToolContracts.js";
+import { REVERSE_ENGINEERING_TOOL_CONTRACTS } from "./reverseEngineeringToolContracts.js";
+import { GDB_TOOL_CONTRACTS } from "./gdbToolContracts.js";
+import { RIZIN_DEBUG_TOOL_CONTRACTS } from "./rizinDebugToolContracts.js";
+import { CUTTER_TOOL_CONTRACTS } from "./cutterToolContracts.js";
 
 const GROUPS = {
   official: OFFICIAL_TOOL_CONTRACTS,
@@ -41,6 +45,10 @@ const GROUPS = {
   web_runtime: WEB_RUNTIME_TOOL_CONTRACTS,
   web_network_capture: WEB_NETWORK_CAPTURE_TOOL_CONTRACTS,
   session: SESSION_TOOL_CONTRACTS,
+  reverse_engineering: REVERSE_ENGINEERING_TOOL_CONTRACTS,
+  gdb: GDB_TOOL_CONTRACTS,
+  rizin_debug: RIZIN_DEBUG_TOOL_CONTRACTS,
+  cutter: CUTTER_TOOL_CONTRACTS,
 } as const;
 
 /**

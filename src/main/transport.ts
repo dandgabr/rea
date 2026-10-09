@@ -70,6 +70,7 @@ export const startMcpTransport = async (
         androidProviders.push(android);
         return (dependencies.createServer ?? createServer)(session, session, {
           logger: serverContext.logger,
+          providerEnvironment: dependencies.env,
           ...optionalProviders,
           androidAnalysis: android,
         });

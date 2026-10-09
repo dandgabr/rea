@@ -61,6 +61,15 @@ import { registerGuidedPrompts } from "./registerPrompts.js";
 import { registerSessionTools } from "./registerSessionTools.js";
 import type { SessionAvailability } from "./sessionAvailabilityPolicy.js";
 import { sessionAvailabilityPolicy } from "./sessionAvailabilityPolicy.js";
+import { createReverseEngineeringService } from "../composition/reverseEngineering.js";
+import { registerReverseEngineeringTools } from "./registerReverseEngineeringTools.js";
+import { GdbSessionManager } from "../gdb/GdbSessionManager.js";
+import { registerGdbTools } from "./registerGdbTools.js";
+import { RizinDebugSessionManager } from "../rizin/RizinDebugSessionManager.js";
+import { registerRizinDebugTools } from "./registerRizinDebugTools.js";
+import { CutterBridgeService } from "../cutter/CutterBridgeService.js";
+import { CutterBridgeClient } from "../cutter/CutterBridgeClient.js";
+import { registerCutterTools } from "./registerCutterTools.js";
 
 const TARGET_FREE_INSTRUCTIONS =
   "REA provides reverse-engineering tools for local artifacts, native binaries, managed code, browser pages, and runtimes. Use the tool that directly answers the question; discover targets or inspect inventory only when needed. Tool results include inline Evidence and report their coverage and limitations.";
@@ -69,6 +78,7 @@ const ACTIVE_TARGET_INSTRUCTIONS =
   "REA analyzes the active reverse-engineering target. Use the analysis tool that answers the question directly. Search or list symbols when discovery is needed; analyze_function provides a function dossier, and focused procedure tools return individual facets.";
 
 export interface CreateServerOptions {
+  readonly providerEnvironment?: Readonly<NodeJS.ProcessEnv>;
   readonly evmInterface?: EvmInterfaceService;
   readonly logger?: Logger;
   readonly binaryLayout?: BinaryLayoutService;
@@ -193,9 +203,63 @@ export const createServer = (
     recordEvidenceWithUnknown,
   };
   registerBinaryAnalysisTools(toolContext);
+  registerReverseEngineeringTools(
+    server,
+    createReverseEngineeringService(options.providerEnvironment),
+    toolLogger,
+    session === undefined
+      ? undefined
+      : (evidence) => session.recordEvidence(evidence),
+  );
+  const gdbSessions = new GdbSessionManager(
+    options.providerEnvironment === undefined
+      ? {}
+      : { environment: options.providerEnvironment },
+  );
+  const rizinDebugSessions = new RizinDebugSessionManager(
+    options.providerEnvironment,
+  );
+  registerGdbTools(
+    server,
+    gdbSessions,
+    toolLogger,
+    session === undefined
+      ? undefined
+      : (evidence) => session.recordEvidence(evidence),
+  );
+  registerRizinDebugTools(
+    server,
+    rizinDebugSessions,
+    toolLogger,
+    session === undefined
+      ? undefined
+      : (evidence) => session.recordEvidence(evidence),
+  );
+  registerCutterTools(
+    server,
+    new CutterBridgeService(
+      new CutterBridgeClient(options.providerEnvironment),
+    ),
+    toolLogger,
+    session === undefined
+      ? undefined
+      : (evidence) => session.recordEvidence(evidence),
+  );
   const previousOnclose = server.server.onclose;
   server.server.onclose = () => {
     previousOnclose?.();
+    void gdbSessions.closeAll().catch((cause: unknown) => {
+      logger.error(
+        { error: cause instanceof Error ? cause.message : String(cause) },
+        "GDB cleanup after MCP close failed",
+      );
+    });
+    void rizinDebugSessions.closeAll().catch((cause: unknown) => {
+      logger.error(
+        { error: cause instanceof Error ? cause.message : String(cause) },
+        "Rizin cleanup after MCP close failed",
+      );
+    });
     void android.close().catch((cause: unknown) => {
       logger.error(
         { error: cause instanceof Error ? cause.message : String(cause) },
@@ -205,7 +269,12 @@ export const createServer = (
   };
   const closeServer = server.close.bind(server);
   server.close = async () => {
-    const results = await Promise.allSettled([closeServer(), android.close()]);
+    const results = await Promise.allSettled([
+      closeServer(),
+      android.close(),
+      gdbSessions.closeAll(),
+      rizinDebugSessions.closeAll(),
+    ]);
     for (const result of results)
       if (result.status === "rejected") throw result.reason;
   };
