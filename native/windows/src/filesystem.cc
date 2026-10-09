@@ -61,7 +61,7 @@ static Handle openComponent(const std::wstring& path, DWORD access, bool directo
 }
 
 std::unique_ptr<File> openFile(const std::wstring& requested, DWORD access, bool directory,
-                               DWORD finalSharing = FILE_SHARE_READ) {
+                               DWORD finalSharing) {
   auto result = std::make_unique<File>(localPath(requested));
   result->requestedPath = requested;
   const auto& path = result->path;
