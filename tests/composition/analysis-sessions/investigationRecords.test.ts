@@ -24,7 +24,7 @@ const createSession = (
   return session;
 };
 
-it("uses the composed record owner and preserves best-effort post-commit notifications", async () => {
+it("keeps investigation Evidence after target closure and preserves post-commit notifications", async () => {
   const records = new InvestigationRecords();
   const session = createSession(records);
   const observed: number[] = [];
@@ -53,12 +53,12 @@ it("uses the composed record owner and preserves best-effort post-commit notific
   });
   expect(observed).toEqual([1]);
   expect((await session.close()).ok).toBe(true);
-  expect(records.exportEvidenceBundle().records).toEqual([]);
+  expect(records.exportEvidenceBundle().records).toEqual([evidence]);
   expect(session.exportAnalysisSnapshot()).toMatchObject({
     ok: false,
     error: { _tag: "NoBinaryOpenError" },
   });
-  expect(observed).toEqual([1, 0]);
+  expect(observed).toEqual([1, 1]);
   unsubscribe();
   await new Promise<void>((resolve) => setImmediate(resolve));
 });

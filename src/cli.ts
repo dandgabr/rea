@@ -29,6 +29,7 @@ import { registerApplicationCommands } from "./cli/applicationCommands.js";
 import { presentOmittableDefaults } from "./cli/omittableDefaults.js";
 import type { CliInstance } from "./cli/types.js";
 import type { CliResultOutput } from "./cli/streamedJsonOutput.js";
+import { registerReverseEngineeringCommands } from "./cli/reverseEngineeringCommands.js";
 
 /**
  * Build the one-shot Incur CLI without starting Hopper at import time.
@@ -57,6 +58,7 @@ export const createCli = (
   });
 
   registerSetupCommands(cli, logger);
+  registerReverseEngineeringCommands(cli, logger, environment);
   registerCoreAnalysisCommands(cli, logger, resultOutput);
   registerUtilityCommands(cli, logger, environment);
   registerEvmCommands(cli, logger, environment);

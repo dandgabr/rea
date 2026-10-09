@@ -211,6 +211,93 @@ static void verifyPrivate(HANDLE handle, const std::wstring& path, bool root) {
   require(user && system, "Private DACL must allow only current user and SYSTEM", path, ERROR_ACCESS_DENIED);
 }
 
+static std::unique_ptr<File> openPrivateBridgeDirectory(const std::wstring& path) {
+  auto directory = openFile(path, FILE_LIST_DIRECTORY, true);
+  verifyPrivate(directory->get(), path, true);
+  return directory;
+}
+
+static Handle openPrivateBridgeDescriptor(HANDLE parent, const std::wstring& name,
+                                          const std::wstring& path) {
+  require(!name.empty() && name.find_first_of(L"\\/:\"<>|?*") == std::wstring::npos &&
+          name != L"." && name != L".." && name.size() <= 255,
+          "Private descriptor requires one filename component", path, ERROR_INVALID_PARAMETER);
+  UNICODE_STRING coordinate{};
+  coordinate.Buffer = const_cast<wchar_t*>(name.data());
+  coordinate.Length = static_cast<USHORT>(name.size() * sizeof(wchar_t));
+  coordinate.MaximumLength = coordinate.Length;
+  OBJECT_ATTRIBUTES attributes;
+  InitializeObjectAttributes(&attributes, &coordinate, OBJ_CASE_INSENSITIVE, parent, nullptr);
+  IO_STATUS_BLOCK observation{};
+  HANDLE raw = INVALID_HANDLE_VALUE;
+  const auto status = NtCreateFile(&raw, GENERIC_READ | READ_CONTROL | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                                   &attributes, &observation, nullptr, FILE_ATTRIBUTE_NORMAL,
+                                   FILE_SHARE_READ | FILE_SHARE_DELETE, FILE_OPEN,
+                                   FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT |
+                                       FILE_NON_DIRECTORY_FILE,
+                                   nullptr, 0);
+  if (status < 0)
+    throw Failure("Open Cutter bridge descriptor relative to its verified directory failed", path,
+                  RtlNtStatusToDosError(status));
+  Handle descriptor(raw);
+  require(descriptor.valid() && observation.Information == FILE_OPENED,
+          "Cutter bridge descriptor was not opened as an existing file", path, ERROR_ACCESS_DENIED);
+  FILE_STANDARD_INFO standard{};
+  require(GetFileInformationByHandleEx(descriptor.get(), FileStandardInfo, &standard, sizeof(standard)),
+          "Read Cutter bridge descriptor metadata failed", path);
+  require(!standard.Directory && standard.EndOfFile.QuadPart >= 0 &&
+              standard.EndOfFile.QuadPart <= 64 * 1024,
+          "Cutter bridge descriptor exceeds its byte limit or is not a file", path, ERROR_FILE_TOO_LARGE);
+  FILE_ATTRIBUTE_TAG_INFO attributes{};
+  require(GetFileInformationByHandleEx(descriptor.get(), FileAttributeTagInfo, &attributes, sizeof(attributes)),
+          "Read Cutter bridge descriptor attributes failed", path);
+  require((attributes.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0,
+          "Cutter bridge descriptor cannot be a reparse point", path, ERROR_REPARSE_TAG_INVALID);
+  verifyPrivate(descriptor.get(), path, false);
+  return descriptor;
+}
+
+static napi_value verifyCutterBridgeDirectory(napi_env env, const std::vector<napi_value>& args) {
+  require(args.size() == 1, "Cutter bridge directory verification requires one path", L"",
+          ERROR_INVALID_PARAMETER);
+  const auto path = wide(env, args[0]);
+  const auto directory = openPrivateBridgeDirectory(path);
+  auto result = object(env);
+  set(env, result, "privateDacl", boolean(env, true));
+  set(env, result, "identity", identity(env, directory->get(), path));
+  return result;
+}
+
+static napi_value readCutterBridgeDescriptor(napi_env env, const std::vector<napi_value>& args) {
+  require(args.size() == 3, "Cutter bridge descriptor read requires directory, name, and byte limit", L"",
+          ERROR_INVALID_PARAMETER);
+  const auto path = wide(env, args[0]);
+  const auto name = wide(env, args[1]);
+  const double maximum = numeric(env, args[2]);
+  require(maximum >= 1 && maximum <= 64 * 1024 && maximum == static_cast<size_t>(maximum),
+          "Cutter bridge descriptor limit is outside the supported range", path, ERROR_INVALID_PARAMETER);
+  auto directory = openPrivateBridgeDirectory(path);
+  auto descriptor = openPrivateBridgeDescriptor(directory->get(), name, path + L"\\" + name);
+  FILE_STANDARD_INFO standard{};
+  require(GetFileInformationByHandleEx(descriptor.get(), FileStandardInfo, &standard, sizeof(standard)),
+          "Read Cutter bridge descriptor size failed", path);
+  require(standard.EndOfFile.QuadPart <= maximum,
+          "Cutter bridge descriptor exceeds the requested byte limit", path, ERROR_FILE_TOO_LARGE);
+  std::vector<unsigned char> bytes(static_cast<size_t>(standard.EndOfFile.QuadPart));
+  size_t offset = 0;
+  while (offset < bytes.size()) {
+    DWORD count = 0;
+    const DWORD requested = static_cast<DWORD>(std::min<size_t>(bytes.size() - offset, MAXDWORD));
+    require(ReadFile(descriptor.get(), bytes.data() + offset, requested, &count, nullptr) && count > 0,
+            "Read Cutter bridge descriptor through its verified handle failed", path);
+    offset += count;
+  }
+  napi_value result;
+  const void* source = bytes.empty() ? static_cast<const void*>("") : bytes.data();
+  check(napi_create_buffer_copy(env, bytes.size(), source, nullptr, &result));
+  return result;
+}
+
 std::unique_ptr<Runtime> createRuntime(const std::wstring& parentPath, const std::wstring& prefix) {
   auto parent = openFile(parentPath, 0, true);
   require(!prefix.empty() && prefix.find_first_of(L"\\/:\"<>|?*") == std::wstring::npos,
@@ -489,6 +576,8 @@ static napi_value snapshot(napi_env env, napi_value rootValue, Runtime& root,
 }
 
 napi_value filesystemCall(napi_env env, const std::wstring& operation, const std::vector<napi_value>& args) {
+  if (operation == L"cutter_bridge_verify_directory") return verifyCutterBridgeDirectory(env, args);
+  if (operation == L"cutter_bridge_read_descriptor") return readCutterBridgeDescriptor(env, args);
   const auto expected = operation == L"open" || operation == L"close" || operation == L"runtime_close" || operation == L"runtime_snapshot_cancel" ? 1
                       : operation == L"runtime_create" || operation == L"runtime_mkdir" || operation == L"runtime_open" ? 2 : 3;
   require(args.size() == static_cast<size_t>(expected), "Wrong native filesystem argument count", L"", ERROR_INVALID_PARAMETER);

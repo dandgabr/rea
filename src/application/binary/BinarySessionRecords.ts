@@ -251,7 +251,8 @@ export abstract class BinarySessionRecords {
   }
 
   protected clearSessionRecords(): void {
-    this.#records.clear();
+    // Investigation Evidence belongs to the runtime, not the currently open
+    // provider target. Target closure only invalidates analysis snapshots.
     this.#snapshot.clear();
     this.#snapshotInvalidated = false;
     this.#emitSnapshotChanged();
