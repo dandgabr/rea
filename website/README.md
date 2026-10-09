@@ -61,9 +61,8 @@ and uploading the public directory. The verifier checks that its entries match
 the current source and contain no extra files.
 
 Agent terminals show example prompts, not transcripts of previous
-investigations. All cursors blink continuously with the same CSS animation,
-respecting reduced-motion preferences. Both the prompt and animation work
-without JavaScript. The homepage and agent setup section share a copyable
+investigations. Their cursors remain visible as static blocks. Both the prompt
+and cursor work without JavaScript. The homepage and agent setup section share a copyable
 installation prompt; setup still presents its plan for approval.
 
 Reading pages share a small `↑ Top` link at the bottom right. It appears after
