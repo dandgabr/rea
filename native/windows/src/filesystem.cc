@@ -60,7 +60,8 @@ static Handle openComponent(const std::wstring& path, DWORD access, bool directo
   return handle;
 }
 
-std::unique_ptr<File> openFile(const std::wstring& requested, DWORD access, bool directory) {
+std::unique_ptr<File> openFile(const std::wstring& requested, DWORD access, bool directory,
+                               DWORD finalSharing = FILE_SHARE_READ) {
   auto result = std::make_unique<File>(localPath(requested));
   result->requestedPath = requested;
   const auto& path = result->path;
@@ -76,7 +77,8 @@ std::unique_ptr<File> openFile(const std::wstring& requested, DWORD access, bool
   while (offset < path.size()) {
     auto end = path.find(L'\\', offset);
     const bool final = end == std::wstring::npos;
-    auto child = openComponent(path.substr(0, end), final ? access : 0, !final || directory);
+    auto child = openComponent(path.substr(0, end), final ? access : 0, !final || directory,
+                               final ? finalSharing : FILE_SHARE_READ);
     // Once the next component is pinned against deletion, its parent cannot
     // become empty and NTFS cannot convert that parent into a reparse point.
     // Relax only ancestor write sharing so unrelated child renames can proceed.
@@ -212,7 +214,11 @@ static void verifyPrivate(HANDLE handle, const std::wstring& path, bool root) {
 }
 
 static std::unique_ptr<File> openPrivateBridgeDirectory(const std::wstring& path) {
-  auto directory = openFile(path, FILE_LIST_DIRECTORY, true);
+  // The retained runtime root handle carries DELETE authority for owned
+  // cleanup. Windows checks sharing in both directions, so this read-only
+  // inspection handle must share DELETE even though it requests no such right.
+  auto directory = openFile(path, FILE_LIST_DIRECTORY, true,
+                            FILE_SHARE_READ | FILE_SHARE_DELETE);
   verifyPrivate(directory->get(), path, true);
   return directory;
 }
