@@ -94,6 +94,31 @@ deleted, modified, or unchanged. These are bounded snapshots, not a syscall
 trace; short-lived changes between snapshots may be missed. With no selected
 paths, filesystem effects remain unknown.
 
+A missing entry proves creation or deletion only when the corresponding
+observation root's path enumeration was exhausted. Otherwise its effect has
+`status: "unknown"`, the available before/after state, and a reason; a null
+state in this variant means unobserved. Paths below symlinks that REA did not
+follow also remain unknown. Partial enumeration of one root does not erase
+known effects in another, and unavailable content hashes do not by themselves
+make path absence unknown.
+
+Terminal frame `data` is the comparison text after the selected normalization.
+New captures also preserve `raw_data` when normalization changes a PTY chunk;
+otherwise `data` is already the original text. Older captures may lack the
+original text for changed chunks. Both values participate in Evidence identity,
+while comparisons and trace assertions use the normalized text. Retaining the
+original adds at most `limits.output_bytes` of text, because it comes from the
+same admitted PTY chunks rather than a second unbounded stream.
+
+Port normalization recognizes explicit `port`, `tcp_port`, `udp_port`, and
+`listen` fields, URL authorities, IP endpoints, and `localhost` endpoints, with
+ports from 0 through 65535. It preserves ordinary counters, dimensions, file
+line numbers, and ambiguous bare host labels. Use explicit literal `patterns`
+for a different application-specific spelling. Set `ports: false` to preserve
+all endpoint numbers in comparison text. Captures commit the port-normalization
+version so older broad numeric normalization cannot silently compare as the
+same contract.
+
 Output, file count, file size, process sampling, filesystem depth, total
 runtime, idle time, and post-exit settlement are bounded by the scenario's
 limits. The result marks truncated observations and residual unknowns rather

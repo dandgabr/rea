@@ -10,7 +10,8 @@ import { projectAnalysisError } from "../../../../src/domain/analysisErrorProjec
 import { nativeCallObservationInputSchema } from "../../../../src/domain/native/nativeCallObservation.js";
 import type { NativeCallTracer } from "../../../../src/native/LldbCallTracer.js";
 import { LldbCallTracer } from "../../../../src/native/LldbCallTracer.js";
-import { ok } from "../../../../src/domain/result.js";
+import { err, ok } from "../../../../src/domain/result.js";
+import { NativeCommandFailure } from "../../../../src/native/CommandRunner.js";
 
 const EVENT = {
   sequence: 0,
@@ -61,6 +62,7 @@ const fixtureTracer = (
 ) => {
   let configPath: string | undefined;
   const tracer = new LldbCallTracer(
+    {},
     async (_executable, arguments_) => {
       const resolved = await configFromArguments(arguments_);
       const { config } = resolved;
@@ -106,6 +108,20 @@ const fixtureTracer = (
 };
 
 describe("LLDB failure retention through the production tracer", () => {
+  it("names the missing LLDB requirement instead of asking for another target", async () => {
+    const tracer = new LldbCallTracer(
+      {},
+      () => Promise.reject(new Error("LLDB must not launch")),
+      async (tool) => err(new NativeCommandFailure(tool, "unavailable")),
+    );
+    const result = await tracer.trace(request);
+    if (result.ok) throw new Error("expected an unavailable LLDB");
+    expect(projectAnalysisError(result.error)).toMatchObject({
+      code: "capability_unavailable",
+      message: "LLDB from Xcode or the Command Line Tools is not available",
+    });
+  });
+
   it("preserves cancellation and journal/output evidence after runtime cleanup", async () => {
     const fixture = fixtureTracer("cancelled");
     const result = await fixture.tracer.trace(request);

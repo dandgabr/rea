@@ -7,13 +7,14 @@ import type { Logger } from "../logger.js";
 import type { RizinDebugSessionManager } from "../rizin/RizinDebugSessionManager.js";
 import { logToolExecution } from "./toolLogging.js";
 import { toolRegistrationOptions } from "./toolRegistrationOptions.js";
-import { toCallToolResult, toEvidenceToolResult } from "./toolResult.js";
+import type { ToolResultDelivery } from "./toolResult.js";
 
 /** Register persistent Rizin debugger operations on the existing REA MCP server. */
 export const registerRizinDebugTools = (
   server: McpServer,
   manager: RizinDebugSessionManager,
   logger: Logger,
+  delivery: ToolResultDelivery,
   recordEvidence?: EvidenceWriter["recordEvidence"],
 ): void => {
   const start = toolContract("start_rizin_debug_session");
@@ -34,8 +35,8 @@ export const registerRizinDebugTools = (
         ),
       );
       return result.ok
-        ? toCallToolResult({ ok: true, value: result.value }, start)
-        : toCallToolResult(result, start);
+        ? delivery.toCallToolResult({ ok: true, value: result.value }, start)
+        : delivery.toCallToolResult(result, start);
     },
   );
   server.registerTool(
@@ -45,8 +46,8 @@ export const registerRizinDebugTools = (
       const result = await logToolExecution(logger, command.name, () =>
         manager.execute(input.session_id, input.command),
       );
-      if (!result.ok) return toCallToolResult(result, command);
-      return toEvidenceToolResult(
+      if (!result.ok) return delivery.toCallToolResult(result, command);
+      return delivery.toEvidenceToolResult(
         result.value.evidence,
         command,
         recordEvidence?.(result.value.evidence),
@@ -59,11 +60,11 @@ export const registerRizinDebugTools = (
     async (input) => {
       const result = manager.status(input.session_id);
       if (result === undefined)
-        return toCallToolResult(
+        return delivery.toCallToolResult(
           { ok: false, error: new AnalysisInputError(status.name) },
           status,
         );
-      return toCallToolResult(
+      return delivery.toCallToolResult(
         {
           ok: true,
           value: { ...result, recent_output: [...result.recent_output] },
@@ -80,8 +81,8 @@ export const registerRizinDebugTools = (
         manager.close(input.session_id),
       );
       return result.ok
-        ? toCallToolResult({ ok: true, value: result.value }, close)
-        : toCallToolResult(result, close);
+        ? delivery.toCallToolResult({ ok: true, value: result.value }, close)
+        : delivery.toCallToolResult(result, close);
     },
   );
 };

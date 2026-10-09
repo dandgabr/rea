@@ -1,3 +1,4 @@
+import { parseConfig } from "../../src/config.js";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -27,10 +28,16 @@ import {
   createAnalysisSnapshotWorkflowEntry,
   type AnalysisSnapshot,
 } from "../../src/domain/analysisSnapshot.js";
-import { createTestBinarySession } from "../fixtures/binarySession.js";
+import {
+  createTestBinarySession,
+  createTestProviderRouter,
+} from "../fixtures/binarySession.js";
 import { BinarySession } from "../../src/application/binary/BinarySession.js";
-import { SessionProviderRouter } from "../../src/application/binary/SessionProviderRouter.js";
 import { createTestTempDirectory } from "../fixtures/temporaryDirectory.js";
+import {
+  CAPABILITIES as GHIDRA_CAPABILITIES,
+  GHIDRA_PROVIDER_IDENTITY,
+} from "../../src/ghidra/GhidraProviderCapabilities.js";
 
 const IDENTITY = {
   id: "snapshot-fixture",
@@ -138,7 +145,7 @@ const makeProvider = (
     capabilities: () => capabilities,
     resolveAnalysisProfile: async () => {
       resolutions.push(profile.digest);
-      return ok({ profile, compatibility: {} });
+      return ok({ profile });
     },
     createClient: () => {
       starts.push("start");
@@ -146,6 +153,7 @@ const makeProvider = (
         execute: async (operation) => {
           calls.push(operation);
           const results: Readonly<Record<string, unknown>> = {
+            health: null,
             list_segments: [{ name: "__TEXT", start: "0x1000", end: "0x2000" }],
             list_documents: ["fixture"],
             list_procedures: ["0x1000"],
@@ -158,7 +166,11 @@ const makeProvider = (
             resolve_containing_procedure: null,
             procedure_pseudo_code: "return 0;",
           };
-          const result = results[operation] ?? null;
+          if (!Object.hasOwn(results, operation))
+            throw new Error(
+              `Unmodeled snapshot provider operation: ${operation}`,
+            );
+          const result = results[operation];
           return ok(
             createAnalysisExecution(result, profile.provider, {
               analysisProfile: profile,
@@ -166,7 +178,7 @@ const makeProvider = (
             }),
           );
         },
-        close: async () => undefined,
+        close: async () => ok(null),
       };
     },
   };
@@ -176,25 +188,18 @@ const withAlternateWorkflowProfile = (
   snapshot: AnalysisSnapshot,
   path: string,
   current: Evidence,
-  scenario: "alternate" | "legacy" = "alternate",
 ): AnalysisSnapshot => {
-  const alternateProfile =
-    scenario === "legacy"
-      ? workflowAnalysisProfile(snapshot.binding.analysis_profile)
-      : createAnalysisProfile(REA_WORKFLOW_PROVIDER, {
-          workflow: "binary_overview",
-          fixture: "alternate-profile",
-        });
+  const alternateProfile = createAnalysisProfile(REA_WORKFLOW_PROVIDER, {
+    workflow: "binary_overview",
+    fixture: "alternate-profile",
+  });
   if (
     typeof current.normalized_result !== "object" ||
     current.normalized_result === null ||
     Array.isArray(current.normalized_result)
   )
     throw new Error("Expected overview object");
-  const result =
-    scenario === "legacy"
-      ? { ...current.normalized_result, document: "New Document" }
-      : current.normalized_result;
+  const result = current.normalized_result;
   const subject = {
     path,
     sha256: snapshot.target.sha256,
@@ -304,6 +309,7 @@ describe("direct analysis composed snapshot replay", () => {
         resolutions,
       );
       const dependencies: DirectAnalysisDependencies = {
+        readConfiguration: () => parseConfig({}),
         createBinarySession: () => createTestBinarySession(provider),
         createManagedBinarySession: () => createTestBinarySession(provider),
       };
@@ -375,6 +381,7 @@ describe("direct analysis composed snapshot replay", () => {
         workflowProviderOperations,
       );
       const dependencies: DirectAnalysisDependencies = {
+        readConfiguration: () => parseConfig({}),
         createBinarySession: () => createTestBinarySession(provider),
         createManagedBinarySession: () => createTestBinarySession(provider),
       };
@@ -390,7 +397,7 @@ describe("direct analysis composed snapshot replay", () => {
       const loaded = await readAnalysisSnapshot(snapshotPath);
       if (!loaded.ok) throw loaded.error;
       expect(
-        loaded.value.workflow_entries?.map(({ operation }) => operation),
+        loaded.value.workflow_entries.map(({ operation }) => operation),
       ).toContain(scenario.tool);
       if (scenario.tool === "inspect_native_api")
         expectWorkflowQuestionsRetained(loaded.value, scenario.tool);
@@ -410,6 +417,62 @@ describe("direct analysis composed snapshot replay", () => {
   }
 });
 
+describe("Ghidra composed workflow snapshot replay", () => {
+  it.each([
+    { tool: "binary_overview", arguments: {} },
+    { tool: "inspect_native_api", arguments: { procedure: "0x1000" } },
+    { tool: "trace_feature", arguments: { query: "fixture" } },
+  ] as const)(
+    "persists and replays $tool with production Ghidra capability policies",
+    async ({ tool, arguments: parameters }) => {
+      const directory = await createTestTempDirectory("rea-ghidra-workflow-");
+      const path = join(directory, "fixture.hop");
+      const snapshotPath = join(directory, "snapshot.json");
+      await writeFile(path, "fixture");
+      const starts: string[] = [];
+      const calls: string[] = [];
+      const profile = createAnalysisProfile(
+        { ...GHIDRA_PROVIDER_IDENTITY, version: "12.1.4" },
+        { fixture: true },
+      );
+      const provider: AnalysisProvider = {
+        ...makeProvider(starts, calls, profile, GHIDRA_PROVIDER_IDENTITY),
+        capabilities: () => GHIDRA_CAPABILITIES,
+      };
+      const dependencies: DirectAnalysisDependencies = {
+        readConfiguration: () => parseConfig({}),
+        createBinarySession: () => createTestBinarySession(provider),
+        createManagedBinarySession: () => createTestBinarySession(provider),
+      };
+      const first = await runDirectAnalysis(
+        dependencies,
+        path,
+        tool,
+        parameters,
+        { snapshotPath },
+      );
+      expect(first).toMatchObject({ operation: tool });
+      const snapshot = await readAnalysisSnapshot(snapshotPath);
+      if (!snapshot.ok) throw snapshot.error;
+      expect(snapshot.value.workflow_entries).toEqual([
+        expect.objectContaining({ operation: tool }),
+      ]);
+      const initialCalls = [...calls];
+
+      const replay = await runDirectAnalysis(
+        dependencies,
+        path,
+        tool,
+        parameters,
+        { snapshotPath },
+      );
+      expect(replay).toEqual(first);
+      expect(starts).toHaveLength(1);
+      expect(calls).toEqual(initialCalls);
+    },
+  );
+});
+
 describe("binary overview snapshot replay", () => {
   it("replays the identical binary overview without provider startup or calls", async () => {
     const directory = await createTestTempDirectory("rea-workflow-snapshot-");
@@ -420,6 +483,7 @@ describe("binary overview snapshot replay", () => {
     const calls: string[] = [];
     const provider = makeProvider(starts, calls);
     const dependencies: DirectAnalysisDependencies = {
+      readConfiguration: () => parseConfig({}),
       createBinarySession: () => createTestBinarySession(provider),
       createManagedBinarySession: () => createTestBinarySession(provider),
     };
@@ -431,7 +495,7 @@ describe("binary overview snapshot replay", () => {
       {},
       { snapshotPath },
     );
-    expect(calls.toSorted()).toEqual(["health", ...operations].toSorted());
+    expect(calls.toSorted()).toEqual(operations.toSorted());
     expect(starts).toHaveLength(1);
 
     const loaded = await readAnalysisSnapshot(snapshotPath);
@@ -460,7 +524,7 @@ describe("binary overview snapshot replay", () => {
       { snapshotPath },
     );
     expect(second).toEqual(first);
-    expect(calls.toSorted()).toEqual(["health", ...operations].toSorted());
+    expect(calls.toSorted()).toEqual(operations.toSorted());
     expect(starts).toHaveLength(1);
   });
 });
@@ -486,6 +550,7 @@ describe("snapshot replay provider identity", () => {
       ["search_strings"],
     );
     const dependencies: DirectAnalysisDependencies = {
+      readConfiguration: () => parseConfig({}),
       createBinarySession: () => createTestBinarySession(provider),
       createManagedBinarySession: () => createTestBinarySession(provider),
     };
@@ -527,6 +592,7 @@ describe("snapshot replay provider identity", () => {
     );
     const changedProfileResult = await runDirectAnalysis(
       {
+        readConfiguration: () => parseConfig({}),
         createBinarySession: () =>
           createTestBinarySession(changedProfileProvider),
         createManagedBinarySession: () =>
@@ -561,6 +627,7 @@ describe("snapshot replay provider identity", () => {
     );
     const changedProviderResult = await runDirectAnalysis(
       {
+        readConfiguration: () => parseConfig({}),
         createBinarySession: () => createTestBinarySession(changedProvider),
         createManagedBinarySession: () =>
           createTestBinarySession(changedProvider),
@@ -580,60 +647,56 @@ describe("snapshot replay provider identity", () => {
 });
 
 describe("workflow snapshot profile and cancellation binding", () => {
-  it.each(["alternate", "legacy"] as const)(
-    "does not replay a valid entry from the $0 workflow profile",
-    async (scenario) => {
-      const directory = await createTestTempDirectory("rea-workflow-profile-");
-      const path = join(directory, "fixture.hop");
-      const snapshotPath = join(directory, "snapshot.json");
-      await writeFile(path, "fixture");
-      const starts: string[] = [];
-      const calls: string[] = [];
-      const provider = makeProvider(starts, calls);
-      const dependencies: DirectAnalysisDependencies = {
-        createBinarySession: () => createTestBinarySession(provider),
-        createManagedBinarySession: () => createTestBinarySession(provider),
-      };
-      await runDirectAnalysis(
-        dependencies,
-        path,
-        "binary_overview",
-        {},
-        { snapshotPath },
-      );
-      const loaded = await readAnalysisSnapshot(snapshotPath);
-      if (!loaded.ok) throw loaded.error;
-      const current = loaded.value.evidence_bundle.records.find(
-        (record) => record.operation === "binary_overview",
-      );
-      if (current === undefined)
-        throw new Error("composed Evidence was not saved");
-      expect(
-        (
-          await writeAnalysisSnapshot(
-            withAlternateWorkflowProfile(loaded.value, path, current, scenario),
-            snapshotPath,
-            true,
-          )
-        ).ok,
-      ).toBe(true);
+  it("does not replay a valid entry from a different workflow profile", async () => {
+    const directory = await createTestTempDirectory("rea-workflow-profile-");
+    const path = join(directory, "fixture.hop");
+    const snapshotPath = join(directory, "snapshot.json");
+    await writeFile(path, "fixture");
+    const starts: string[] = [];
+    const calls: string[] = [];
+    const provider = makeProvider(starts, calls);
+    const dependencies: DirectAnalysisDependencies = {
+      readConfiguration: () => parseConfig({}),
+      createBinarySession: () => createTestBinarySession(provider),
+      createManagedBinarySession: () => createTestBinarySession(provider),
+    };
+    await runDirectAnalysis(
+      dependencies,
+      path,
+      "binary_overview",
+      {},
+      { snapshotPath },
+    );
+    const loaded = await readAnalysisSnapshot(snapshotPath);
+    if (!loaded.ok) throw loaded.error;
+    const current = loaded.value.evidence_bundle.records.find(
+      (record) => record.operation === "binary_overview",
+    );
+    if (current === undefined)
+      throw new Error("composed Evidence was not saved");
+    expect(
+      (
+        await writeAnalysisSnapshot(
+          withAlternateWorkflowProfile(loaded.value, path, current),
+          snapshotPath,
+          true,
+        )
+      ).ok,
+    ).toBe(true);
 
-      const refreshed = await runDirectAnalysis(
-        dependencies,
-        path,
-        "binary_overview",
-        {},
-        { snapshotPath },
-      );
-      expect(refreshed).toMatchObject({
-        normalized_result: { document: "fixture" },
-      });
-      expect(calls.toSorted()).toEqual(
-        ["health", ...operations, "health", ...operations].toSorted(),
-      );
-      expect(starts).toHaveLength(2);
-    },
-  );
+    const refreshed = await runDirectAnalysis(
+      dependencies,
+      path,
+      "binary_overview",
+      {},
+      { snapshotPath },
+    );
+    expect(refreshed).toMatchObject({
+      normalized_result: { document: "fixture" },
+    });
+    expect(calls.toSorted()).toEqual([...operations, ...operations].toSorted());
+    expect(starts).toHaveLength(2);
+  });
 
   it("does not return a cached result when cancelled during route resolution", async () => {
     const directory = await createTestTempDirectory("rea-workflow-cancel-");
@@ -645,6 +708,7 @@ describe("workflow snapshot profile and cancellation binding", () => {
     const profile = createAnalysisProfile(IDENTITY, { fixture: true });
     const provider = makeProvider(starts, calls, profile);
     const initialDependencies: DirectAnalysisDependencies = {
+      readConfiguration: () => parseConfig({}),
       createBinarySession: () => createTestBinarySession(provider),
       createManagedBinarySession: () => createTestBinarySession(provider),
     };
@@ -657,7 +721,7 @@ describe("workflow snapshot profile and cancellation binding", () => {
     );
 
     const controller = new AbortController();
-    const router = SessionProviderRouter.single(provider);
+    const router = createTestProviderRouter(provider);
     const resolve = router.resolve.bind(router);
     router.resolve = async (...arguments_) => {
       const resolved = await resolve(...arguments_);
@@ -666,6 +730,7 @@ describe("workflow snapshot profile and cancellation binding", () => {
     };
     const session = new BinarySession(router);
     const dependencies: DirectAnalysisDependencies = {
+      readConfiguration: () => parseConfig({}),
       createBinarySession: () => session,
       createManagedBinarySession: () => session,
     };
@@ -681,7 +746,7 @@ describe("workflow snapshot profile and cancellation binding", () => {
       error: "Analysis failed",
       code: "cancelled",
     });
-    expect(calls.toSorted()).toEqual(["health", ...operations].toSorted());
+    expect(calls.toSorted()).toEqual(operations.toSorted());
     expect(starts).toHaveLength(1);
   });
 });

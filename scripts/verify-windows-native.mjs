@@ -3,6 +3,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import { once } from "node:events";
 import {
   access,
   mkdir,
@@ -17,6 +18,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { verifyWindowsProtocolInput } from "./lib/windows-protocol-input.mjs";
 
 if (process.platform !== "win32")
   throw new Error(
@@ -27,7 +29,7 @@ const { requireWindowsNativeAuthority } = await import(
   pathToFileURL(join(packageRoot, "dist/windows/WindowsNativeLoader.js"))
 );
 const native = requireWindowsNativeAuthority();
-const { WindowsPrivateRuntime } = await import(
+const { WindowsPrivateRuntime, windowsPrivateRuntime } = await import(
   pathToFileURL(join(packageRoot, "dist/windows/WindowsPrivateRuntime.js"))
 );
 const workspace = await mkdtemp(join(tmpdir(), "rea-native-conformance-"));
@@ -386,6 +388,64 @@ try {
     } finally {
       await readbackRuntime.close();
     }
+    const retryRuntime = WindowsPrivateRuntime.create(
+      workspace,
+      "cleanup-retry-",
+    );
+    const heldPath = join(retryRuntime.observation.path, "snapshot.bin");
+    await retryRuntime.snapshot(source, "snapshot.bin");
+    const holder = spawn(
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "$ErrorActionPreference = 'Stop'; " +
+          "$stream = [IO.File]::Open($env:REA_CLEANUP_HELD_PATH, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite); " +
+          "try { [Console]::WriteLine('ready'); [Console]::In.ReadLine() | Out-Null } " +
+          "finally { $stream.Dispose() }",
+      ],
+      {
+        env: { ...process.env, REA_CLEANUP_HELD_PATH: heldPath },
+        stdio: ["pipe", "pipe", "pipe"],
+      },
+    );
+    const holderClosed = once(holder, "close");
+    void holderClosed.catch(() => undefined);
+    try {
+      const [ready] = await once(holder.stdout, "data", {
+        signal: AbortSignal.timeout(15_000),
+      });
+      assert.equal(String(ready).trim(), "ready");
+      await assert.rejects(
+        retryRuntime.close(),
+        /owned cleanup object|Delete owned object/u,
+      );
+      assert.equal(
+        windowsPrivateRuntime(retryRuntime.observation.path),
+        retryRuntime,
+      );
+      assert.equal(await exists(heldPath), true);
+      assert.throws(
+        () => retryRuntime.writeFile("after-close.txt", "forbidden"),
+        /cleanup is pending/u,
+      );
+      holder.stdin.end("\n");
+      const [exitCode] = await holderClosed;
+      assert.equal(exitCode, 0);
+      await retryRuntime.close();
+      await retryRuntime.close();
+      assert.equal(await exists(retryRuntime.observation.path), false);
+      assert.throws(
+        () => windowsPrivateRuntime(retryRuntime.observation.path),
+        /No native private runtime/u,
+      );
+      report.controls.cleanupFailureRetainsOwnershipForRetry = true;
+    } finally {
+      holder.kill();
+      await holderClosed.catch(() => undefined);
+      await retryRuntime.close();
+    }
     report.controls = {
       ...report.controls,
       protectedDaclReadback: true,
@@ -460,6 +520,10 @@ setInterval(()=>{},1000);\n`,
     await delay();
   assert.equal(live(ownerClose.pid), false);
   report.processes.killOnOwnerClose = true;
+  report.processes.protocolInput = await verifyWindowsProtocolInput(
+    packageRoot,
+    workspace,
+  );
   const exited = launch([
     "--max-old-space-size=128",
     "-e",

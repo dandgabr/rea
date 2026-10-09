@@ -264,9 +264,9 @@ Geliştirme ortamı ve kontroller için [CONTRIBUTING.md](CONTRIBUTING.md), doğ
 
 ## Yıldız geçmişi
 
-🎉 **GitHub'da 20.000 yıldız — teşekkürler!**
+🎉 **GitHub'da 30.000 yıldız — teşekkürler!**
 
-REA'yı kullanan, hata bildiren, derlemeleri test eden ve düzeltmelere katkıda bulunan herkese teşekkürler.
+REA'yı kullanan, hata bildiren, özellik talep eden, derlemeleri test eden ve düzeltmelere katkıda bulunan herkese teşekkürler.
 
 <a href="https://www.star-history.com/?repos=morluto%2Frea&amp;type=date">
   <picture>

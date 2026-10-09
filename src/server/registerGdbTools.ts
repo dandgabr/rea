@@ -8,13 +8,14 @@ import { AnalysisInputError } from "../domain/analysisErrorCore.js";
 import type { Logger } from "../logger.js";
 import { logToolExecution } from "./toolLogging.js";
 import { toolRegistrationOptions } from "./toolRegistrationOptions.js";
-import { toCallToolResult, toEvidenceToolResult } from "./toolResult.js";
+import type { ToolResultDelivery } from "./toolResult.js";
 
 /** Register persistent GDB session operations on the existing REA MCP server. */
 export const registerGdbTools = (
   server: McpServer,
   manager: GdbSessionManager,
   logger: Logger,
+  delivery: ToolResultDelivery,
   recordEvidence?: EvidenceWriter["recordEvidence"],
 ): void => {
   const start = toolContract("start_gdb_session");
@@ -29,8 +30,8 @@ export const registerGdbTools = (
         manager.start(context.mcpReq.signal),
       );
       return result.ok
-        ? toCallToolResult({ ok: true, value: result.value }, start)
-        : toCallToolResult(result, start);
+        ? delivery.toCallToolResult({ ok: true, value: result.value }, start)
+        : delivery.toCallToolResult(result, start);
     },
   );
   server.registerTool(
@@ -40,9 +41,9 @@ export const registerGdbTools = (
       const result = await logToolExecution(logger, consoleContract.name, () =>
         manager.execute(input.session_id, input.command),
       );
-      if (!result.ok) return toCallToolResult(result, consoleContract);
+      if (!result.ok) return delivery.toCallToolResult(result, consoleContract);
       const recorded = recordEvidence?.(result.value.evidence);
-      return toEvidenceToolResult(
+      return delivery.toEvidenceToolResult(
         result.value.evidence,
         consoleContract,
         recorded,
@@ -55,11 +56,11 @@ export const registerGdbTools = (
     async (input) => {
       const result = manager.status(input.session_id);
       if (result === undefined)
-        return toCallToolResult(
+        return delivery.toCallToolResult(
           err(invalidSession("gdb_session_status")),
           status,
         );
-      return toCallToolResult(
+      return delivery.toCallToolResult(
         {
           ok: true,
           value: {
@@ -79,8 +80,8 @@ export const registerGdbTools = (
         manager.close(input.session_id),
       );
       return result.ok
-        ? toCallToolResult({ ok: true, value: result.value }, close)
-        : toCallToolResult(result, close);
+        ? delivery.toCallToolResult({ ok: true, value: result.value }, close)
+        : delivery.toCallToolResult(result, close);
     },
   );
 };

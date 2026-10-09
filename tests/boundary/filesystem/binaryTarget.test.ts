@@ -22,6 +22,7 @@ import {
   pe,
   thinMach,
 } from "../../../src/domain/binaryTarget.fixture.js";
+import { projectAnalysisError } from "../../../src/domain/analysisErrorProjection.js";
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
 
 describe("binary target I/O: app plist permissions and decoding", () => {
@@ -48,6 +49,7 @@ describe("binary target I/O: app plist permissions and decoding", () => {
         path: join(app, "Contents", "Info.plist"),
         reason: expect.stringContaining(message),
         cause: denied,
+        systemCode: code,
       },
     });
   });
@@ -232,6 +234,28 @@ describe("binary target I/O: filesystem and app bundle target resolution", () =>
     expect((await parseBinaryTarget("missing", directory)).ok).toBe(false);
   });
 
+  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "reports an unreadable target as a host read denial",
+    async () => {
+      const directory = await createTestTempDirectory("rea-target-denied-");
+      const path = join(directory, "unreadable");
+      await writeFile(path, thinMach(0xcffaedfe, 0x0100000c));
+      await chmod(path, 0);
+      try {
+        const result = await parseBinaryTarget(path, directory, "arm64");
+        expect(result.ok).toBe(false);
+        if (result.ok) return;
+        expect(result.error).toMatchObject({ path, systemCode: "EACCES" });
+        expect(projectAnalysisError(result.error)).toMatchObject({
+          code: "access_denied",
+          details: { path, system_code: "EACCES" },
+        });
+      } finally {
+        await chmod(path, 0o600);
+      }
+    },
+  );
+
   it("rejects non-regular targets before reading them", async () => {
     const directory = await createTestTempDirectory("rea-target-");
     expect((await parseBinaryTarget(directory)).ok).toBe(false);
@@ -323,6 +347,32 @@ describe("binary target I/O: explicit kinds and executable headers", () => {
     expect(result.ok && result.value).toMatchObject({
       format: "pe",
       architecture: "x86_64",
+    });
+  });
+
+  it("refuses a truncated Mach-O header before any provider sees it", async () => {
+    const directory = await createTestTempDirectory("rea-target-");
+    const path = join(directory, "truncated");
+    await writeFile(path, thinMach(0xcffaedfe, 0x0100000c).subarray(0, 12));
+    const result = await parseBinaryTarget(path, directory, "arm64");
+    expect(result.ok).toBe(false);
+    expect(result.ok ? undefined : result.error).toMatchObject({
+      path,
+      reason:
+        "truncated Mach-O header: a 64-bit header needs 32 bytes; the file has 12",
+    });
+  });
+
+  it("checks Mach-O load commands against the whole file beyond the probe", async () => {
+    const directory = await createTestTempDirectory("rea-target-");
+    const path = join(directory, "large-commands");
+    const header = thinMach(0xcffaedfe, 0x0100000c);
+    header.writeUInt32LE(8192, 20);
+    await writeFile(path, Buffer.concat([header, Buffer.alloc(8192)]));
+    const result = await parseBinaryTarget(path, directory, "arm64");
+    expect(result.ok && result.value).toMatchObject({
+      format: "mach-o",
+      architecture: "arm64",
     });
   });
 });

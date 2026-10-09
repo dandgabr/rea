@@ -4,9 +4,15 @@ import { join } from "node:path";
 import { build } from "plist";
 import { expect, it } from "vitest";
 
+import { ArtifactProvider } from "../../../src/artifacts/ArtifactProvider.js";
 import { ArtifactReaderFailure } from "../../../src/artifacts/ArtifactReader.js";
 import { inspectBundleKeyedArchive } from "../../../src/artifacts/apple/KeyedArchiveReader.js";
-import { AnalysisInputError } from "../../../src/domain/analysisErrorCore.js";
+import { AnalysisError } from "../../../src/domain/analysisErrorBase.js";
+import {
+  AnalysisInputError,
+  AnalysisUnsupportedTargetError,
+} from "../../../src/domain/analysisErrorCore.js";
+import { projectAnalysisError } from "../../../src/domain/analysisErrorProjection.js";
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
 
 const archive = build({
@@ -31,6 +37,7 @@ const inspect = (bundlePath: string, parameters: Record<string, unknown>) =>
     bundlePath,
     targetSha256: "a".repeat(64),
     parameters,
+    platform: "darwin",
   });
 
 it.each([
@@ -76,24 +83,91 @@ it("reports an absent named root with the archive's available roots", async () =
 });
 
 it.each([
-  ["plain plist", Buffer.from(build({ plain: true })), "NSKeyedArchiver"],
+  [
+    "plain plist",
+    Buffer.from(build({ plain: true })),
+    "it has no $archiver key",
+    "inspect_plist",
+  ],
+  [
+    "plist with another archiver",
+    Buffer.from(build({ $archiver: "NSArchiver", $objects: [] })),
+    'its $archiver is "NSArchiver"',
+    "inspect_plist",
+  ],
   [
     "compiled NIBArchive",
     Buffer.concat([Buffer.from("NIBArchive"), Buffer.alloc(40)]),
+    "compiled NIBArchive",
     "decode_interface_builder",
   ],
 ])(
-  "keeps the decoder reason for a selected %s",
-  async (_label, bytes, detail) => {
+  "reports a selected %s as an unsupported target with the workflow that reads it",
+  async (_label, bytes, reason, workflow) => {
     const root = await bundle();
     await writeFile(join(root, "Contents", "Resources", "Other.nib"), bytes);
     const rejected = await inspect(root, {
       path: "Contents/Resources/Other.nib",
     }).catch((cause: unknown) => cause);
-    expect(rejected).toBeInstanceOf(ArtifactReaderFailure);
-    expect(rejected).toMatchObject({
-      reason: "format",
-      message: expect.stringContaining(detail),
+    expect(rejected).toBeInstanceOf(AnalysisUnsupportedTargetError);
+    expect(projectAnalysisError(asAnalysisError(rejected))).toMatchObject({
+      code: "unsupported_target",
+      message: expect.stringContaining(reason),
+      remediation: { action: expect.stringContaining(workflow) },
+      details: {
+        operation: "inspect_keyed_archive",
+        path: join(root, "Contents", "Resources", "Other.nib"),
+      },
     });
   },
 );
+
+it.each([
+  ["darwin", "Inspect an ordinary property list with inspect_plist"],
+  [
+    "linux",
+    "inspect_plist, which reads ordinary property lists, requires a macOS host",
+  ],
+] as const)(
+  "names the property-list workflow available on a %s host",
+  async (platform, action) => {
+    const root = await createTestTempDirectory("rea-keyed-kind-");
+    const path = join(root, "Defaults.plist");
+    await writeFile(path, Buffer.from(build({ plain: true })));
+    const result = await new ArtifactProvider(process.env, platform)
+      .createClient({
+        path,
+        sha256: "0".repeat(64),
+        kind: "artifact",
+        format: "plist",
+      })
+      .execute("inspect_keyed_archive", {});
+    if (result.ok) throw new Error("Expected an unsupported target");
+    expect(projectAnalysisError(result.error)).toMatchObject({
+      code: "unsupported_target",
+      remediation: { action: expect.stringContaining(action) },
+      details: { path },
+    });
+  },
+);
+
+it("keeps a damaged NSKeyedArchiver archive a format failure", async () => {
+  const root = await bundle();
+  await writeFile(
+    join(root, "Contents", "Resources", "Damaged.plist"),
+    Buffer.from(build({ $archiver: "NSKeyedArchiver", $top: {} })),
+  );
+  const rejected = await inspect(root, {
+    path: "Contents/Resources/Damaged.plist",
+  }).catch((cause: unknown) => cause);
+  expect(rejected).toBeInstanceOf(ArtifactReaderFailure);
+  expect(rejected).toMatchObject({
+    reason: "format",
+    message: expect.stringContaining("$objects array"),
+  });
+});
+
+const asAnalysisError = (value: unknown): AnalysisError => {
+  if (!(value instanceof AnalysisError)) throw value;
+  return value;
+};

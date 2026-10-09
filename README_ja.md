@@ -266,9 +266,9 @@ REA への貢献を歓迎します！[issue を作成](https://github.com/morlut
 
 ## スター履歴
 
-🎉 **GitHub スター 20,000 件、ありがとうございます！**
+🎉 **GitHub スター 30,000 件、ありがとうございます！**
 
-REA の利用、バグ報告、ビルドのテスト、修正への貢献に感謝します。
+REA の利用、バグ報告、機能の要望、ビルドのテスト、修正への貢献に感謝します。
 
 <a href="https://www.star-history.com/?repos=morluto%2Frea&amp;type=date">
   <picture>

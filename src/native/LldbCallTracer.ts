@@ -1,3 +1,4 @@
+import { snapshotEnvironment } from "../process/snapshotEnvironment.js";
 import { randomUUID } from "node:crypto";
 import { open, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -50,6 +51,8 @@ import {
 
 const OPERATION = "observe_native_calls";
 const PROVIDER = "native-macos";
+const LLDB_REQUIREMENT =
+  "LLDB from Xcode or the Command Line Tools is not available";
 /** Captured target output kept per stream; the rest is counted, not stored. */
 const MAX_OUTPUT_BYTES = 1024 * 1024;
 /** LLDB startup, symbol loading and teardown beyond the observation window. */
@@ -163,10 +166,18 @@ const ATTACH_REMEDIATION =
 
 /** Production tracer: `lldb --batch` running the REA LLDB bridge. */
 export class LldbCallTracer implements NativeCallTracer {
+  private readonly environment: NodeJS.ProcessEnv;
   constructor(
+    environment: Readonly<NodeJS.ProcessEnv>,
     private readonly launch: typeof runLldb = runLldb,
-    private readonly resolveTool: typeof resolveXcrunTool = resolveXcrunTool,
-  ) {}
+    private readonly resolveTool: (
+      tool: string,
+      signal?: AbortSignal,
+    ) => ReturnType<typeof resolveXcrunTool> = (tool, signal) =>
+      resolveXcrunTool(tool, this.environment, signal),
+  ) {
+    this.environment = snapshotEnvironment(environment);
+  }
 
   async trace(
     request: Parameters<NativeCallTracer["trace"]>[0],
@@ -180,7 +191,8 @@ export class LldbCallTracer implements NativeCallTracer {
           : new AnalysisCapabilityUnavailableError(
               PROVIDER,
               OPERATION,
-              "LLDB from Xcode or the Command Line Tools is not available",
+              LLDB_REQUIREMENT,
+              { userMessage: LLDB_REQUIREMENT },
             ),
       );
     const root = await PrivateRuntimeRoot.create({ prefix: "rea-lldb-" });
@@ -255,6 +267,7 @@ export class LldbCallTracer implements NativeCallTracer {
         deadlineMs: input.duration_ms + DEADLINE_GRACE_MS,
         pidPath: paths.pid,
         identityAckPath: paths.identityAck,
+        environment: this.environment,
         ...(signal === undefined ? {} : { signal }),
       },
     );
@@ -603,6 +616,7 @@ const runLldb = async (
     readonly deadlineMs: number;
     readonly pidPath: string;
     readonly identityAckPath: string;
+    readonly environment: Readonly<NodeJS.ProcessEnv>;
   },
 ): Promise<LldbExit> => {
   if (options.signal?.aborted === true)
@@ -624,6 +638,7 @@ const runLldb = async (
       runId: randomUUID(),
       expectedCommand: executable,
       signal: deadline.signal,
+      hostEnvironment: options.environment,
     });
     supervisor = new ProviderProcessSupervisor(
       {

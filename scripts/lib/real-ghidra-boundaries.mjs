@@ -8,12 +8,18 @@ import { promisify } from "node:util";
 import Ajv from "ajv/dist/2020.js";
 import addFormats from "ajv-formats";
 import { analysisErrorProjectionSchema } from "../../dist/contracts/errorSchemas.js";
-import { mcpTextValue, requireMcpResult } from "./mcp-verifier-results.mjs";
+import {
+  mcpTextValue,
+  requireMcpOperationResult,
+} from "./mcp-verifier-results.mjs";
 import { verifyLegacyGhidraReferenceSnapshot } from "./ghidra-reference-snapshot-e2e.mjs";
 import { verifyGhidraSnapshotLifecycle } from "./real-ghidra-snapshot-lifecycle.mjs";
 import { verifyGhidraTargetAdmission } from "./real-ghidra-target-admission.mjs";
 import { verifyGhidraLargeResults } from "./real-ghidra-large-results.mjs";
+import { verifyGhidraEntryAliases } from "./real-ghidra-entry-aliases.mjs";
 import { verifyGhidraNamespaceAnnotations } from "./real-ghidra-namespace-annotations.mjs";
+import { verifyGhidraBatchIdentity } from "./real-ghidra-batch-identity.mjs";
+import { verifyGhidraInstructionFlow } from "./real-ghidra-instruction-flow.mjs";
 
 /** Probe real Ghidra location, annotation and error contracts through public adapters. */
 export async function verifyGhidraBoundaries(
@@ -37,7 +43,7 @@ export async function verifyGhidraBoundaries(
   let rejectedCalls = 0;
   const call = async (name, args = {}) => {
     const reply = await client.callTool({ name, arguments: args }, options);
-    const result = requireMcpResult(reply, name);
+    const result = requireMcpOperationResult(reply, name);
     const validate = validators.get(name);
     assert.ok(validate, `${name} missing from catalog`);
     assert.ok(
@@ -156,6 +162,8 @@ export async function verifyGhidraBoundaries(
     /Annotations require a local function entry/u,
   );
   const names = await call("list_names");
+  const batchIdentity = await verifyGhidraBatchIdentity(call, names);
+  const instructionFlow = await verifyGhidraInstructionFlow(call, names, cli);
   const leaf = names.find((item) =>
     item.value.endsWith("rea_ghidra_inventory_leaf"),
   );
@@ -278,7 +286,25 @@ export async function verifyGhidraBoundaries(
     await cli("inspect-native-instruction", address.toUpperCase()),
     baseline,
   );
-  const interior = `0x${(BigInt(address) + 1n).toString(16)}`;
+  // x86 function entries can begin with a one-byte PUSH. Locate an observed
+  // multi-byte instruction instead of assuming entry + 1 is an interior byte.
+  let multiByteInstruction;
+  for (const range of original.procedure.body.ranges) {
+    let cursor = BigInt(range.start);
+    while (cursor <= BigInt(range.end)) {
+      const instruction = await call("inspect_native_instruction", {
+        address: `0x${cursor.toString(16)}`,
+      });
+      if (instruction.status === "decoded" && instruction.length > 1) {
+        multiByteInstruction = instruction;
+        break;
+      }
+      cursor += BigInt(instruction.length ?? 1);
+    }
+    if (multiByteInstruction !== undefined) break;
+  }
+  assert.ok(multiByteInstruction, "Fixture lacks a multi-byte instruction");
+  const interior = `0x${(BigInt(multiByteInstruction.address) + 1n).toString(16)}`;
   assert.equal(
     (await call("inspect_native_instruction", { address: interior })).status,
     "not-instruction-boundary",
@@ -693,6 +719,13 @@ export async function verifyGhidraBoundaries(
     entrypoint,
     env,
   });
+  await verifyGhidraEntryAliases({
+    call,
+    reject: invalid,
+    target,
+    entrypoint,
+    env,
+  });
   await verifyGhidraLargeResults({
     call,
     reject: invalid,
@@ -740,7 +773,10 @@ export async function verifyGhidraBoundaries(
     missing_and_nonregular_source_rejected: true,
     imported_source_identity_retained: true,
     equivalent_instruction_address_spellings: true,
+    batch_procedure_identity: batchIdentity,
+    instruction_flow: instructionFlow,
     qualified_annotation_name_roundtrip: true,
+    imported_entry_alias_selection: true,
     oversized_result_retention_and_complete_export: true,
     long_selector_rejection_and_provider_recovery: true,
     source_immutable: true,

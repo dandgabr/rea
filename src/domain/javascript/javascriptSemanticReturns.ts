@@ -1,5 +1,10 @@
 import * as t from "@babel/types";
 
+import {
+  semanticContainer,
+  semanticPropertyPointer,
+} from "./javascriptSemanticSlots.js";
+
 import type {
   JavaScriptSemanticCallable,
   JavaScriptSemanticModuleLink,
@@ -211,48 +216,57 @@ const flattenValue = (
   path: string,
   fields: ProjectedReturnField[],
   coverage: ProjectedPropertyCoverage[],
+  presence: "present" | "absent" | "unknown-coverage" = "present",
 ): void => {
+  if (presence !== "present") {
+    fields.push({
+      path,
+      presence,
+      state: "unknown",
+      value: null,
+      reason:
+        "reason" in value ? value.reason : "Property presence is uncertain.",
+    });
+    return;
+  }
   if (value.status === "literal") {
-    fields.push({ path, state: "literal", value: value.value, reason: null });
+    fields.push({
+      path,
+      presence,
+      state: "literal",
+      value: value.value,
+      reason: null,
+    });
     return;
   }
   if (value.status === "union") {
     fields.push({
       path,
+      presence,
       state: "union",
       value: [...value.values],
       reason: null,
     });
     return;
   }
-  if (value.status === "object") {
-    coverage.push(
-      value.unknownProperties
-        ? { path, status: "partial", omitted: value.omittedProperties }
-        : { path, status: "complete", omitted: 0 },
-    );
-    for (const property of value.properties)
-      flattenValue(
-        property.value,
-        `${path}/${escapePointer(property.name)}`,
-        fields,
-        coverage,
-      );
+  if ("reason" in value) {
+    fields.push({
+      path,
+      presence,
+      state: "unknown",
+      value: null,
+      reason: value.reason,
+    });
     return;
   }
-  if (value.status === "array") {
-    coverage.push(
-      value.unknownItems
-        ? { path, status: "partial", omitted: value.omittedItems }
-        : { path, status: "complete", omitted: 0 },
+  const container = semanticContainer(value);
+  coverage.push({ path, ...container.coverage });
+  for (const slot of container.slots)
+    flattenValue(
+      slot.value,
+      `${path}${semanticPropertyPointer([slot.name])}`,
+      fields,
+      coverage,
+      slot.presence,
     );
-    value.items.forEach((item, index) =>
-      flattenValue(item, `${path}/${String(index)}`, fields, coverage),
-    );
-    return;
-  }
-  fields.push({ path, state: "unknown", value: null, reason: value.reason });
 };
-
-const escapePointer = (value: string): string =>
-  value.replaceAll("~", "~0").replaceAll("/", "~1");

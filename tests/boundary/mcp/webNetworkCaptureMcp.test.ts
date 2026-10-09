@@ -71,9 +71,8 @@ it("publishes valid SDK schemas and retains historical inline Evidence with the 
   const parsed = toolContract("inspect_web_network_capture").outputSchema.parse(
     response.structuredContent,
   );
-  const evidence = parseEvidence(parsed.evidence);
-  expect(parsed.result).toEqual(evidence.normalized_result);
-  const capture = webNetworkCaptureSchema.parse(parsed.result);
+  const evidence = parseEvidence(parsed);
+  const capture = webNetworkCaptureSchema.parse(parsed.normalized_result);
   expect(capture.container.reported).toEqual({
     creator: "fixture",
     ["__proto__"]: { preserved: 7 },

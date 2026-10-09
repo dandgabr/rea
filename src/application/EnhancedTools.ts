@@ -8,6 +8,7 @@ import type { EnhancedToolName } from "../contracts/enhancedInputs.js";
 import { enhancedInputSchemas } from "../contracts/enhancedInputs.js";
 import {
   AnalysisCancelledError,
+  AnalysisCapabilityUnavailableError,
   AnalysisOutputError,
 } from "../domain/analysisErrorCore.js";
 import { projectAnalysisError } from "../domain/analysisErrorProjection.js";
@@ -253,20 +254,33 @@ export class EnhancedTools {
   ): EnhancedResult {
     const items = await Promise.all(
       addresses.map(async (address) => {
+        const resolved = await resolveProcedureAddress(
+          this.#call.bind(this),
+          address,
+          signal,
+        );
+        const procedure = resolved.ok
+          ? await this.#batchProcedureIdentity(resolved.value, signal)
+          : {
+              status: "unknown" as const,
+              error: projectAnalysisError(resolved.error),
+            };
         const result = await this.#call(
           "procedure_pseudo_code",
-          { procedure: address },
+          { procedure: resolved.ok ? resolved.value : address },
           signal,
         );
         if (!result.ok)
           return {
             address,
+            procedure,
             status: "error" as const,
             error: projectAnalysisError(result.error),
           };
         if (typeof result.value !== "string" || result.value.length === 0)
           return {
             address,
+            procedure,
             status: "error" as const,
             error: projectAnalysisError(
               new AnalysisOutputError(
@@ -275,7 +289,12 @@ export class EnhancedTools {
               ),
             ),
           };
-        return { address, status: "ok" as const, pseudocode: result.value };
+        return {
+          address,
+          procedure,
+          status: "ok" as const,
+          pseudocode: result.value,
+        };
       }),
     );
     const succeeded = items.filter(({ status }) => status === "ok").length;
@@ -285,6 +304,30 @@ export class EnhancedTools {
       succeeded,
       failed: items.length - succeeded,
     });
+  }
+
+  async #batchProcedureIdentity(address: string, signal?: AbortSignal) {
+    const observed = await this.#call("address_name", { address }, signal);
+    const named =
+      observed.ok &&
+      (typeof observed.value === "string" || observed.value === null);
+    return {
+      status: "resolved" as const,
+      address,
+      name: named ? observed.value : null,
+      ...(named
+        ? {}
+        : {
+            name_error: projectAnalysisError(
+              observed.ok
+                ? new AnalysisOutputError(
+                    "address_name",
+                    "provider returned an invalid entry label",
+                  )
+                : observed.error,
+            ),
+          }),
+    };
   }
 
   async #callGraph(
@@ -358,9 +401,30 @@ export class EnhancedTools {
     signal?: AbortSignal,
   ): EnhancedResult {
     const procedures = await this.#allAddressed("list_procedures", signal);
-    return procedures.ok
-      ? ok(categorizeSwiftTypes(procedures.value, input))
-      : procedures;
+    if (!procedures.ok) return procedures;
+    const symbols = await this.#allAddressed("list_names", signal);
+    if (
+      !symbols.ok &&
+      !(symbols.error instanceof AnalysisCapabilityUnavailableError)
+    )
+      return symbols;
+    const result = categorizeSwiftTypes(
+      procedures.value,
+      input,
+      symbols.ok ? symbols.value : [],
+    );
+    return ok(
+      symbols.ok
+        ? result
+        : {
+            ...result,
+            symbol_inventory_error: projectAnalysisError(symbols.error),
+            limitations: [
+              ...result.limitations,
+              "The provider's symbol inventory is unavailable; demangled procedures could not be joined to their Swift aliases.",
+            ],
+          },
+    );
   }
 
   async #findXrefs(name: string, signal?: AbortSignal): EnhancedResult {

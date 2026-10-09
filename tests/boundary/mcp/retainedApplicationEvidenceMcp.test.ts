@@ -21,6 +21,7 @@ const retained = (evidence_id: string) => ({
 });
 const application = JAVASCRIPT_FEATURE_TRACE_EXAMPLE.application;
 const pair = JAVASCRIPT_APPLICATION_VERSION_COMPARISON_EXAMPLE;
+const exportPair = JAVASCRIPT_EXPORT_SHAPE_COMPARISON_EXAMPLE;
 
 async function connect() {
   const session = createTestBinarySession(() => {
@@ -39,6 +40,8 @@ it("runs the same trace/compare workflows with inline and retained application E
   const { client, session } = await connect();
   expect(session.recordEvidence(pair.left).ok).toBe(true);
   expect(session.recordEvidence(pair.right).ok).toBe(true);
+  expect(session.recordEvidence(exportPair.left).ok).toBe(true);
+  expect(session.recordEvidence(exportPair.right).ok).toBe(true);
   const scenarios = [
     {
       name: "trace_application_feature",
@@ -61,8 +64,8 @@ it("runs the same trace/compare workflows with inline and retained application E
       inline: JAVASCRIPT_EXPORT_SHAPE_COMPARISON_EXAMPLE,
       refs: {
         ...JAVASCRIPT_EXPORT_SHAPE_COMPARISON_EXAMPLE,
-        left: retained(pair.left.evidence_id),
-        right: retained(pair.right.evidence_id),
+        left: retained(exportPair.left.evidence_id),
+        right: retained(exportPair.right.evidence_id),
       },
     },
     {
@@ -203,6 +206,22 @@ it("preserves validation for the referenced record's operation, predicate, and s
       },
     });
   }
+  for (const reference of [
+    { evidence_id: application.evidence_id },
+    { ...retained(application.evidence_id), kind: "another-session" },
+    retained("ev_short"),
+    { ...retained(application.evidence_id), session_id: "foreign" },
+    { ...retained(application.evidence_id), normalized_result: {} },
+  ]) {
+    const rejected = await client.callTool({
+      name: "trace_application_feature",
+      arguments: {
+        ...JAVASCRIPT_FEATURE_TRACE_EXAMPLE,
+        application: reference,
+      },
+    });
+    expect(rejected.isError).toBe(true);
+  }
   const tampered = {
     ...application,
     provider: { ...application.provider, id: "tampered" },
@@ -214,4 +233,28 @@ it("preserves validation for the referenced record's operation, predicate, and s
     arguments: { ...JAVASCRIPT_FEATURE_TRACE_EXAMPLE, application: tampered },
   });
   expect(response.isError).toBe(true);
+});
+
+it("projects a retained JavaScript summary without graph or semantic_graph", async () => {
+  const { client, session } = await connect();
+  expect(session.recordEvidence(application).ok).toBe(true);
+  const inline = await client.callTool({
+    name: "inspect_analysis_view",
+    arguments: {
+      source: { kind: "inline", evidence: application },
+      view: { kind: "summary" },
+    },
+  });
+  const referenced = await client.callTool({
+    name: "inspect_analysis_view",
+    arguments: {
+      source: retained(application.evidence_id),
+      view: { kind: "summary" },
+    },
+  });
+  expect(inline.isError).not.toBe(true);
+  expect(referenced.structuredContent).toEqual(inline.structuredContent);
+  expect(inline.structuredContent).not.toHaveProperty(
+    "normalized_result.summary.semantic_graph",
+  );
 });

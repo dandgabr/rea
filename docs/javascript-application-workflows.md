@@ -2,12 +2,15 @@
 
 REA derives a complete reachable feature trace from one authenticated JavaScript
 Application Graph and compares two authenticated graph versions. The MCP tools
-are `trace_application_feature`, `trace_javascript_semantics`,
-`compare_application_versions`, `compare_source_to_bundle`, and
-`compare_javascript_export_shapes`; their CLI equivalents use the same names
-with hyphens.
+are `inspect_analysis_view`, `trace_application_feature`,
+`trace_javascript_semantics`, `compare_application_versions`,
+`compare_source_to_bundle`, and `compare_javascript_export_shapes`; their CLI
+equivalents use the same names with hyphens. `inspect_analysis_view` projects a
+summary, module page, or one module from already completed application
+Evidence; it does not walk relationships.
 
-These workflows consume Evidence produced by
+`inspect_analysis_view` also projects retained `inspect_binary_layout`
+Evidence. The remaining workflows consume Evidence produced by
 `analyze_javascript_application` or `reconcile_javascript_runtime`. They do not
 read an artifact, execute application code, attach to a process, or open a
 native-analysis provider. Static artifact observations, passive runtime
@@ -138,14 +141,33 @@ Nested callable returns are not assigned to their parent callable. Projected
 graph observations carry source ranges but never source text.
 
 Return variants pair only when a literal discriminant such as `/type` has one
-unique occurrence on each side and pairing is reciprocal. Changes use JSON
-Pointer paths with `added`, `removed`, `changed`, or `unknown` status. A missing
-field is added or removed only when the relevant parent-property coverage is
-complete on both shapes. The output includes exact selector candidates,
-omissions, Evidence links, coverage, and limitations; it does not execute
-JavaScript. When runtime semantics matter, run behavioral probes directly
-against the relevant application versions and capture them through the
-available browser, Electron, or process workflows.
+unique occurrence on each side and pairing is reciprocal. Source order never
+implies correspondence. Each retained variant contributes a property inventory
+of observed JSON Pointer names, including fields whose static values stay
+unknown, plus that variant's parent-property coverage.
+
+Changes use JSON Pointer paths with `added`, `removed`, `changed`, or `unknown`
+status and a separate `presence` object (`present`, `absent`, or
+`unknown-coverage`) on each side. A name is `added` or `removed` when one paired
+shape proves presence and the other proves absence. Complete parent-property
+coverage can establish absence even when field values stay unresolved. Identical literals are
+omitted. Unresolved values that remain on both sides stay `unknown` when the
+projections differ, and are omitted when presence is unchanged and the unknown
+projections match. Incomplete spreads and other partial parent coverage keep
+one-sided names `unknown` with `unknown-coverage` on the incomplete side.
+Unpaired variants remain visible as unknown changes and still list their
+property inventories, each with its own `source_range`. Inventories exclude
+array holes and slots whose presence was invalidated by mutation; an unresolved
+value alone does not make an observed property uncertain. `summary.added` and
+`summary.removed` count
+presence-level add/remove as well as literal value add/remove;
+`summary.unknown` does not absorb complete-coverage presence-only gaps.
+
+The output includes exact selector candidates, omissions, Evidence links,
+coverage, and limitations; it does not execute JavaScript. When runtime
+semantics matter, run behavioral probes directly against the relevant
+application versions and capture them through the available browser, Electron,
+or process workflows.
 
 ## CLI and verification
 
@@ -167,8 +189,8 @@ writeFileSync("trace-input.json", JSON.stringify({
 rea trace-application-feature ./trace-input.json --json
 ```
 
-MCP analysis returns an envelope containing `result`, `evidence_id`, and full
-`evidence`. If the connected server advertises retained references, reuse its
+MCP analysis returns the complete Evidence record, with the operation result
+in `normalized_result` and its identity in `evidence_id`. If the connected server advertises retained references, reuse its
 exact returned ID as `{"kind":"retained-evidence","evidence_id":"RETURNED_ID"}`
 in `application`, or `left`/`right` for comparisons. `RETURNED_ID` is a template,
 not a literal valid ID. Native Evidence arrays still use complete records.

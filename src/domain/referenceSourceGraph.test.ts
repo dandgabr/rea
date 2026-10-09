@@ -58,7 +58,11 @@ const unavailableFileEntry = (
   ...overrides,
 });
 
-const symlinkEntry = (overrides: Partial<SymlinkEntry> = {}): SymlinkEntry => ({
+type KnownTargetSymlinkEntry = Extract<SymlinkEntry, { target: string }>;
+
+const symlinkEntry = (
+  overrides: Partial<KnownTargetSymlinkEntry> = {},
+): KnownTargetSymlinkEntry => ({
   path: "src/package.json",
   kind: "symlink",
   target: "main.ts",
@@ -184,7 +188,7 @@ describe("historical source graph", () => {
     }
   });
 
-  it("retains actual external targets and accepts legacy markers", () => {
+  it("retains actual external targets and rejects placeholder targets", () => {
     const input = { ...graphInput(), inventory_state: "partial" as const };
     input.entries[2] = symlinkEntry({
       target: "/private/shared/target.js",
@@ -205,7 +209,7 @@ describe("historical source graph", () => {
             : entry,
         ),
       }),
-    ).not.toThrow();
+    ).toThrow(/target path does not match/u);
   });
 
   it("derives language and manifest indexes and enforces code-point order", () => {
@@ -237,6 +241,50 @@ describe("historical source graph", () => {
 });
 
 describe("partial historical source graphs", () => {
+  it("keeps an unreadable symlink target unknown and out of root identity", () => {
+    const base = graphInput();
+    base.inventory_state = "partial";
+    base.entries[2] = {
+      path: "src/package.json",
+      kind: "symlink",
+      target: null,
+      target_state: "unreadable",
+      classifications: ["manifest"],
+      limitations: ["Target could not be read."],
+    };
+    const graph = createHistoricalSourceGraph(base);
+    expect(graph.entries[2]).toMatchObject({
+      kind: "symlink",
+      target: null,
+      target_state: "unreadable",
+    });
+
+    const changedMessage = structuredClone(base);
+    changedMessage.entries[2] = {
+      path: "src/package.json",
+      kind: "symlink",
+      target: null,
+      target_state: "unreadable",
+      classifications: ["manifest"],
+      limitations: ["A different diagnostic."],
+    };
+    const revised = createHistoricalSourceGraph(changedMessage);
+    expect(revised.root_sha256).toBe(graph.root_sha256);
+    expect(computeHistoricalSourceGraphSha256(revised)).not.toBe(
+      computeHistoricalSourceGraphSha256(graph),
+    );
+    expect(() =>
+      createHistoricalSourceGraph({
+        ...base,
+        entries: base.entries.map((entry) =>
+          entry.kind === "symlink"
+            ? { ...entry, target: "<unreadable>" }
+            : entry,
+        ),
+      }),
+    ).toThrow();
+  });
+
   it("preserves partial observations but rejects every partial complete graph", () => {
     const partial = graphInput();
     partial.inventory_state = "partial";
@@ -337,7 +385,7 @@ describe("historical source graph validation", () => {
             : entry,
         ),
       }),
-    ).not.toThrow();
+    ).toThrow(/target path does not match/u);
     expect(() =>
       createHistoricalSourceGraph({
         ...graphInput(),

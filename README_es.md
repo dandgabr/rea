@@ -264,9 +264,9 @@ Consulta [CONTRIBUTING.md](CONTRIBUTING.md) para preparar el entorno de desarrol
 
 ## Historial de estrellas
 
-🎉 **20.000 estrellas en GitHub: ¡gracias!**
+🎉 **30.000 estrellas en GitHub: ¡gracias!**
 
-Gracias a quienes usan REA, informan de errores, prueban compilaciones y contribuyen con correcciones.
+Gracias a quienes usan REA, informan de errores, solicitan funciones, prueban compilaciones y contribuyen con correcciones.
 
 <a href="https://www.star-history.com/?repos=morluto%2Frea&amp;type=date">
   <picture>

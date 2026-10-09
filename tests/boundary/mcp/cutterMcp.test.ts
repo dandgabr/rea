@@ -105,12 +105,7 @@ it("preserves live Cutter command Evidence and parity through the MCP boundary",
     },
   });
   expect(command.isError).not.toBe(true);
-  const content = command.structuredContent as {
-    result: unknown;
-    evidence: unknown;
-  };
-  const evidence = parseEvidence(content.evidence);
-  expect(content.result).toEqual(evidence.normalized_result);
+  const evidence = parseEvidence(command.structuredContent);
   expect(evidence).toMatchObject({
     operation: "cutter_command",
     provider: { id: "cutter.python-plugin" },
@@ -132,15 +127,7 @@ it("preserves live Cutter command Evidence and parity through the MCP boundary",
     },
   });
   expect(uncertain.isError).not.toBe(true);
-  const uncertainContent = uncertain.structuredContent;
-  if (
-    !uncertainContent ||
-    typeof uncertainContent !== "object" ||
-    !("evidence" in uncertainContent)
-  ) {
-    throw new Error("MCP response did not include Cutter command Evidence");
-  }
-  const uncertainEvidence = parseEvidence(uncertainContent.evidence);
+  const uncertainEvidence = parseEvidence(uncertain.structuredContent);
   expect(uncertainEvidence.normalized_result).toMatchObject({
     execution_state: "unknown",
     error: "transport-response-missing",

@@ -6,13 +6,14 @@ import { toolContract } from "../contracts/toolContracts.js";
 import type { Logger } from "../logger.js";
 import { logToolExecution } from "./toolLogging.js";
 import { toolRegistrationOptions } from "./toolRegistrationOptions.js";
-import { toCallToolResult, toEvidenceToolResult } from "./toolResult.js";
+import type { ToolResultDelivery } from "./toolResult.js";
 
 /** Register objdump and Rizin operations against their exact named contracts. */
 export const registerReverseEngineeringTools = (
   server: McpServer,
   service: ReverseEngineeringService,
   logger: Logger,
+  delivery: ToolResultDelivery,
   recordEvidence?: EvidenceWriter["recordEvidence"],
 ): void => {
   const objdump = toolContract("inspect_with_objdump");
@@ -24,8 +25,8 @@ export const registerReverseEngineeringTools = (
       const result = await logToolExecution(logger, objdump.name, () =>
         service.inspectWithObjdump(input, { signal: context.mcpReq.signal }),
       );
-      if (!result.ok) return toCallToolResult(result, objdump);
-      return toEvidenceToolResult(
+      if (!result.ok) return delivery.toCallToolResult(result, objdump);
+      return delivery.toEvidenceToolResult(
         result.value,
         objdump,
         recordEvidence?.(result.value),
@@ -39,8 +40,8 @@ export const registerReverseEngineeringTools = (
       const result = await logToolExecution(logger, rizin.name, () =>
         service.executeRizinCommand(input, { signal: context.mcpReq.signal }),
       );
-      if (!result.ok) return toCallToolResult(result, rizin);
-      return toEvidenceToolResult(
+      if (!result.ok) return delivery.toCallToolResult(result, rizin);
+      return delivery.toEvidenceToolResult(
         result.value,
         rizin,
         recordEvidence?.(result.value),

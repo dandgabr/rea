@@ -23,6 +23,8 @@ type CurrentPathKind =
 interface CurrentPath {
   readonly kind: CurrentPathKind;
   readonly value: string;
+  /** Artifact-relative map resolution identifies one path, not its suffixes. */
+  readonly allowSuffix: boolean;
 }
 
 interface CurrentProjection {
@@ -93,7 +95,9 @@ export const buildSourceToBundleCandidateIndex = (
     for (const digest of projection.digests)
       addIndexValue(byDigest, digest, projection.node.node_id);
     for (const path of projection.paths) {
-      for (const suffix of pathSuffixes(path.value))
+      for (const suffix of path.allowSuffix
+        ? pathSuffixes(path.value)
+        : [path.value])
         addIndexValue(byPathSuffix, suffix, projection.node.node_id);
       addIndexValue(
         byBasename,
@@ -135,6 +139,12 @@ export const candidateIdsForSource = (
   return output;
 };
 
+/** Whether an indexed candidate carries any content digest to compare. */
+export const candidateHasDigest = (
+  index: SourceToBundleCandidateIndex,
+  nodeId: string,
+): boolean => (index.nodes.get(nodeId)?.digests.size ?? 0) > 0;
+
 /** Score one indexed candidate from explicit, caller-visible signals. */
 export const scoreSourceToBundleCandidate = (
   source: SourceFile,
@@ -163,16 +173,25 @@ const projectCurrentNode = (node: ApplicationNode): CurrentProjection => {
   if (node.identity.strategy === "source-map-original") {
     if (node.identity.source_sha256 !== null)
       digests.add(node.identity.source_sha256);
-    addPath(paths, "source-map-original", node.identity.original_source);
   }
   if (node.identity.strategy === "canonical-path")
     addPath(paths, "canonical-path", node.identity.path);
   for (const observation of node.observations) {
-    const sourceDigest = observation.properties.source_sha256;
-    if (typeof sourceDigest === "string" && isDigest(sourceDigest))
-      digests.add(sourceDigest);
-    for (const key of PATH_PROPERTIES)
-      addJsonPath(paths, observation.properties[key]);
+    if (node.identity.strategy === "source-map-original") {
+      const resolution = observation.source_map_reference?.resolution;
+      if (resolution !== undefined && resolution.kind !== "unresolved")
+        paths.push({
+          kind: "source-map-original",
+          value: resolution.path,
+          allowSuffix: resolution.kind === "suffix",
+        });
+    } else {
+      const sourceDigest = observation.properties.source_sha256;
+      if (typeof sourceDigest === "string" && isDigest(sourceDigest))
+        digests.add(sourceDigest);
+      for (const key of PATH_PROPERTIES)
+        addJsonPath(paths, observation.properties[key]);
+    }
   }
   return {
     node,
@@ -206,7 +225,10 @@ const candidateSignals = (
     signals.push(signal("current-path-exact", source.path, exactPaths));
   const suffixPaths = otherPaths
     .filter(
-      ({ value }) => value !== source.path && value.endsWith(`/${source.path}`),
+      ({ value, allowSuffix }) =>
+        allowSuffix &&
+        value !== source.path &&
+        value.endsWith(`/${source.path}`),
     )
     .map(({ value }) => value);
   if (suffixPaths.length > 0)
@@ -253,7 +275,9 @@ const matchingPaths = (
 ): string[] =>
   currentPaths
     .filter(
-      ({ value }) => value === sourcePath || value.endsWith(`/${sourcePath}`),
+      ({ value, allowSuffix }) =>
+        value === sourcePath ||
+        (allowSuffix && value.endsWith(`/${sourcePath}`)),
     )
     .map(({ value }) => value);
 
@@ -267,31 +291,38 @@ const addPath = (
   raw: string,
 ): void => {
   const value = normalizeCurrentPath(raw);
-  if (value !== null) paths.push({ kind, value });
+  if (value !== null) paths.push({ kind, value, allowSuffix: true });
 };
 
-/** Matches a `scheme://...` URL prefix; bare filesystem paths keep `?`/`#`. */
 const SCHEME_URL = /^[a-z][a-z0-9+.-]*:\/\//iu;
-/** Matches a `scheme://...` URL prefix with any run of slashes, for stripping. */
 const SCHEME_URL_PREFIX = /^[a-z][a-z0-9+.-]*:\/\/+/iu;
 
 const normalizeCurrentPath = (raw: string): string | null => {
   const withoutQuery = SCHEME_URL.test(raw)
     ? (raw.split(/[?#]/u, 1)[0] ?? "")
     : raw;
-  const withoutScheme = withoutQuery.replace(SCHEME_URL_PREFIX, "");
-  const parts = withoutScheme
-    .replaceAll("\\", "/")
-    .split("/")
-    .filter((part) => part !== "" && part !== ".");
-  if (parts.length === 0 || parts.includes("..")) return null;
+  const portable = withoutQuery
+    .replace(SCHEME_URL_PREFIX, "")
+    .replaceAll("\\", "/");
+  const parts: string[] = [];
+  for (const part of portable.split("/")) {
+    if (part === "" || part === ".") continue;
+    if (part === "..") {
+      if (parts.length === 0) return null;
+      parts.pop();
+    } else parts.push(part);
+  }
+  if (parts.length === 0) return null;
   return parts.join("/");
 };
 
 const uniquePaths = (paths: readonly CurrentPath[]): CurrentPath[] =>
   [
     ...new Map(
-      paths.map((path) => [`${path.kind}\0${path.value}`, path]),
+      paths.map((path) => [
+        `${path.kind}\0${path.value}\0${String(path.allowSuffix)}`,
+        path,
+      ]),
     ).values(),
   ].sort((left, right) =>
     compareCodePoints(

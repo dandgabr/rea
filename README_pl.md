@@ -264,9 +264,9 @@ Zobacz [CONTRIBUTING.md](CONTRIBUTING.md), aby poznać konfigurację środowiska
 
 ## Historia gwiazdek
 
-🎉 **20 000 gwiazdek na GitHubie — dziękujemy!**
+🎉 **30 000 gwiazdek na GitHubie — dziękujemy!**
 
-Dziękujemy wszystkim, którzy używają REA, zgłaszają błędy, testują kompilacje i przesyłają poprawki.
+Dziękujemy wszystkim, którzy używają REA, zgłaszają błędy, proponują nowe funkcje, testują kompilacje i przesyłają poprawki.
 
 <a href="https://www.star-history.com/?repos=morluto%2Frea&amp;type=date">
   <picture>

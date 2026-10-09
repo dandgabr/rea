@@ -1,3 +1,4 @@
+import { snapshotEnvironment } from "../process/snapshotEnvironment.js";
 import { spawnSync } from "node:child_process";
 import { constants } from "node:fs";
 import { accessSync, readFileSync } from "node:fs";
@@ -37,6 +38,7 @@ const NATIVE_PLATFORMS: Readonly<
 
 /** Caller-owned paths and host coordinates used for one installation probe. */
 export interface GhidraInstallationOptions {
+  readonly environment: Readonly<NodeJS.ProcessEnv>;
   readonly installDir?: string;
   readonly javaHome?: string;
   readonly platform?: NodeJS.Platform;
@@ -292,10 +294,19 @@ const installationCoordinates = (
         ? undefined
         : ghidraApplicationProperties(properties),
     javaCommand,
-    java: host.probeJava(
-      javaCommand,
-      ghidraJavaEnvironment(options.javaHome, process.env, platform),
-    ),
+    // The configuration check rejects a relative JAVA_HOME. Probing it would
+    // run whatever `bin/java` the current directory holds.
+    java:
+      options.javaHome === undefined || path.isAbsolute(options.javaHome)
+        ? host.probeJava(
+            javaCommand,
+            ghidraJavaEnvironment(
+              options.javaHome,
+              options.environment,
+              platform,
+            ),
+          )
+        : undefined,
   };
 };
 
@@ -306,13 +317,7 @@ const installationChecks = ({
   javaHome,
   host,
 }: GhidraInstallationCheckContext): readonly GhidraInstallationCheck[] => [
-  installationCheck({
-    name: "configuration",
-    passed: coordinates.installDir !== null,
-    code: "not_configured",
-    detail: coordinates.installDir ?? "GHIDRA_INSTALL_DIR is not set",
-    remediation: `Set GHIDRA_INSTALL_DIR to an extracted Ghidra ${ghidraReleaseLine()} release directory.`,
-  }),
+  configurationCheck(coordinates.installDir, javaHome, platform),
   installationCheck({
     name: "platform",
     passed: NATIVE_PLATFORMS[platform] !== undefined,
@@ -366,6 +371,40 @@ const installationChecks = ({
   ),
 ];
 
+/**
+ * REA's configuration parser, and so the MCP server and analysis, accept only
+ * absolute paths; a relative one that happens to resolve here must not pass.
+ */
+const configurationCheck = (
+  installDir: string | null,
+  javaHome: string | undefined,
+  platform: NodeJS.Platform,
+): GhidraInstallationCheck => {
+  const { isAbsolute } = platform === "win32" ? win32 : posix;
+  const relative = [
+    ...(installDir !== null && !isAbsolute(installDir)
+      ? ["GHIDRA_INSTALL_DIR"]
+      : []),
+    ...(javaHome !== undefined && !isAbsolute(javaHome) ? ["JAVA_HOME"] : []),
+  ];
+  if (installDir === null || relative.length === 0)
+    return installationCheck({
+      name: "configuration",
+      passed: installDir !== null,
+      code: "not_configured",
+      detail: installDir ?? "GHIDRA_INSTALL_DIR is not set",
+      remediation: `Set GHIDRA_INSTALL_DIR to an extracted Ghidra ${ghidraReleaseLine()} release directory.`,
+    });
+  const settings = relative.join(" and ");
+  return installationCheck({
+    name: "configuration",
+    passed: false,
+    code: "not_configured",
+    detail: `${settings} must be absolute`,
+    remediation: `Set ${settings} to ${relative.length === 1 ? "an absolute path" : "absolute paths"}. REA's analysis and MCP server reject relative paths even when they resolve from the current directory.`,
+  });
+};
+
 /** Project an installation probe into caller-visible, secret-free diagnostics. */
 export const ghidraInstallationDiagnostics = (
   inspection: GhidraInstallationInspection,
@@ -391,11 +430,12 @@ export const ghidraInstallationDiagnostics = (
 /** Environment that makes an explicitly selected JDK win over PATH discovery. */
 export const ghidraJavaEnvironment = (
   javaHome: string | undefined,
-  environment: NodeJS.ProcessEnv = process.env,
+  environment: Readonly<NodeJS.ProcessEnv>,
   platform: NodeJS.Platform = process.platform,
 ): NodeJS.ProcessEnv => {
+  const selectedEnvironment = snapshotEnvironment(environment, platform);
   const boundedEnvironment = {
-    ...environment,
+    ...selectedEnvironment,
     _JAVA_OPTIONS: "",
     JAVA_TOOL_OPTIONS: "",
     JDK_JAVA_OPTIONS: "",
@@ -409,7 +449,7 @@ export const ghidraJavaEnvironment = (
         PATH: `${(platform === "win32" ? win32 : posix).join(
           javaHome,
           "bin",
-        )}${platform === "win32" ? win32.delimiter : posix.delimiter}${environment.PATH ?? ""}`,
+        )}${platform === "win32" ? win32.delimiter : posix.delimiter}${selectedEnvironment.PATH ?? ""}`,
       };
 };
 

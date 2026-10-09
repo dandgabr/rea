@@ -245,6 +245,23 @@ const callPathTraceOutput = resultOf(
   }),
 );
 
+/** Identity facts attached to one requested batch selector. */
+const batchProcedureIdentity = z.discriminatedUnion("status", [
+  z.object({
+    status: z.literal("resolved"),
+    address: z.string().min(1).describe("Observed canonical procedure entry."),
+    name: z
+      .string()
+      .nullable()
+      .describe("Provider's entry label, or null when unavailable."),
+    name_error: analysisErrorProjectionSchema.optional(),
+  }),
+  z.object({
+    status: z.literal("unknown"),
+    error: analysisErrorProjectionSchema,
+  }),
+]);
+
 /** Exact structured-content schemas for composed analysis workflows. */
 export const enhancedOutputSchemas: Readonly<Record<string, z.ZodObject>> = {
   inspect_native_dispatch_metadata: resultOf(
@@ -259,12 +276,18 @@ export const enhancedOutputSchemas: Readonly<Record<string, z.ZodObject>> = {
       items: z.array(
         z.discriminatedUnion("status", [
           z.object({
-            address: z.string(),
+            address: z
+              .string()
+              .describe("Original caller-selected symbol or address."),
+            procedure: batchProcedureIdentity,
             status: z.literal("ok"),
             pseudocode: z.string().min(1),
           }),
           z.object({
-            address: z.string(),
+            address: z
+              .string()
+              .describe("Original caller-selected symbol or address."),
+            procedure: batchProcedureIdentity,
             status: z.literal("error"),
             error: analysisErrorProjectionSchema,
           }),
@@ -283,9 +306,21 @@ export const enhancedOutputSchemas: Readonly<Record<string, z.ZodObject>> = {
         z.string(),
         z.object({
           count: z.number().int().min(0),
-          items: z.array(addressedEntry),
+          items: z.array(
+            addressedEntry.extend({
+              mangled_names: z.array(z.string()),
+            }),
+          ),
         }),
       ),
+      unclassified: z.array(
+        addressedEntry.extend({
+          mangled_names: z.array(z.string()),
+          reason: z.enum(["category_not_decoded", "conflicting_categories"]),
+        }),
+      ),
+      limitations: z.array(z.string()),
+      symbol_inventory_error: analysisErrorProjectionSchema.exactOptional(),
     }),
   ),
   find_xrefs_to_name: resultOf(
@@ -379,7 +414,6 @@ export const sessionOutputSchemas = {
       path: z.string(),
       format: targetFormatSchema,
       kind: targetKindSchema,
-      loaderArgs: z.array(z.string()),
       sha256: z.string().regex(/^[a-f0-9]{64}$/u),
       architecture: z.enum(["x86", "x86_64", "arm", "arm64"]).nullable(),
     }),
@@ -390,7 +424,23 @@ export const sessionOutputSchemas = {
       z.object({
         path: z.string(),
         bytes: z.number().int().min(0),
-        entries: z.number().int().min(0),
+        primitive_entries: z
+          .number()
+          .int()
+          .min(0)
+          .describe("Retained eligible primitive query bindings."),
+        workflow_entries: z
+          .number()
+          .int()
+          .min(0)
+          .describe("Retained eligible composed workflow bindings."),
+        evidence_records: z
+          .number()
+          .int()
+          .min(0)
+          .describe(
+            "All retained Evidence records, including observations without replay bindings.",
+          ),
       }),
     ]),
   ),

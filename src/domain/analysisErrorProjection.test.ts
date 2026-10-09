@@ -11,7 +11,7 @@ import {
 import { ArtifactOperationError } from "./artifactOperationError.js";
 import { BinaryTargetError } from "./configurationErrors.js";
 import { BrowserObservationError } from "./browserObservationError.js";
-import { EvidenceIntegrityError } from "./evidenceErrors.js";
+import { EvidenceFileError, EvidenceIntegrityError } from "./evidenceErrors.js";
 import {
   HopperProcessError,
   HopperRemoteError,
@@ -439,6 +439,42 @@ describe("analysis error projection: caller contract", () => {
     expect(JSON.stringify(projected)).not.toContain("secret-token");
   });
 
+  it.each(["EACCES", "EPERM"] as const)(
+    "reports a target the host refused to read (%s) as access_denied",
+    (systemCode) => {
+      const denied = Object.assign(new Error("denied"), { code: systemCode });
+      const reason = `permission denied while reading target: ${systemCode}`;
+      expect(
+        projectAnalysisError(
+          new BinaryTargetError("/local/targets/app", reason, {
+            cause: denied,
+          }),
+        ),
+      ).toMatchObject({
+        code: "access_denied",
+        category: "unavailable",
+        retryable: false,
+        remediation: {
+          action:
+            "Check the current process's read access to the selected path. Retry with a readable local file.",
+        },
+        details: {
+          path: "/local/targets/app",
+          reason,
+          system_code: systemCode,
+          boundary: "filesystem-read",
+        },
+      });
+      expect(
+        projectAnalysisError(
+          new BinaryTargetError("/local/targets/app", "missing", {
+            cause: Object.assign(new Error("missing"), { code: "ENOENT" }),
+          }),
+        ),
+      ).toMatchObject({ code: "target_unavailable" });
+    },
+  );
+
   it("uses explicit capability recovery while retaining the constraint", () => {
     const projected = projectAnalysisError(
       new AnalysisCapabilityUnavailableError(
@@ -536,4 +572,33 @@ describe("analysis error projection: operational diagnostics", () => {
     expect(unknown.message).not.toContain("stopped");
     expect(unknown.remediation.action).toContain("provider_operation_health");
   });
+});
+
+describe("analysis error projection: evidence files", () => {
+  it.each([
+    ["read", "missing", "invalid_request", "invalid_input"],
+    ["read", "not-file", "invalid_request", "invalid_input"],
+    ["write", "missing", "invalid_request", "invalid_input"],
+    ["write", "exists", "invalid_request", "invalid_input"],
+    [
+      "read",
+      "invalid-json",
+      "evidence_integrity_mismatch",
+      "execution_failure",
+    ],
+    ["read", "io", "execution_failure", "execution_failure"],
+  ] as const)(
+    "classifies a %s %s evidence file by who can correct it",
+    (operation, reason, code, category) => {
+      const projected = projectAnalysisError(
+        new EvidenceFileError(operation, reason, { path: "/selected.json" }),
+      );
+      expect(projected).toMatchObject({
+        code,
+        category,
+        details: { operation, reason, path: "/selected.json" },
+      });
+      expect(analysisErrorProjectionSchema.parse(projected)).toEqual(projected);
+    },
+  );
 });

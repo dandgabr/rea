@@ -1,3 +1,4 @@
+import { snapshotEnvironment } from "../process/snapshotEnvironment.js";
 import { createAnalysisProfile } from "../domain/analysisProfile.js";
 import type { AnalysisProfileCommitment } from "../domain/analysisProfile.js";
 import type { BinaryTarget } from "../domain/binaryTarget.js";
@@ -11,13 +12,14 @@ import type {
   ProviderTargetSupport,
 } from "../application/AnalysisProvider.js";
 import type { AppConfig } from "../config.js";
-import { ConfigurationError } from "../domain/configurationErrors.js";
+import type { ConfigurationError } from "../domain/configurationErrors.js";
 import { createHash } from "node:crypto";
 import canonicalize from "canonicalize";
 import type { Result } from "../domain/result.js";
 import {
   readIdaConfiguration,
   type IdaConfiguration,
+  idaConfigurationError,
 } from "./IdaConfiguration.js";
 import {
   createIdaMcpConnection,
@@ -35,12 +37,17 @@ export { IDA_PROVIDER_IDENTITY } from "./IdaProviderCapabilities.js";
 /** Bring-your-own IDA MCP candidate; discovery performs no provider startup. */
 export class IdaProvider implements AnalysisProviderCandidate {
   #registration: Result<IdaConfiguration, ConfigurationError> | undefined;
+  private readonly environment: NodeJS.ProcessEnv;
   constructor(
     private readonly config: AppConfig,
+    environment: Readonly<NodeJS.ProcessEnv>,
     private readonly connectionFactory: (
       config: IdaConfiguration,
+      environment: Readonly<NodeJS.ProcessEnv>,
     ) => IdaMcpConnection = createIdaMcpConnection,
-  ) {}
+  ) {
+    this.environment = snapshotEnvironment(environment);
+  }
 
   identity() {
     return IDA_PROVIDER_IDENTITY;
@@ -130,11 +137,6 @@ export class IdaProvider implements AnalysisProviderCandidate {
           .update(canonicalize(config.value) ?? "")
           .digest("hex"),
       }),
-      compatibility: {
-        mode: config.value.mode,
-        engine_version: null,
-        upstream_distribution_version: null,
-      },
     });
   }
   createClient(
@@ -145,12 +147,12 @@ export class IdaProvider implements AnalysisProviderCandidate {
     if (!config.ok)
       return {
         execute: async () => err(config.error),
-        close: async () => undefined,
+        close: async () => ok(null),
       };
     return new IdaSessionClient(
       config.value,
       target,
-      this.connectionFactory(config.value),
+      this.connectionFactory(config.value, this.environment),
       profile,
     );
   }
@@ -165,7 +167,7 @@ export class IdaProvider implements AnalysisProviderCandidate {
 
 const readIdaConfigurationNotConfigured = () =>
   err(
-    new ConfigurationError(
+    idaConfigurationError(
       "Set REA_IDA_MCP_CONFIG to an upstream IDA MCP JSON registration; see docs/ida-provider.md.",
     ),
   );

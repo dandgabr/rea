@@ -62,10 +62,22 @@ it("invalidates a deep mutation while retaining unrelated literal properties", (
   expect(onlyBinding(ir, "root").value).toEqual({
     status: "object",
     properties: [
-      { name: "untouched", value: { status: "literal", value: "retained" } },
+      {
+        name: "untouched",
+        presence: "present",
+        value: { status: "literal", value: "retained" },
+      },
+      {
+        name: "next",
+        presence: "unknown-coverage",
+        value: {
+          status: "unknown",
+          reason: "This property may have been mutated.",
+        },
+      },
     ],
-    unknownProperties: true,
-    omittedProperties: null,
+    unknownProperties: false,
+    omittedProperties: 0,
   });
   expect(onlyBinding(ir, "value").value).toEqual({
     status: "literal",

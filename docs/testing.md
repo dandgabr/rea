@@ -1,13 +1,18 @@
 # Testing REA
 
-Prefer evidence in this order: full end-to-end workflows with real production
-providers, integration tests across data/API boundaries, then golden regressions
-from real captured inputs. Keep focused module tests for distinct failure or
-semantic cases that these workflows cannot reliably reproduce. A test's path
-or suite name does not establish its behavioral depth.
+Prefer evidence in this order: full end-to-end workflows through the public
+CLI or MCP with real production providers and no mocked dependencies,
+integration across production data/API boundaries, then golden regressions
+from real captured inputs. Keep a focused module test only for a distinct
+failure or semantic case that stronger workflows cannot reliably reproduce.
+A test's path, compiled imports, or suite name does not establish its depth.
 
-Avoid tests that mirror getters, enum mappings, fixture helpers, or prescribed
-call sequences, or assert cache object identity without a caller-visible contract.
+Delete tests that only mirror getters, serialization helpers, enum mappings,
+fixture helpers, prescribed call sequences, arbitrary counts or snapshots,
+or cache object identity without a caller-visible contract. Do not retain a
+weaker test merely because it is fast when a stronger workflow already proves
+the same claim. Keep format-specific malformed representations and actual
+capacity, cleanup, permission and target-identity regressions.
 Prefer representative workflows over a Cartesian matrix when rows cross the
 same boundary. Retain combinations that exercise a distinct interaction, such as
 filtering within a full-output envelope. Keep distinct command handlers,
@@ -45,6 +50,15 @@ claim, even if a directory name calls it acceptance.
 
 Emit a verifier's final success report only after awaited cleanup. Observe final
 process lineage after closing its owned resources.
+
+Owned JavaScript semantic graphs capture and schema-parse caller input before
+returning an iterator. Whole-graph hashing, batched integrity checks and sealing
+run through the application cancellation driver; only full completion grants
+the private immutable-graph proof. Regression coverage checks canonical IDs,
+validation diagnostics, nested caller mutations across yields, cancellation
+before result validation and subsequent SDK requests. Single-file parsing,
+schema cloning and canonical sorting remain synchronous phases; measure them
+separately when assessing cancellation latency on real applications.
 
 The Vitest runner releases cached native process inspectors during awaited
 worker teardown. Fork termination does not run Node's normal exit hooks; a
@@ -343,10 +357,17 @@ prove behavior on the verified Ghidra 12.1.4 and JDK 21 build.
 | Ghidra lane                                | Supported runner/target                                                            | Additional local tools                                              |
 | ------------------------------------------ | ---------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
 | `npm run verify:ghidra`                    | Linux x64/arm64 ELF or macOS x64/arm64 Mach-O                                      | Host C compiler, Ghidra 12.1.4, and full JDK 21                     |
+| `npm run verify:ghidra:swift`              | macOS x64/arm64 Mach-O                                                             | Host Swift compiler, Ghidra 12.1.4, and full JDK 21                 |
 | `npm run verify:ghidra:switch`             | Linux x64 ELF; GCC/Clang optimized and stripped switch fixtures                    | GCC, Clang, GNU nm/objdump/strip, Ghidra 12.1.4, and full JDK 21    |
 | `npm run verify:ghidra:aarch64-jump-table` | Any supported Ghidra host; AArch64 ELF; byte/halfword tables; host ARM64 Mach-O    | Clang with AArch64 target support, Ghidra 12.1.4, and full JDK 21   |
 | `npm run verify:ghidra:cross-format`       | Any supported Ghidra host; also analyzes AArch64 ELF, x86-64 PE, and x86-64 Mach-O | `clang`, LLD, and `lld-link` in addition to host-lane prerequisites |
 | `npm run verify:ghidra:windows`            | Controlled Windows x64 with native x86-64 PE; `-- --x86` selects native x86 PE     | Ghidra 12.1.4, full JDK 21, and the matching native artifact        |
+
+The optional Swift lane compiles a source-owned fixture and checks modern and
+provider-demangled procedure names through real stdio MCP, with and without the
+dSYM companion. It checks unfiltered, structs, and literal-name filters,
+same-address alias evidence, deduplication, and explicit unresolved categories.
+It does not add a Swift prerequisite to the host C fixture lane.
 
 The host lane also verifies namespaced C++ ABI symbols and annotation identity.
 That facet requires Ghidra's matching `demangler_gnu_v2_41` native component in
@@ -471,6 +492,13 @@ success proves this Inspector workflow on the tested host; it does not prove
 Electron GUI behavior or another engine.
 
 ## Android APK analysis
+
+The real Android lane also runs on Windows x64 with its matching bundled native
+controls. It verifies bidirectional protocol input, CLI/MCP result parity,
+real MCP cancellation/disconnect and Java exit after abrupt CLI owner
+termination. The forced Windows exit does not exercise the POSIX SIGTERM
+handler and can leave temporary workspace files. `verify:windows-native`
+separately checks binary input, backpressure, EOF and pending-write job closure.
 
 `npm run verify:android` requires an existing Java 17+ and an explicit
 `REA_JADX_MCP_JAR` for jadx-headless-mcp 0.7.1. Set `REA_ANDROID_TEST_APK` to the
@@ -660,6 +688,17 @@ selections do not use `--changed` or permit zero-test success.
 The dry-run option reports the chosen merge base, scope and build prerequisite
 without executing tests or building. A missing Git base reports how to fetch
 it or select another revision.
+
+Source typechecking needs no compiled runtime or generated test metadata.
+`npm run build:cached` compiles the CLI/MCP runtime and its packaged skill.
+`npm run test:prepare` also generates the MCP contract test catalog, product
+catalog, and portable managed evidence used by the complete suite. Focused
+tests prepare those extra outputs only when their selected files consume them.
+The MCP test catalog is JSON in `.cache/mcp-tool-catalog.json`; the tracked
+test loader supplies its types without making generation a source-check
+prerequisite. Run `npm run mcp-catalog:generate` to refresh it independently.
+Documentation generation and managed conformance run through their separate
+`docs:generate` and `evidence:generate` task graphs.
 
 Changed selection can miss runtime registration, generated data, shell
 entrypoints, bridges, or other relationships absent from the import graph.
@@ -915,8 +954,48 @@ real local Codex CLI with:
 npm run verify:agent
 ```
 
-Its report records tool selection, repeated calls, token use, completion quality,
-and handling of permissions and unknowns.
+The packaged desktop and parser-comparison scenarios now assess a closed set of
+known fixture claims. Each final answer must be a strict JSON manifest containing
+exactly the requested claim IDs, values, Evidence IDs, and Evidence authority and
+confidence. Golden values are not included in the prompt. The evaluator checks
+exact values against both the fixture oracle and authenticated successful REA
+results; an Evidence ID by itself is insufficient. Missing, duplicate, extra,
+contradictory, incorrectly sourced, or unsupported claims fail the scenario.
+
+The desktop rubric covers the exposed bridge API and members, renderer and main
+IPC operations, and the resolved preload. It binds its Evidence to the exact
+packaged artifact path and SHA-256. The parser rubric checks the precise heading
+depth addition, discriminant, complete comparison counts, and the explicit limit
+on runtime semantics. Its comparison must link to the two delivered source
+analyses and use the requested module and export selectors. Boundary tests package
+the same source-owned desktop fixture and compare the same source-owned parser
+files through actual MCP tool results, then verify that fabricated answers fail.
+
+Per-scenario `factualCorrectness` is `passed`, `failed`, or `not_assessed` within
+the `configured_fixture_claims` scope. A pass establishes only the configured
+claims, not unrestricted factual correctness. Native, managed, browser,
+navigation-context, and address-context scenarios have no factual rubric and
+remain `not_assessed`; the managed workflow requires both artifact and member
+inspection to answer its type and entry-point question.
+
+All scenarios retain routing, workflow, validation, repetition, process-exit,
+and token-use gates. Configured factual scenarios additionally require a factual
+pass. Their answer-text heuristics are diagnostic and do not affect the gate.
+Scenarios without a rubric retain the legacy text-heuristic gate.
+`answerTermCoverageMet` checks case-insensitive substrings,
+`epistemicCuePresent` checks keywords, and `finalCitesEvidence` checks only an ID's
+presence. These metrics can still accept fabricated prose and must not be read
+as factual assessments. Set `REA_AGENT_EVAL_TRANSCRIPT_DIR` to retain complete
+tool results and final answers for review.
+
+Report schema version 3 changes the top-level `factualCorrectness` from a constant
+string to an assessment summary with status, scope, and assessed/passed/failed/
+not-assessed scenario counts. Scenario records include the factual assessment and
+configured claim IDs. The evaluation scope is
+`routing_workflow_and_configured_fixture_claims`. Update report consumers for
+these changes. The narrower heuristic field names introduced in version 2 remain:
+`answerHeuristicsMet`, `epistemicCuePresent`, `answerTermCoverageMet`, and
+`requiredAnswerTermGroups`.
 
 Regenerate the managed conformance manifest and Evidence completion ledger from
 live verification results, or check them for drift:

@@ -121,7 +121,7 @@ export const analysisSnapshotSchema = z.object({
   target: targetSchema,
   binding: bindingSchema,
   entries: z.array(entrySchema),
-  workflow_entries: z.array(workflowEntrySchema).optional(),
+  workflow_entries: z.array(workflowEntrySchema),
   evidence_bundle: evidenceBundleSchema,
 });
 
@@ -233,7 +233,7 @@ export const snapshotEvidenceForQuery = (
   const entry = snapshot.entries.find(
     (candidate) => candidate.query_id === queryId,
   );
-  const workflowEntry = snapshot.workflow_entries?.find(
+  const workflowEntry = snapshot.workflow_entries.find(
     (candidate) => candidate.query_id === queryId,
   );
   if (entry === undefined && workflowEntry === undefined) return undefined;
@@ -244,7 +244,7 @@ export const snapshotEvidenceForQuery = (
       record.provider.id === provider.id &&
       record.provider.name === provider.name &&
       record.provider.version === provider.version &&
-      "analysis_profile" in record &&
+      record.analysis_profile !== null &&
       analysisProfilesEqual(record.analysis_profile, evidenceProfile) &&
       canonicalJson(record.parameters) === encodedParameters &&
       ((entry !== undefined && evidenceMatchesEntry(record, entry, snapshot)) ||
@@ -372,17 +372,24 @@ export const createAnalysisSnapshotEntry = (input: {
 export const parseAnalysisSnapshot = (input: unknown): AnalysisSnapshot => {
   const parsed = analysisSnapshotSchema.parse(input);
   parseEvidenceBundle(parsed.evidence_bundle);
+  const scopedEvidence = evidenceBundleForTarget(
+    parsed.evidence_bundle,
+    parsed.target.sha256,
+  );
+  // The validated canonical bundle is filtered, never extended. Equal counts
+  // establish that no record or unknown was removed without serializing results.
   if (
-    JSON.stringify(
-      evidenceBundleForTarget(parsed.evidence_bundle, parsed.target.sha256),
-    ) !== JSON.stringify(parsed.evidence_bundle)
+    scopedEvidence.records.length !== parsed.evidence_bundle.records.length ||
+    scopedEvidence.unknowns.length !== parsed.evidence_bundle.unknowns.length
   )
     throw new TypeError(
       "Analysis snapshot evidence contains records for another target",
     );
+  if (!hasCanonicalQueryOrder(parsed.entries))
+    throw new TypeError("Analysis snapshot entries are not canonical");
+  if (!hasCanonicalQueryOrder(parsed.workflow_entries))
+    throw new TypeError("Analysis snapshot workflow entries are not canonical");
   const ids = new Set<string>();
-  const boundEntries: AnalysisSnapshotEntry[] = [];
-  const boundWorkflowEntries: AnalysisSnapshotWorkflowEntry[] = [];
   const index = createEvidenceIndex(parsed);
   const workflowIndex = createWorkflowEvidenceIndex(parsed);
   for (const entry of parsed.entries) {
@@ -408,13 +415,12 @@ export const parseAnalysisSnapshot = (input: unknown): AnalysisSnapshot => {
         throw new TypeError(
           `Analysis snapshot entry ${entry.operation} differs from its Evidence record`,
         );
-      // Older snapshots may contain cache entries without profile-bound Evidence.
-      // Keep their Evidence bundle, but never replay those unbound values.
-      continue;
+      throw new TypeError(
+        `Analysis snapshot entry ${entry.operation} has no profile-bound Evidence record`,
+      );
     }
-    boundEntries.push(entry);
   }
-  for (const entry of parsed.workflow_entries ?? []) {
+  for (const entry of parsed.workflow_entries) {
     if (
       entry.execution.provider.id !==
         entry.execution.analysis_profile.provider.id ||
@@ -444,30 +450,24 @@ export const parseAnalysisSnapshot = (input: unknown): AnalysisSnapshot => {
         throw new TypeError(
           `Analysis snapshot workflow entry ${entry.operation} differs from its Evidence record`,
         );
-      continue;
+      throw new TypeError(
+        `Analysis snapshot workflow entry ${entry.operation} has no profile-bound Evidence record`,
+      );
     }
-    boundWorkflowEntries.push(entry);
   }
-  const sorted = [...parsed.entries].sort((left, right) =>
-    left.query_id.localeCompare(right.query_id),
-  );
-  if (JSON.stringify(parsed.entries) !== JSON.stringify(sorted))
-    throw new TypeError("Analysis snapshot entries are not canonical");
-  const sortedWorkflows = [...(parsed.workflow_entries ?? [])].sort(
-    (left, right) => left.query_id.localeCompare(right.query_id),
-  );
-  if (
-    parsed.workflow_entries !== undefined &&
-    JSON.stringify(parsed.workflow_entries) !== JSON.stringify(sortedWorkflows)
-  )
-    throw new TypeError("Analysis snapshot workflow entries are not canonical");
-  return {
-    ...parsed,
-    entries: boundEntries,
-    ...(parsed.workflow_entries === undefined
-      ? {}
-      : { workflow_entries: boundWorkflowEntries }),
-  };
+  return parsed;
+};
+
+const hasCanonicalQueryOrder = (
+  entries: readonly { readonly query_id: string }[],
+): boolean => {
+  let previous: string | undefined;
+  for (const { query_id: queryId } of entries) {
+    if (previous !== undefined && previous.localeCompare(queryId) > 0)
+      return false;
+    previous = queryId;
+  }
+  return true;
 };
 
 /** Check that a cached provider execution is represented by bundled Evidence. */
@@ -528,7 +528,7 @@ const isCorrespondingEvidence = (
   evidence.confidence === "observed" &&
   evidence.authority === "shipped-artifact" &&
   evidence.subject?.digest.sha256 === snapshot.target.sha256 &&
-  "analysis_profile" in evidence &&
+  evidence.analysis_profile !== null &&
   analysisProfilesEqual(
     evidence.analysis_profile,
     snapshot.binding.analysis_profile,
@@ -539,8 +539,7 @@ const evidenceQueryKey = (evidence: Evidence): string =>
     operation: evidence.operation,
     parameters: evidence.parameters,
     provider: evidence.provider,
-    analysis_profile:
-      "analysis_profile" in evidence ? evidence.analysis_profile : null,
+    analysis_profile: evidence.analysis_profile,
   });
 
 const entryQueryKey = (
@@ -612,7 +611,7 @@ const isWorkflowEvidence = (
   evidence.confidence === "derived" &&
   evidence.authority === "shipped-artifact" &&
   evidence.subject?.digest.sha256 === snapshot.target.sha256 &&
-  "analysis_profile" in evidence &&
+  evidence.analysis_profile !== null &&
   analysisProfilesEqual(
     evidence.analysis_profile,
     entry.execution.analysis_profile,
@@ -632,7 +631,7 @@ const createWorkflowEvidenceIndex = (
       evidence.confidence !== "derived" ||
       evidence.authority !== "shipped-artifact" ||
       evidence.subject?.digest.sha256 !== snapshot.target.sha256 ||
-      !("analysis_profile" in evidence)
+      evidence.analysis_profile === null
     )
       continue;
     corresponding.add(evidenceQueryKey(evidence));

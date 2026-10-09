@@ -16,6 +16,7 @@ import { type AnalysisError } from "../../domain/analysisErrorBase.js";
 import {
   describeProcessCaptureExecutionFailure,
   ProcessCaptureError,
+  normalizeCaptureFailure,
   processCaptureCancelled,
 } from "./ProcessCaptureError.js";
 export { ProcessCaptureError } from "./ProcessCaptureError.js";
@@ -55,7 +56,6 @@ import { makeProcessCaptureEnvironment } from "./ProcessCaptureEnvironment.js";
 import { classifyFilesystemEffects } from "./ProcessFilesystemEffects.js";
 import { processCaptureOwnershipUnavailableReason } from "./ProcessCaptureCapability.js";
 import type { ProcessOwnershipBaseline } from "../ProcessOwnership.js";
-import { DarwinProcessOwnershipInspectionError } from "../DarwinProcessRunTokenReader.js";
 export { probeProcessCaptureCapability } from "./ProcessCaptureCapability.js";
 
 interface StartedCaptureRuntime {
@@ -89,7 +89,6 @@ const cleanupFailedStartup = async (options: {
           options.observations.process_samples.value,
         ).filter((groupId) => groupId !== options.terminal?.pid)
       : undefined;
-  options.terminal?.kill("SIGKILL");
   if (options.observations !== undefined && options.renderer !== undefined) {
     try {
       options.observations.rendered_frames = {
@@ -322,23 +321,6 @@ const finishProcessRun = async (options: {
   );
 };
 
-/** Preserve typed process-inspection preflight failures at the capture boundary. */
-export const normalizeCaptureFailure = (
-  cause: unknown,
-  signal: AbortSignal | undefined,
-): unknown => {
-  if (cause instanceof ProcessCaptureError) return cause;
-  if (cause instanceof DarwinProcessOwnershipInspectionError)
-    return new ProcessCaptureError(cause.message, { cause });
-  if (
-    signal?.aborted === true &&
-    (cause === signal.reason ||
-      (cause instanceof Error && cause.name === "AbortError"))
-  )
-    return processCaptureCancelled();
-  return cause;
-};
-
 const completeCapture = async (options: {
   readonly scenario: ProcessScenario;
   readonly hostPlatform: NodeJS.Platform;
@@ -370,6 +352,7 @@ const completeCapture = async (options: {
       scenario.settle_ms,
       options.recordEvent,
       options.hostPlatform,
+      options.signal,
     );
   } catch (cause: unknown) {
     options.observationBuffer.settlement = {
@@ -432,7 +415,7 @@ const completeCapture = async (options: {
       name: "after_settlement",
       at_ms: Math.max(0, Date.now() - runtime.started),
       files: after.files,
-      effects: classifyFilesystemEffects(options.before.files, after.files),
+      effects: classifyFilesystemEffects(options.before, after),
       truncated: after.truncated,
     },
   ];
@@ -571,7 +554,6 @@ const runProcessScenario = async (
       ...(signal === undefined ? {} : { signal }),
     });
   } catch (cause: unknown) {
-    runtime?.terminal.kill("SIGKILL");
     executionFailure = normalizeCaptureFailure(cause, signal);
     if (
       runtime !== undefined &&

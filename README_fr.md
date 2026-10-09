@@ -265,9 +265,9 @@ Consultez [CONTRIBUTING.md](CONTRIBUTING.md) pour l'environnement de développem
 
 ## Historique des étoiles
 
-🎉 **20 000 étoiles GitHub — merci !**
+🎉 **30 000 étoiles GitHub — merci !**
 
-Merci à toutes les personnes qui utilisent REA, signalent des bugs, testent les builds et contribuent des correctifs.
+Merci à toutes les personnes qui utilisent REA, signalent des bugs, proposent des fonctionnalités, testent les builds et contribuent des correctifs.
 
 <a href="https://www.star-history.com/?repos=morluto%2Frea&amp;type=date">
   <picture>

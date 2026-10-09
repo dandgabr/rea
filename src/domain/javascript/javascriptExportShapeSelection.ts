@@ -126,13 +126,13 @@ export const selectJavaScriptExport = (
   };
 };
 
-/** Retain every projected return variant. */
+/** Retain every authenticated variant with its explicit slot presence. */
 export const retainJavaScriptExportShapes = (
   selection: SelectedJavaScriptExport,
-): RetainedJavaScriptExportShapes => {
-  const shapes = selection.projection?.static_return_shapes ?? [];
-  return { shapes, omitted: 0 };
-};
+): RetainedJavaScriptExportShapes => ({
+  shapes: selection.projection?.static_return_shapes ?? [],
+  omitted: 0,
+});
 
 const selectorBase = (
   side: JavaScriptExportShapeSideInput,

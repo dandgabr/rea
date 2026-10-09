@@ -2,7 +2,7 @@
 
 ## Generated catalog
 
-Run `npm run build:cached` in a source checkout to generate the machine-readable
+Run `npm run docs:generate` in a source checkout to generate the machine-readable
 catalog at `docs/public/product-catalog.json`. Documentation deployments serve
 the same file at [/rea/product-catalog.json](/rea/product-catalog.json). PR CI retains it with the packaged
 skill and portable conformance projections in the `generated-docs` artifact.
@@ -24,26 +24,28 @@ health transition leaves that catalog unchanged and does not emit
 `notifications/tools/list_changed`.
 
 Advertised input and output schemas contain no reachable recursive references.
-The input compatibility profile limits nesting to ten object, array, and
-`anyOf`/`oneOf`/`allOf` levels, following local references per path. Property
-maps, reference definitions, and example data do not add schema levels. Tests
-check the complete catalog after SDK conversion and its generated counterpart.
-This is REA's local compatibility profile; individual model APIs can impose
-additional limits.
+Schemas share repeated definitions through schema-local references while
+preserving complete fields and validation rules. Input properties retain their
+descriptions and literal examples. The SDK advertises an object root for
+canonical object unions and retains each branch's requirements and exclusions.
+Tests validate the schemas after SDK conversion and compare advertised
+validation with actual calls. Individual model APIs can impose additional
+nesting limits; complete producer captures can exceed ten structural levels.
 
-Output schemas share repeated definitions through local references while
-preserving their complete fields and validation rules. Canonical Zod validation
-and the input compatibility profile continue to apply.
+`compare_web_captures` accepts exactly one of two input shapes:
 
-For passive `compare_web_captures` inputs, pass each complete
-`inspect_web_page` result in `before.inspection` or `after.inspection`, with an
-optional complete `discover_webmcp_tools` result in the matching `webmcp` field.
-The input schema describes these producer-result objects as round-trip payloads.
-For scenario comparisons, pass complete `capture_browser_scenario` results in
-`before_scenario` and `after_scenario`. REA validates all nested fields with the
-original capture schemas; observation output schemas remain complete. Scenario
-authoring inputs and comparison normalization options retain their full
-advertised structure.
+- Passive: `before` and `after` each contain `inspection`, the complete
+  `normalized_result` from `inspect_web_page`. Each may also contain `webmcp`,
+  the complete `normalized_result` from `discover_webmcp_tools`, or null.
+- Scenario: `before_scenario` and `after_scenario` contain complete
+  `normalized_result` objects from `capture_browser_scenario`. Optional
+  `normalization` defaults to `{ "rules": [] }`.
+
+The advertised schema includes complete nested capture fields and rejects
+incomplete pairs, mixed comparison families, and structurally malformed
+captures. Domain validation additionally checks relationships such as event
+sequence references and retained counts; JSON Schema does not express those
+cross-field invariants.
 
 Call `binary_session` with `{}` and read `result.tool_availability` to choose a
 callable operation for the current target, provider, host, and negotiated client
@@ -101,9 +103,11 @@ still run synchronously, so control messages can wait for those
 phases to release the event loop. A rejected client promise alone does not
 establish that the server has stopped its work.
 
-CLI calls work without a progress token and translate SIGINT into the same
-AbortSignal used by providers. Existing controlled-process cleanup and provider
-shutdown rules still apply; REA never kills a process it cannot prove it owns.
+Direct CLI analysis calls work without a progress token and translate SIGINT or
+SIGTERM into the same AbortSignal used by providers. Signal guards remain active
+through provider cleanup, including repeated delivery by package runners.
+Existing controlled-process cleanup and provider shutdown rules still apply;
+REA never kills a process it cannot prove it owns.
 
 ## Ghidra first-query deadlines and recovery
 
@@ -115,11 +119,11 @@ auto-analysis, bridge connection, and health readiness before returning analysis
 
 These deadlines have different owners:
 
-| Deadline             | Owner and effect                                                                                                                                                                        |
-| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| MCP initialize       | The client bounds transport/REA connection startup, before any target query.                                                                                                            |
-| Ghidra startup       | REA allows 330,000 ms by default; `REA_GHIDRA_STARTUP_TIMEOUT_MS` accepts 1–2,147,483,647 ms. Invalid values keep the default. Startup failure is reported by the first provider query. |
-| Individual tool call | The client bounds its wait, including cold engine startup. The pinned client SDK 2.3.1 defaults to 60,000 ms and can cancel earlier than REA's startup deadline.                        |
+| Deadline             | Owner and effect                                                                                                                                                                                                                    |
+| -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| MCP initialize       | The client bounds transport/REA connection startup, before any target query.                                                                                                                                                        |
+| Ghidra startup       | REA allows 330,000 ms by default; `REA_GHIDRA_STARTUP_TIMEOUT_MS` accepts decimal integers from 1–2,147,483,647 ms. Invalid supplied values fail configuration validation. Startup failure is reported by the first provider query. |
+| Individual tool call | The client bounds its wait, including cold engine startup. The pinned client SDK 2.3.1 defaults to 60,000 ms and can cancel earlier than REA's startup deadline.                                                                    |
 
 For an already connected client using the pinned SDK, request options are the
 **second** argument of `callTool`:
@@ -175,23 +179,27 @@ increasing a client deadline alone does not fix those failures.
 
 ## Tool results
 
-Evidence-producing tools return `{ result, evidence_id, evidence }` in both
-text and structured content. `evidence` is the complete canonical Evidence
-record, including `normalized_result`, which equals `result`. The same record
-is retained in the session bundle. Read `result` directly, or pass `evidence`
-to a compatible comparison tool: `analyze_function` Evidence can be passed
+Evidence-producing tools return the complete canonical Evidence record in both
+text and structured content. Read `structuredContent.normalized_result` for the
+operation result and `structuredContent.evidence_id` for its identity. The same
+record is retained in the session bundle. `analysis_profile` is always present:
+a concrete profile object or `null`; either value participates in semantic
+identity. Records omitting this field are rejected. Pass the returned Evidence
+directly to a compatible comparison tool: `analyze_function` Evidence can be passed
 directly to `compare_functions`, and `inspect_artifact` Evidence to
 `compare_artifacts`. Use `get_evidence_bundle` when the task needs broader
 retained session history or an explicit bundle for transfer.
 
 REA prepares complete MCP results within the pinned stdio client's 10 MiB
 receive-buffer budget, including both text and structured representations and
-room for the JSON-RPC envelope. If a result cannot fit, REA returns
+room for the JSON-RPC envelope. Response budget settings are captured at startup;
+restart or recreate the server to apply changes. If a result cannot fit, REA returns
 `resource_constraint` with `details.resource: "transport"` before constructing
 a document-sized string. Analysis Evidence remains complete in the current
 session. Its exact reference is reported in
-`details.reported_limits.evidence_reference`; use it with a focused application
-workflow, or call `export_evidence_bundle` with a destination path. Complete
+`details.reported_limits.evidence_reference`; call `inspect_analysis_view` with
+that reference for a summary, one section/module, or a stable page, or call
+`export_evidence_bundle` with a destination path. Complete
 bundle exports stream canonical JSON into an atomically published file. A broad
 follow-up or `get_evidence_bundle` can also exceed the response budget; exporting
 preserves the complete session without sending it through a single MCP frame.
@@ -207,6 +215,18 @@ It does not change the client's buffer, analysis coverage, or retained content.
 Ordinary responses keep their existing complete result contract.
 
 ## Retained application Evidence inputs
+
+`inspect_analysis_view` projects a caller-selected view of already completed
+`inspect_binary_layout` or `analyze_javascript_application` Evidence. Source is
+an exact same-session retained reference or portable inline Evidence. Views are
+a summary, a layout mitigations or linkage facet, one section/symbol/module, or
+a stable page with a caller-selected positive `limit`. Module pages include
+JavaScript assets, bundled modules, and source modules. Select an exact
+`node_id` when a path is ambiguous or unavailable. Module items retain their
+recorded property values and source locations; summaries include parent
+application and semantic coverage. The result carries a digest of the selected
+facts. Actual serialized size determines MCP transport admission: reduce the
+page size or export retained Evidence if the view is too large.
 
 `trace_application_feature`, `trace_javascript_semantics`,
 `compare_application_versions`, `compare_source_to_bundle`, and

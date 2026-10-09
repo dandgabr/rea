@@ -7,13 +7,14 @@ import { ok } from "../domain/result.js";
 import type { Logger } from "../logger.js";
 import { logToolExecution } from "./toolLogging.js";
 import { toolRegistrationOptions } from "./toolRegistrationOptions.js";
-import { toCallToolResult, toEvidenceToolResult } from "./toolResult.js";
+import type { ToolResultDelivery } from "./toolResult.js";
 
 /** Register Cutter discovery and command tools against their named contracts. */
 export const registerCutterTools = (
   server: McpServer,
   service: CutterBridgeService,
   logger: Logger,
+  delivery: ToolResultDelivery,
   recordEvidence?: EvidenceWriter["recordEvidence"],
 ): void => {
   const list = toolContract("list_cutter_sessions");
@@ -22,8 +23,8 @@ export const registerCutterTools = (
     const result = await logToolExecution(logger, list.name, async () =>
       ok(await service.listSessions()),
     );
-    if (!result.ok) return toCallToolResult(result, list);
-    return toCallToolResult(
+    if (!result.ok) return delivery.toCallToolResult(result, list);
+    return delivery.toCallToolResult(
       {
         ok: true,
         value: { ...result.value, sessions: [...result.value.sessions] },
@@ -38,8 +39,8 @@ export const registerCutterTools = (
       const result = await logToolExecution(logger, command.name, () =>
         service.execute(input),
       );
-      if (!result.ok) return toCallToolResult(result, command);
-      return toEvidenceToolResult(
+      if (!result.ok) return delivery.toCallToolResult(result, command);
+      return delivery.toEvidenceToolResult(
         result.value,
         command,
         recordEvidence?.(result.value),

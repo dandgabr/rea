@@ -18,7 +18,9 @@ export const workflowAnalysisProfile = (
 ): AnalysisProfileCommitment =>
   createAnalysisProfile(REA_WORKFLOW_PROVIDER, {
     upstream_analysis_profile: upstream,
-    ...(operation === "binary_overview" ? { workflow_revision: 2 } : {}),
+    ...(operation === "binary_overview" || operation === "batch_decompile"
+      ? { workflow_revision: 2 }
+      : {}),
   });
 
 /** Provider identity for deterministic artifact inventories. */
@@ -74,6 +76,13 @@ export const JAVASCRIPT_APPLICATION_PROVIDER = {
 export const JAVASCRIPT_RUNTIME_RECONCILIATION_PROVIDER = {
   id: "rea-javascript-runtime-reconciliation",
   name: "REA JavaScript runtime reconciliation",
+  version: "1",
+} as const;
+
+/** Provider identity for selected views of retained analysis Evidence. */
+export const ANALYSIS_VIEW_PROVIDER = {
+  id: "rea-analysis-view",
+  name: "REA analysis view projection",
   version: "1",
 } as const;
 

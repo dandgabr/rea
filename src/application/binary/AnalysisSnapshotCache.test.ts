@@ -13,6 +13,7 @@ import { createAnalysisExecution } from "../AnalysisProvider.js";
 import {
   createAnalysisSnapshotWorkflowEntry,
   parseAnalysisSnapshot,
+  serializeAnalysisSnapshot,
   snapshotBinding,
   snapshotTarget,
 } from "../../domain/analysisSnapshot.js";
@@ -29,6 +30,90 @@ import {
   SNAPSHOT_CACHE_ENTRY_CEILING,
   isSnapshotCacheable,
 } from "./AnalysisSnapshotCache.js";
+
+it("exports independent nested query, workflow and Evidence payloads", () => {
+  const cache = new AnalysisSnapshotCache();
+  const target = ANALYSIS_SNAPSHOT_TARGET;
+  const profile = ANALYSIS_SNAPSHOT_PROFILE;
+  const result = { nested: [{ text: "ret" }], name: "main" };
+  const parameters = { address: "0x1000", document: "fixture" };
+  const workflowProfile = workflowAnalysisProfile(profile);
+  cache.record({
+    target,
+    profile,
+    operation: "procedure_info",
+    parameters,
+    execution: createAnalysisExecution(result, ANALYSIS_SNAPSHOT_PROVIDER, {
+      subject: target,
+      analysisProfile: profile,
+      rawResult: result,
+    }),
+  });
+  cache.recordWorkflow({
+    target,
+    profile,
+    operation: "analyze_function",
+    parameters,
+    execution: {
+      ...createAnalysisExecution(result, REA_WORKFLOW_PROVIDER, {
+        subject: target,
+        rawResult: result,
+      }),
+      analysisProfile: workflowProfile,
+    },
+  });
+  const bundle = createEvidenceBundle([
+    createEvidence(target, ANALYSIS_SNAPSHOT_PROVIDER, {
+      operation: "procedure_info",
+      parameters,
+      result,
+      rawResult: result,
+      analysisProfile: profile,
+    }),
+    createEvidence(target, REA_WORKFLOW_PROVIDER, {
+      operation: "analyze_function",
+      confidence: "derived",
+      parameters,
+      result,
+      rawResult: result,
+      analysisProfile: workflowProfile,
+    }),
+  ]);
+  const exported = cache.export(target, profile, bundle);
+  if (!exported.ok) throw exported.error;
+  const expected = serializeAnalysisSnapshot(exported.value);
+  const changed = JSON.stringify(exported.value).replaceAll(
+    '"ret"',
+    '"changed"',
+  );
+  // Mutate the returned graph itself, including every duplicated JSON result.
+  for (const payload of [
+    ...exported.value.entries.flatMap(({ execution }) => [
+      execution.result,
+      execution.raw_result,
+    ]),
+    ...exported.value.workflow_entries.flatMap(({ execution }) => [
+      execution.result,
+      execution.raw_result,
+    ]),
+    ...exported.value.evidence_bundle.records.flatMap((record) => [
+      record.normalized_result,
+      record.raw_result,
+    ]),
+  ]) {
+    if (
+      typeof payload !== "object" ||
+      payload === null ||
+      Array.isArray(payload)
+    )
+      throw new Error("Expected nested fixture result");
+    Reflect.set(payload, "nested", [{ text: "changed" }]);
+  }
+  expect(JSON.stringify(exported.value)).toBe(changed);
+  const fresh = cache.export(target, profile, bundle);
+  if (!fresh.ok) throw fresh.error;
+  expect(serializeAnalysisSnapshot(fresh.value)).toBe(expected);
+});
 
 describe("analysis snapshot cache capacity", () => {
   it("shares capacity across query kinds while allowing replacements and fresh partitions", () => {
@@ -102,6 +187,7 @@ describe("analysis snapshot cache capacity", () => {
     });
     const evidence = createEvidence(target, REA_WORKFLOW_PROVIDER, {
       operation: workflowInput.operation,
+      confidence: "derived",
       parameters: workflowInput.parameters,
       result: execution.result,
       rawResult: execution.rawResult,
@@ -139,6 +225,74 @@ describe("analysis snapshot cache capacity", () => {
     expect(cache.entries()).toHaveLength(1);
     expect(cache.workflowEntries()).toEqual([]);
   });
+});
+
+describe("analysis snapshot cache policy", () => {
+  it.each<{
+    policy?: CapabilityDescriptor["cachePolicy"];
+    operation?: CapabilityDescriptor["operation"];
+    effects?: Partial<CapabilityDescriptor["effects"]>;
+    parameters?: Record<string, string>;
+    cacheable: boolean;
+  }>([
+    { cacheable: false },
+    { policy: "snapshot", cacheable: true },
+    { policy: "live", cacheable: false },
+    {
+      policy: "live",
+      effects: { mayWriteFilesystem: false },
+      cacheable: false,
+    },
+    {
+      policy: "snapshot",
+      effects: { mutatesArtifact: true },
+      cacheable: false,
+    },
+    {
+      policy: "snapshot",
+      effects: { changesPermissions: true },
+      cacheable: false,
+    },
+    { policy: "snapshot", operation: "list_documents", cacheable: false },
+    { policy: "snapshot", operation: "list_strings", cacheable: false },
+    {
+      policy: "snapshot",
+      operation: "address_name",
+      parameters: { document: "fixture" },
+      cacheable: false,
+    },
+  ])(
+    "keeps explicit cache policy within immutable and state-independent boundaries: %j",
+    ({
+      policy,
+      operation = "analyze_function",
+      effects,
+      parameters = {},
+      cacheable,
+    }) => {
+      const descriptor: CapabilityDescriptor = {
+        provider: ANALYSIS_SNAPSHOT_PROVIDER,
+        operation,
+        available: true,
+        reason: null,
+        ...(policy === undefined ? {} : { cachePolicy: policy }),
+        effects: {
+          mutatesArtifact: false,
+          launchesProcess: true,
+          mayShowUi: false,
+          mayAccessNetwork: false,
+          mayWriteFilesystem: true,
+          changesPermissions: false,
+          requiresRoot: false,
+          ...effects,
+        },
+        limitations: [],
+      };
+      expect(isSnapshotCacheable(operation, descriptor, parameters)).toBe(
+        cacheable,
+      );
+    },
+  );
 });
 
 describe("analysis snapshot cache partitioning", () => {

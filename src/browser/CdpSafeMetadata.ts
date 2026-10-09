@@ -92,7 +92,7 @@ const parseCsp = (
   for (const rawDirective of (value ?? "").split(";")) {
     const [rawName, ...tokens] = rawDirective.trim().split(/\s+/u);
     const name = (rawName ?? "").toLowerCase();
-    if (!/^[a-z][a-z0-9-]*$/u.test(name)) continue;
+    if (!/^[a-z][a-z0-9\x2d]*$/u.test(name)) continue;
     const sources: ResponseMetadata["csp"]["directives"][number]["sources"] =
       [];
     for (const token of tokens) {
@@ -122,8 +122,9 @@ const cspSource = (
   allowedOrigins: ReadonlySet<string>,
 ): ResponseMetadata["csp"]["directives"][number]["sources"][number] => {
   const lower = token.toLowerCase();
-  if (/^'[a-z0-9-]+'$/u.test(lower)) return { kind: "keyword", value: lower };
-  if (/^[a-z][a-z0-9+.-]*:$/u.test(lower))
+  if (/^'[a-z0-9\x2d]+'$/u.test(lower))
+    return { kind: "keyword", value: lower };
+  if (/^[a-z][a-z0-9+.\x2d]*:$/u.test(lower))
     return { kind: "scheme", value: lower };
   const hostOrigin = cspHostSourceOrigin(token, baseUrl);
   if (hostOrigin === undefined) return { kind: "other", value: null };
@@ -143,16 +144,15 @@ const cspHostSourceOrigin = (
   token: string,
   baseUrl: string,
 ): string | null | undefined => {
-  const match = /^(?:([a-z][a-z0-9+.-]*):\/\/)?([^/?#]+)(?:\/[^?#]*)?$/iu.exec(
-    token,
-  );
+  const match =
+    /^(?:([a-z][a-z0-9+.\x2d]*):\/\/)?([^\x2f?#]+)(?:\/[^?#]*)?$/iu.exec(token);
   const authority = match?.[2];
   if (authority === undefined || authority.length === 0) return undefined;
   const scheme = (match?.[1] ?? schemeOf(baseUrl))?.toLowerCase();
-  if (scheme === undefined || !/^[a-z][a-z0-9+.-]*$/u.test(scheme))
+  if (scheme === undefined || !/^[a-z][a-z0-9+.\x2d]*$/u.test(scheme))
     return undefined;
   if (
-    !/^(?:\*|(?:\*\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)*\.?)(?::(?:\*|\d+))?$/iu.test(
+    !/^(?:\*|(?:\*\.)?[a-z0-9\x2d]+(?:\.[a-z0-9\x2d]+)*\.?)(?::(?:\*|\d+))?$/iu.test(
       authority,
     )
   )
@@ -249,7 +249,7 @@ const linkParameters = (value: string): ReadonlyMap<string, string> => {
     const name = (separator < 0 ? raw : raw.slice(0, separator))
       .trim()
       .toLowerCase();
-    if (!/^[a-z][a-z0-9-]*$/u.test(name)) continue;
+    if (!/^[a-z][a-z0-9\x2d]*$/u.test(name)) continue;
     const parameter = separator < 0 ? "" : raw.slice(separator + 1).trim();
     parameters.set(name, unquote(parameter));
   }
@@ -285,7 +285,7 @@ const permissionFeatures = (value: string | undefined): string[] =>
       (value ?? "")
         .split(",")
         .map((entry) => entry.split("=", 1)[0]?.trim().toLowerCase() ?? "")
-        .filter((feature) => /^[a-z][a-z0-9-]*$/u.test(feature)),
+        .filter((feature) => /^[a-z][a-z0-9\x2d]*$/u.test(feature)),
     ),
   ].sort();
 
@@ -332,7 +332,7 @@ const referrerPolicy = (value: string | undefined): string | null => {
   for (const raw of (value ?? "").split(",")) {
     const token = raw.trim().toLowerCase();
     if (token === "") continue;
-    if (!/^[a-z-]+$/u.test(token)) return null;
+    if (!/^[a-z\x2d]+$/u.test(token)) return null;
     if (referrerPolicies.has(token)) policy = token;
   }
   return policy;
@@ -340,7 +340,7 @@ const referrerPolicy = (value: string | undefined): string | null => {
 
 const policyToken = (value: string | undefined): string | null => {
   const token = (value ?? "").trim().toLowerCase();
-  return /^[a-z][a-z0-9_.-]*$/u.test(token) ? token : null;
+  return /^[a-z][a-z0-9_.\x2d]*$/u.test(token) ? token : null;
 };
 
 const nonnegativeInteger = (value: string | undefined): number | null => {

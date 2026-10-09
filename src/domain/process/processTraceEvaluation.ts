@@ -15,7 +15,7 @@ import {
   type ProcessTraceSpecification,
 } from "./processTraceSpecification.js";
 
-const identifierSchema = z.string().regex(/^[A-Za-z][A-Za-z0-9._-]{0,63}$/u);
+const identifierSchema = z.string().regex(/^[A-Za-z][A-Za-z0-9._\x2d]{0,63}$/u);
 
 export type ProcessTraceLocation = ProcessObservationLocation;
 
@@ -90,11 +90,13 @@ const scopesFor = (
     }),
   );
 
-const unknownSide = (): z.infer<typeof sideResultSchema> => ({
+const unknownSide = (
+  rawTrace: z.infer<typeof matchedEventSchema>[] = [],
+): z.infer<typeof sideResultSchema> => ({
   status: "unknown",
   matched_variant: null,
   satisfied_constraints: [],
-  raw_trace: [],
+  raw_trace: rawTrace,
 });
 
 export type EvaluatedSide = {
@@ -160,7 +162,7 @@ const collectRecords = (
   sources: ReadonlySet<ProcessTraceSource>,
 ): readonly TraceRecord[] => {
   const records: TraceRecord[] = [];
-  for (const location of capture.event_journal ?? []) {
+  for (const location of capture.event_journal) {
     const record = projectProcessObservation(capture, location);
     if (record !== null && sources.has(record.source))
       records.push({
@@ -411,12 +413,10 @@ export const evaluateProcessTraceSide = (
 ): EvaluatedSide => {
   const sources = new Set(specification.events.map(({ source }) => source));
   const relevantScopes = scopesFor(sources);
-  if (
+  const incomplete =
     capture.truncated ||
-    capture.residual_unknowns.some(({ scope }) => relevantScopes.has(scope))
-  )
-    return { result: unknownSide(), diagnostic: null };
-  if ((capture.event_journal ?? []).length === 0)
+    capture.residual_unknowns.some(({ scope }) => relevantScopes.has(scope));
+  if (capture.event_journal.length === 0)
     return {
       result: unknownSide(),
       diagnostic: {
@@ -427,6 +427,13 @@ export const evaluateProcessTraceSide = (
       },
     };
   const matched = matchRecords(collectRecords(capture, sources), specification);
+  if (incomplete)
+    return {
+      result: unknownSide(
+        "rawTrace" in matched ? matched.rawTrace : matched.result.raw_trace,
+      ),
+      diagnostic: null,
+    };
   return "rawTrace" in matched
     ? evaluateMatchedTrace(matched, specification)
     : matched;

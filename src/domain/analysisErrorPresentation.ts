@@ -39,7 +39,10 @@ export const analysisErrorRemediationAction = (
   if (error instanceof AnalysisSnapshotMismatchError)
     return "Run analysis without this snapshot, then save a fresh snapshot using the intended artifact, provider, and analysis profile.";
   if (error instanceof AnalysisUnsupportedTargetError)
-    return "Select a target supported by this operation or choose an operation supporting the reported target format.";
+    return (
+      error.remediationAction ??
+      "Select a target supported by this operation or choose an operation supporting the reported target format."
+    );
   if (error instanceof AnalysisResourceConstraintError)
     return (
       error.remediationAction ??
@@ -74,10 +77,15 @@ export const analysisErrorRemediationAction = (
     error.constraint === "directory_requires_file"
   )
     return "For a JavaScript/Electron application directory, call analyze_javascript_application with input_path or run `rea analyze <directory>`. For binary analysis, select its executable file.";
-  if (error instanceof AnalysisAccessDeniedError)
+  if (
+    error instanceof AnalysisAccessDeniedError ||
+    (error instanceof BinaryTargetError && error.systemCode !== undefined)
+  )
     return "Check the current process's read access to the selected path. Retry with a readable local file.";
   if (error instanceof AnalysisArtifactChangedError)
     return "Wait until the selected file is stable. For an active binary session, reopen the target with open_binary before retrying so REA acquires its current identity; for a CLI command or target-free tool, rerun the operation.";
+  if (error instanceof ConfigurationError && error.settings.length > 0)
+    return `Correct ${[...new Set(error.settings.map(({ setting }) => setting))].join(", ")} in the environment that starts REA (your shell or the MCP client's registration), then rerun.`;
   if (error instanceof AnalysisInputError)
     return "Correct the listed arguments and retry.";
   if (error instanceof UnknownRegistryError && error.reason === "not-found")
@@ -111,6 +119,13 @@ export const analysisErrorCategory = (
     return "unavailable";
   if (error instanceof ArtifactOperationError)
     return artifactErrorCategory(error.reason);
+  if (
+    error instanceof EvidenceFileError &&
+    (error.reason === "missing" ||
+      error.reason === "not-file" ||
+      error.reason === "exists")
+  )
+    return "invalid_input";
   return STATIC_ERROR_CATEGORIES[error._tag] ?? "execution_failure";
 };
 
@@ -189,7 +204,15 @@ export const analysisErrorUserMessage = (error: AnalysisError): string => {
   if (error instanceof UnknownRegistryError)
     return "Evidence state changed before the update completed. Refresh the current state and try again.";
   if (error instanceof ConfigurationError)
-    return "REA configuration is invalid. Run `rea doctor` and fix the reported setting.";
+    return error.settings.length === 0
+      ? "REA configuration is invalid. Run `rea doctor` and fix the reported setting."
+      : `REA configuration is invalid: ${error.settings
+          .map(({ setting, constraint }) =>
+            constraint.includes(setting)
+              ? constraint.replace(/\.$/u, "")
+              : `${setting}: ${constraint}`,
+          )
+          .join("; ")}.`;
   if (error instanceof NoBinaryOpenError) return error.message;
   if (error instanceof BinaryTargetError)
     return error.constraint === "directory_requires_file"

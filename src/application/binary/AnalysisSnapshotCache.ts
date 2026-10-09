@@ -71,7 +71,8 @@ export const isSnapshotCacheable = (
     typeof parameters.address === "string") &&
   descriptor?.effects.mutatesArtifact === false &&
   descriptor.cachePolicy !== "live" &&
-  descriptor.effects.mayWriteFilesystem === false &&
+  (descriptor.cachePolicy === "snapshot" ||
+    descriptor.effects.mayWriteFilesystem === false) &&
   descriptor.effects.changesPermissions === false;
 
 /** Bounded in-memory cache for one immutable binary identity. */
@@ -123,7 +124,7 @@ export class AnalysisSnapshotCache {
       if (!this.#entries.has(entry.query_id)) imported += 1;
       this.#entries.set(entry.query_id, structuredClone(entry));
     }
-    for (const entry of snapshot.workflow_entries ?? []) {
+    for (const entry of snapshot.workflow_entries) {
       if (!this.#workflowEntries.has(entry.query_id) && !this.#hasCapacity())
         continue;
       this.#workflowEntries.set(entry.query_id, structuredClone(entry));
@@ -142,16 +143,21 @@ export class AnalysisSnapshotCache {
     try {
       const snapshotTargetIdentity = snapshotTarget(target);
       const binding = snapshotBinding(profile);
-      const retainedEvidence = structuredClone(evidenceBundle);
+      const entries = [...this.#entries.values()].sort((left, right) =>
+        left.query_id.localeCompare(right.query_id),
+      );
+      const workflows = [...this.#workflowEntries.values()].sort(
+        (left, right) => left.query_id.localeCompare(right.query_id),
+      );
+      // Parsing owns the returned JSON and metadata; pre-cloning the same
+      // payloads here only adds another full materialization.
       return ok(
         parseAnalysisSnapshot({
           target: snapshotTargetIdentity,
           binding,
-          entries: this.entries(),
-          ...(this.workflowEntries().length === 0
-            ? {}
-            : { workflow_entries: this.workflowEntries() }),
-          evidence_bundle: retainedEvidence,
+          entries,
+          workflow_entries: workflows,
+          evidence_bundle: evidenceBundle,
         }),
       );
     } catch (cause: unknown) {

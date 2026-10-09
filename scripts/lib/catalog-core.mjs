@@ -74,6 +74,7 @@ const SOURCE_PATHS = {
   javascriptRuntimeObservationContracts:
     "dist/contracts/javascript/javascriptRuntimeObservationToolContracts.js",
   applicationContracts: "dist/contracts/applicationToolContracts.js",
+  analysisViewContracts: "dist/contracts/analysisViewToolContracts.js",
   webScriptContracts: "dist/contracts/webScriptToolContracts.js",
   javascriptRecoveryContracts:
     "dist/contracts/javascript/javascriptRecoveryToolContracts.js",
@@ -84,10 +85,7 @@ const SOURCE_PATHS = {
   idaProvider: "dist/ida/IdaProviderCapabilities.js",
   nativeProvider: "dist/native/NativeMacOSProviderMetadata.js",
   artifactProviders: "dist/application/InvestigationProviders.js",
-  browserProvider: "dist/browser/CdpBrowserProvider.js",
-  browserScenarioProvider: "dist/browser/PlaywrightBrowserScenarioProvider.js",
-  electronProvider: "dist/browser/CdpElectronProvider.js",
-  electronActiveProvider: "dist/browser/PlaywrightElectronActiveProvider.js",
+  browserIdentities: "dist/browser/providerIdentities.js",
   v8InspectorProvider: "dist/inspector/V8InspectorProvider.js",
   evidence: "dist/domain/evidence.js",
   evidenceBundle: "dist/domain/evidenceBundle.js",

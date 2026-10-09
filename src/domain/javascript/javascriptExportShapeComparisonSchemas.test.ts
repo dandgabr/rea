@@ -1,6 +1,9 @@
 import { expect, it } from "vitest";
 
-import { projectedExportReturnShapesSchema } from "./javascriptExportShapeComparisonSchemas.js";
+import {
+  javaScriptExportShapeComparisonChangeSchema,
+  projectedExportReturnShapesSchema,
+} from "./javascriptExportShapeComparisonSchemas.js";
 
 const projectionWithField = (field: unknown) => ({
   semantic_role: "export-return-shapes",
@@ -29,11 +32,46 @@ const projectionWithField = (field: unknown) => ({
   },
 });
 
+it("rejects a comparison change object missing presence", () => {
+  const digest = "a".repeat(64);
+  const change = {
+    change_id: `jesc_change_${digest}`,
+    status: "added",
+    path: "/total",
+    discriminant: { path: "/kind", value: "results" },
+    left: { availability: "absent" },
+    right: {
+      availability: "unknown",
+      reason: "Static field value is unknown.",
+    },
+    left_source_range: {
+      start: { line: 4, column: 9 },
+      end: { line: 4, column: 48 },
+    },
+    right_source_range: {
+      start: { line: 4, column: 9 },
+      end: { line: 4, column: 62 },
+    },
+    evidence_links: [`ev_${digest}`, `ev_${"b".repeat(64)}`],
+    limitations: [],
+  };
+  expect(
+    javaScriptExportShapeComparisonChangeSchema.safeParse(change).success,
+  ).toBe(false);
+  expect(
+    javaScriptExportShapeComparisonChangeSchema.safeParse({
+      ...change,
+      presence: { left: "absent", right: "present" },
+    }).success,
+  ).toBe(true);
+});
+
 it("parses projected fields into literal, union, or unknown values", () => {
   expect(
     projectedExportReturnShapesSchema.safeParse(
       projectionWithField({
         path: "/kind",
+        presence: "present",
         state: "unknown",
         value: "invented",
         reason: "Dynamic property",
@@ -44,10 +82,24 @@ it("parses projected fields into literal, union, or unknown values", () => {
     projectedExportReturnShapesSchema.safeParse(
       projectionWithField({
         path: "/kind",
+        presence: "present",
         state: "union",
         value: ["success", "failure"],
         reason: null,
       }),
     ).success,
   ).toBe(true);
+});
+
+it("rejects return fields that omit slot presence", () => {
+  expect(
+    projectedExportReturnShapesSchema.safeParse(
+      projectionWithField({
+        path: "/kind",
+        state: "literal",
+        value: "result",
+        reason: null,
+      }),
+    ).success,
+  ).toBe(false);
 });

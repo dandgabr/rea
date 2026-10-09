@@ -1,9 +1,14 @@
-import { readFile } from "node:fs/promises";
+import { ok as resultOk } from "../../../src/domain/result.js";
+import { readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 
 import { createTestBinarySession } from "../../fixtures/binarySession.js";
+import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
+import { machoImage } from "../../../src/artifacts/apple/MachoImage.fixture.js";
 import {
   CATALOG_IDENTITY,
   CLI_COMMAND_NAMES,
@@ -21,11 +26,17 @@ import type {
   CapabilityDescriptor,
 } from "../../../src/application/AnalysisProvider.js";
 
-const availabilityProvider = (): AnalysisProvider => {
+const availabilityProvider = (
+  operations: readonly CapabilityDescriptor["operation"][] = [
+    "current_address",
+  ],
+): AnalysisProvider => {
   const identity = { id: "fixture", name: "Fixture", version: "1" };
-  const capability: CapabilityDescriptor = {
+  const capability = (
+    operation: CapabilityDescriptor["operation"],
+  ): CapabilityDescriptor => ({
     provider: identity,
-    operation: "current_address",
+    operation,
     available: true,
     reason: null,
     effects: {
@@ -38,14 +49,14 @@ const availabilityProvider = (): AnalysisProvider => {
       requiresRoot: false,
     },
     limitations: [],
-  };
+  });
   return {
     identity: () => identity,
-    capabilities: () => [capability],
+    capabilities: () => operations.map(capability),
     createClient: () => ({
       health: () => Promise.resolve(),
       execute: () => Promise.resolve(observed(null)),
-      close: () => Promise.resolve(),
+      close: () => Promise.resolve(resultOk(null)),
     }),
   };
 };
@@ -77,17 +88,6 @@ const statusCapability = (
 });
 
 describe("server and catalog identity", () => {
-  it("retains all catalog identity fields through transport serialization and detached clones", () => {
-    const serialized = JSON.parse(JSON.stringify(CATALOG_IDENTITY));
-    expect(structuredClone(CATALOG_IDENTITY)).toEqual(serialized);
-    expect(serialized.digests).toEqual(CATALOG_IDENTITY.digests);
-    expect(serialized.tools).toHaveLength(TOOL_CONTRACTS.length);
-    const identity = createServerIdentity({
-      startedAt: "2026-07-13T00:00:00.000Z",
-    });
-    expect(JSON.parse(JSON.stringify(identity)).catalog).toEqual(serialized);
-  });
-
   it("derives package and SDK versions from canonical package metadata", async () => {
     const packageJson = JSON.parse(await readFile("package.json", "utf8"));
     const packageLock = JSON.parse(await readFile("package-lock.json", "utf8"));
@@ -248,6 +248,101 @@ describe("live server identity over MCP", () => {
   }, 10_000);
 });
 
+describe("active-target availability over MCP", () => {
+  it("advertises active-target tools only when a matching target is open", async () => {
+    const session = createTestBinarySession(
+      availabilityProvider(["inspect_macho", "inspect_artifact"]),
+    );
+    const server = createServer(session, session);
+    const client = new Client({ name: "availability-test", version: "1" });
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    const directory = await createTestTempDirectory("rea-target-availability-");
+    const executable = join(directory, "tool");
+    const plist = join(directory, "Info.plist");
+    await writeFile(executable, machoImage({}));
+    await writeFile(plist, PLIST_XML);
+    try {
+      await server.connect(serverTransport);
+      await client.connect(clientTransport);
+      const listed = await toolNames(client);
+      expect(await activeTargetReasons(client)).toEqual({
+        inspect_macho: "target_required",
+        inspect_artifact: "target_required",
+        inspect_managed_artifact: "available",
+      });
+      const call = await client.callTool({
+        name: "inspect_macho",
+        arguments: {},
+      });
+      expect(call.structuredContent).toMatchObject({
+        error: { code: "target_unavailable" },
+      });
+      await openTarget(client, plist);
+      expect(await activeTargetReasons(client)).toEqual({
+        inspect_macho: "target_unsupported",
+        inspect_artifact: "available",
+        inspect_managed_artifact: "available",
+      });
+      await client.callTool({ name: "close_binary", arguments: {} });
+      await openTarget(client, executable);
+      expect(await activeTargetReasons(client)).toEqual({
+        inspect_macho: "available",
+        inspect_artifact: "available",
+        inspect_managed_artifact: "available",
+      });
+      await client.callTool({ name: "close_binary", arguments: {} });
+      expect((await activeTargetReasons(client)).inspect_macho).toBe(
+        "target_required",
+      );
+      expect(await toolNames(client)).toEqual(listed);
+    } finally {
+      await Promise.allSettled([
+        client.close(),
+        server.close(),
+        session.close(),
+      ]);
+    }
+  }, 10_000);
+});
+
+const PLIST_XML =
+  '<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>CFBundleName</key><string>Fixture</string></dict></plist>';
+
+const toolNames = async (client: Client): Promise<string[]> =>
+  (await client.listTools()).tools.map(({ name }) => name);
+
+const openTarget = async (client: Client, path: string): Promise<void> => {
+  const opened = await client.callTool({
+    name: "open_binary",
+    arguments: { path },
+  });
+  expect(opened.isError ?? false).toBe(false);
+};
+
+const activeTargetReasons = async (
+  client: Client,
+): Promise<Record<string, unknown>> => {
+  const status = await client.callTool({
+    name: "binary_session",
+    arguments: {},
+  });
+  const availability = z
+    .object({
+      result: z.object({
+        tool_availability: z.array(
+          z.object({ name: z.string(), reason: z.string() }).loose(),
+        ),
+      }),
+    })
+    .parse(status.structuredContent).result.tool_availability;
+  return Object.fromEntries(
+    ["inspect_macho", "inspect_artifact", "inspect_managed_artifact"].map(
+      (name) => [name, availability.find((tool) => tool.name === name)?.reason],
+    ),
+  );
+};
+
 const assertLiveIdentity = async (client: Client): Promise<void> => {
   const identity = await client.callTool({
     name: "binary_session",
@@ -262,7 +357,9 @@ const assertLiveIdentity = async (client: Client): Promise<void> => {
           server: SDK_IDENTITY.server,
           client_test: PACKAGE_METADATA.clientSdkVersion,
         },
-        client: null,
+        client: { name: "identity-test", version: "9" },
+        negotiated_protocol_version: expect.any(String),
+        catalog: CATALOG_IDENTITY,
         alignment: { state: "unknown" },
       },
     },
@@ -316,7 +413,7 @@ const assertSessionIdentity = async (client: Client): Promise<void> => {
         }),
       ]),
       client_features: {
-        elicitation_form: false,
+        elicitation_form: true,
         elicitation_url: false,
         roots: false,
         sampling: false,

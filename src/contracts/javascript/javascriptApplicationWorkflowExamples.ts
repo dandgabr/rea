@@ -102,25 +102,4 @@ export const SOURCE_TO_BUNDLE_COMPARISON_EXAMPLE = {
   application: JAVASCRIPT_APPLICATION_EVIDENCE_EXAMPLE,
 };
 
-/** Exact static return-shape comparison with both Evidence records inline. */
-export const JAVASCRIPT_EXPORT_SHAPE_COMPARISON_EXAMPLE = {
-  left: JAVASCRIPT_APPLICATION_EVIDENCE_EXAMPLE,
-  right: reconciliationEvidence,
-  left_module_path: "parser.mjs",
-  left_export_name: "default",
-  right_module_path: "parser.mjs",
-  right_export_name: "default",
-};
-
-/** Full-Evidence compatibility fixture used by pure domain and adapter tests. */
-export const JAVASCRIPT_FEATURE_TRACE_FULL_EVIDENCE_EXAMPLE = {
-  application: JAVASCRIPT_APPLICATION_EVIDENCE_EXAMPLE,
-  seed: TRACE_SEED,
-  direction: "both" as const,
-};
-
-/** Full-Evidence compatibility comparison fixture. */
-export const JAVASCRIPT_VERSION_COMPARISON_FULL_EVIDENCE_EXAMPLE = {
-  left: JAVASCRIPT_APPLICATION_EVIDENCE_EXAMPLE,
-  right: reconciliationEvidence,
-};
+export { JAVASCRIPT_EXPORT_SHAPE_COMPARISON_EXAMPLE } from "./javascriptExportShapeComparisonExample.js";

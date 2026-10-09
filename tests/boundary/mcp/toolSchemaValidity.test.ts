@@ -7,7 +7,7 @@ import { z } from "zod";
 import { TOOL_CONTRACTS } from "../../../src/contracts/toolContracts.js";
 import { emptyArraySchema } from "../../../src/domain/emptyArraySchema.js";
 import { processScenarioSchema } from "../../../src/domain/process/processScenario.js";
-import { GENERATED_MCP_TOOL_CATALOG } from "../../../src/generatedMcpToolCatalog.js";
+import { GENERATED_MCP_TOOL_CATALOG } from "../../fixtures/mcpToolCatalog.js";
 import { toolRegistrationOptions } from "../../../src/server/toolRegistrationOptions.js";
 
 interface ToolSchemas {
@@ -94,6 +94,23 @@ function expectKnownAuthorityHints(tools: readonly ToolSchemas[]): void {
       idempotentHint: false,
       openWorldHint: false,
     },
+    export_web_scripts: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: false,
+    },
+    capture_process_scenario: {
+      openWorldHint: true,
+    },
+    export_evidence_bundle: {
+      readOnlyHint: false,
+      destructiveHint: true,
+    },
+    import_evidence_bundle: {
+      readOnlyHint: false,
+      destructiveHint: false,
+    },
   } as const;
 
   for (const [name, annotations] of Object.entries(expected))
@@ -103,25 +120,44 @@ function expectKnownAuthorityHints(tools: readonly ToolSchemas[]): void {
 function expectRecursivePropertyDescriptions(
   schema: unknown,
   path: string,
+  root: unknown = schema,
+  active: ReadonlySet<string> = new Set(),
 ): void {
   if (!isRecord(schema)) return;
+  if (typeof schema.$ref === "string" && !active.has(schema.$ref))
+    expectRecursivePropertyDescriptions(
+      resolveReference(root, schema.$ref),
+      `${path}.${schema.$ref}`,
+      root,
+      new Set([...active, schema.$ref]),
+    );
   if (isRecord(schema.properties)) {
     for (const [property, child] of Object.entries(schema.properties)) {
       expect(child, `${path}.${property}`).toMatchObject({
         description: expect.any(String),
       });
-      expectRecursivePropertyDescriptions(child, `${path}.${property}`);
+      expectRecursivePropertyDescriptions(
+        child,
+        `${path}.${property}`,
+        root,
+        active,
+      );
     }
   }
 
   for (const key of ["items", "additionalProperties"])
     if (schema[key] !== undefined)
-      expectRecursivePropertyDescriptions(schema[key], path);
+      expectRecursivePropertyDescriptions(schema[key], path, root, active);
   for (const key of ["allOf", "anyOf", "oneOf", "prefixItems"]) {
     const children = schema[key];
     if (Array.isArray(children))
       children.forEach((child: unknown, index: number) =>
-        expectRecursivePropertyDescriptions(child, `${path}.${key}[${index}]`),
+        expectRecursivePropertyDescriptions(
+          child,
+          `${path}.${key}[${index}]`,
+          root,
+          active,
+        ),
       );
   }
 }
@@ -364,8 +400,11 @@ describe("MCP root input schemas", () => {
       for (const contract of TOOL_CONTRACTS) {
         const inputSchema = advertised.get(contract.name)!.inputSchema;
         expect(inputSchema.type, contract.name).toBe("object");
-        expect(inputSchema.properties, contract.name).toBeDefined();
-        expect(inputSchema.anyOf, contract.name).toBeUndefined();
+        expect(
+          inputSchema.properties !== undefined ||
+            Array.isArray(inputSchema.anyOf),
+          contract.name,
+        ).toBe(true);
         const validate = ajv.compile(inputSchema);
         for (const example of contract.examples)
           expect(

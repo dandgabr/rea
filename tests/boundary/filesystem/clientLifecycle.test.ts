@@ -1,3 +1,4 @@
+import { constants as fsConstants } from "node:fs";
 import {
   copyFile,
   lstat,
@@ -1310,6 +1311,35 @@ describe("Grok Bot registration", () => {
   });
 });
 
+describe("Codex configuration comments", () => {
+  it("keeps Codex comments and value spelling through setup and uninstall", async () => {
+    const home = await createTestTempDirectory("rea-toml-comments-");
+    roots.push(home);
+    const configPath = join(home, ".codex/config.toml");
+    const original =
+      '# Keep this explanation.\nnotify = ["a", "b"]\nliteral = \'C:\\demo\\path\'\n';
+    await mkdir(dirname(configPath), { recursive: true });
+    await writeFile(configPath, original);
+
+    expect(
+      await configureClientConfiguration(
+        { name: "codex", configPath, format: "toml" },
+        {},
+        ["/isolated prefix/bin/rea", "mcp"],
+      ),
+    ).toMatchObject({ status: "configured" });
+    const configured = await readFile(configPath, "utf8");
+    expect(configured.startsWith(original)).toBe(true);
+    expect(configured).toContain("[mcp_servers.rea]");
+
+    const removed = await runUninstall(false, systemUninstallHost(home));
+    expect(removed.items).toContainEqual(
+      expect.objectContaining({ name: "codex", status: "removed" }),
+    );
+    expect(await readFile(configPath, "utf8")).toBe(original);
+  });
+});
+
 describe("client configuration filesystem removal", () => {
   it("uninstalls only owned entries and refuses purge symlinks", async () => {
     const home = await createTestTempDirectory("rea-uninstall-");
@@ -1418,6 +1448,112 @@ describe("client configuration filesystem removal", () => {
     );
     expect(await readFile(config, "utf8")).toBe("not-json");
   });
+
+  it("stops before any removal when one client configuration is malformed", async () => {
+    const home = await createTestTempDirectory("rea-uninstall-stop-");
+    roots.push(home);
+    const codex = join(home, ".codex/config.toml");
+    const cursor = join(home, ".cursor/mcp.json");
+    const managed = [
+      join(home, ".agents/skills/reverse-engineer-anything/marker.txt"),
+      join(home, ".rea/cache/marker.txt"),
+      join(home, ".rea/state/marker.txt"),
+    ];
+    const cursorConfig = JSON.stringify({
+      mcpServers: {
+        rea: { command: "npx", args: ["-y", "rea-agents@6.1.0", "mcp"] },
+        other: { command: "echo", args: ["hello"] },
+      },
+    });
+    for (const path of [codex, cursor, ...managed])
+      await mkdir(dirname(path), { recursive: true });
+    await writeFile(codex, "[mcp_servers.rea]\ncommand = [broken\n");
+    await writeFile(cursor, cursorConfig);
+    for (const path of managed) await writeFile(path, "marker");
+
+    const stopped = await runUninstall(true, systemUninstallHost(home));
+
+    expect(stopped.status).toBe("failed");
+    expect(stopped.items.map(({ name, status }) => [name, status])).toEqual([
+      ["codex", "failed"],
+      ["uninstall", "skipped"],
+      ["analysis_engine", "retained"],
+    ]);
+    expect(await readFile(codex, "utf8")).toBe(
+      "[mcp_servers.rea]\ncommand = [broken\n",
+    );
+    expect(await readFile(cursor, "utf8")).toBe(cursorConfig);
+    for (const path of managed)
+      expect(await readFile(path, "utf8")).toBe("marker");
+
+    await writeFile(codex, "");
+    const repaired = await runUninstall(true, systemUninstallHost(home));
+    expect(repaired.status).toBe("complete");
+    expect(JSON.parse(await readFile(cursor, "utf8"))).toEqual({
+      mcpServers: { other: { command: "echo", args: ["hello"] } },
+    });
+    for (const path of managed)
+      await expect(readFile(path, "utf8")).rejects.toThrow();
+  });
+});
+
+describe("client configuration changed during uninstall", () => {
+  it("stops the remaining removals when a configuration fails after preflight", async () => {
+    const home = await createTestTempDirectory("rea-uninstall-race-");
+    roots.push(home);
+    const codex = join(home, ".codex/config.toml");
+    const cursor = join(home, ".cursor/mcp.json");
+    const skill = join(
+      home,
+      ".agents/skills/reverse-engineer-anything/SKILL.md",
+    );
+    const cursorConfig = JSON.stringify({
+      mcpServers: { rea: { command: "rea", args: ["mcp"] } },
+    });
+    for (const path of [codex, cursor, skill])
+      await mkdir(dirname(path), { recursive: true });
+    await writeFile(
+      codex,
+      '[mcp_servers.rea]\ncommand = "rea"\nargs = ["mcp"]\n',
+    );
+    await writeFile(cursor, cursorConfig);
+    await writeFile(skill, "managed");
+    let codexReads = 0;
+    const fileSystem: UninstallFileSystem = {
+      ...testFileSystem,
+      // The preflight read succeeds; the removal reread finds a broken file.
+      readText: (path) => {
+        if (path !== codex) return readFile(path, "utf8");
+        codexReads += 1;
+        return codexReads === 1
+          ? readFile(path, "utf8")
+          : Promise.resolve("[mcp_servers.rea]\ncommand = [broken\n");
+      },
+    };
+
+    const result = await runUninstall(
+      false,
+      systemUninstallHost(home, fileSystem),
+    );
+
+    expect(result.status).toBe("failed");
+    // Clients ordered before Codex have no configuration in this home.
+    expect(
+      result.items
+        .filter(({ status }) => status !== "skipped")
+        .map(({ name, status }) => [name, status]),
+    ).toEqual([
+      ["codex", "failed"],
+      ["analysis_engine", "retained"],
+    ]);
+    expect(result.items.map(({ name }) => name)).not.toContain("cursor");
+    expect(result.items.at(-2)).toMatchObject({
+      name: "uninstall",
+      status: "skipped",
+    });
+    expect(await readFile(cursor, "utf8")).toBe(cursorConfig);
+    expect(await readFile(skill, "utf8")).toBe("managed");
+  });
 });
 
 describe("client configuration filesystem failure reporting", () => {
@@ -1452,7 +1588,7 @@ describe("client configuration filesystem failure reporting", () => {
         copy: (source, destination) =>
           failure === "backup"
             ? Promise.reject(new Error("SECRET backup failure"))
-            : copyFile(source, destination),
+            : copyFile(source, destination, fsConstants.COPYFILE_EXCL),
         writeText: async (path, contents) => {
           writes += 1;
           if ((failure === "update" && writes === 1) || failure === "restore")
@@ -1471,6 +1607,25 @@ describe("client configuration filesystem failure reporting", () => {
       expect(JSON.stringify(result)).not.toContain("SECRET");
     },
   );
+
+  it("restores the current configuration without replacing its initial backup", async () => {
+    const { home, config } = await uninstallFixture();
+    const current = await readFile(config, "utf8");
+    const initial = '{"existing":true}\n';
+    await writeFile(`${config}.rea.backup`, initial);
+    let writes = 0;
+    const result = await systemUninstallHost(home, {
+      ...testFileSystem,
+      writeText: async (path, contents) => {
+        writes += 1;
+        await writeFile(path, contents);
+        if (writes === 1) throw new Error("update failed after writing");
+      },
+    }).removeClient({ name: "cursor", format: "json", configPath: config });
+    expect(result.status).toBe("failed");
+    expect(await readFile(config, "utf8")).toBe(current);
+    expect(await readFile(`${config}.rea.backup`, "utf8")).toBe(initial);
+  });
 
   it("reports a managed-path removal failure", async () => {
     const home = await createTestTempDirectory("rea-uninstall-remove-");
@@ -1496,7 +1651,8 @@ describe("client configuration filesystem failure reporting", () => {
 
 const testFileSystem: UninstallFileSystem = {
   readText: (path) => readFile(path, "utf8"),
-  copy: (source, destination) => copyFile(source, destination),
+  copy: (source, destination) =>
+    copyFile(source, destination, fsConstants.COPYFILE_EXCL),
   writeText: (path, contents) => writeFile(path, contents),
   stat: (path) => lstat(path),
   realpath: (path) => realpath(path),

@@ -80,7 +80,6 @@ const symlinkTargetSchema = z
   .min(1)
   .refine(
     (target) =>
-      target === "<outside-root>" ||
       isPortableAbsoluteSymlinkTarget(target) ||
       (!target.startsWith("/") &&
         !target.includes("\\") &&
@@ -93,18 +92,20 @@ const isPortableAbsoluteSymlinkTarget = (target: string): boolean =>
   /^[A-Za-z]:[\\/]/u.test(target) ||
   /^\\\\[^\\/]+[\\/][^\\/]+/u.test(target);
 
-const sourceSymlinkSchema = z.strictObject({
-  ...entryBaseShape,
-  kind: z.literal("symlink"),
-  target: symlinkTargetSchema,
-  target_state: z.enum([
-    "internal",
-    "external",
-    "missing",
-    "unreadable",
-    "unknown",
-  ]),
-});
+const sourceSymlinkSchema = z.union([
+  z.strictObject({
+    ...entryBaseShape,
+    kind: z.literal("symlink"),
+    target: symlinkTargetSchema,
+    target_state: z.enum(["internal", "external", "missing"]),
+  }),
+  z.strictObject({
+    ...entryBaseShape,
+    kind: z.literal("symlink"),
+    target: z.null(),
+    target_state: z.enum(["unreadable", "unknown"]),
+  }),
+]);
 
 const sourceEntrySchema = z.union([
   sourceFileSchema,
@@ -177,7 +178,7 @@ const graphShape = {
     caller: z
       .string()
       .min(1)
-      .regex(/^[\w .:@/+-]+$/u),
+      .regex(/^[\w .:@\x2f+\x2d]+$/u),
   }),
   limitations: z.array(boundedTextSchema),
 };
@@ -315,14 +316,11 @@ const checkSymlinks = (
 ): void => {
   for (const [index, entry] of graph.entries.entries()) {
     if (entry.kind !== "symlink") continue;
+    if (entry.target === null) continue;
     const absolute = isPortableAbsoluteSymlinkTarget(entry.target);
     if (
-      (entry.target_state === "external" &&
-        entry.target !== "<outside-root>" &&
-        !absolute) ||
-      (entry.target_state === "internal" &&
-        (entry.target === "<outside-root>" || absolute)) ||
-      (entry.target_state === "missing" && entry.target === "<outside-root>")
+      (entry.target_state === "external" && !absolute) ||
+      (entry.target_state === "internal" && absolute)
     )
       context.addIssue({
         code: "custom",

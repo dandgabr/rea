@@ -20,7 +20,7 @@ export const resolveGhidraAnalysisProfile = (
   if (signal?.aborted === true)
     return Promise.resolve(err(new AnalysisCancelledError("open_binary")));
   if (target.kind !== "executable")
-    return Promise.resolve(ok({ profile: null, compatibility: {} }));
+    return Promise.resolve(ok({ profile: null }));
   if (installation.status === "unavailable")
     return Promise.resolve(
       err(new ProviderAdapterError(identity.id, "resolve_analysis_profile")),
@@ -43,7 +43,8 @@ export const resolveGhidraAnalysisProfile = (
         load_image_observations: "source-mappings-entry-context-v2",
         function_body_evidence: "complete-inclusive-ranges-v1",
         function_references: "complete-body-and-entry-reference-manager-v2",
-        location_resolution: "explicit-address-exact-name-first-v2",
+        location_resolution: "explicit-address-exact-entry-symbol-first-v3",
+        instruction_flow_evidence: "decoded-return-pcode-v1",
         process_launch:
           installation.platform === "win32"
             ? "official-headless-script-v1"
@@ -84,10 +85,6 @@ export const resolveGhidraAnalysisProfile = (
           : {}),
         analyzer_preset: "ghidra-default",
       }),
-      compatibility: {
-        languageId: dos ? "x86:LE:16:Real Mode" : "auto",
-        compilerSpecId: dos ? "default" : "auto",
-      },
     }),
   );
 };

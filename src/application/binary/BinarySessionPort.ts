@@ -21,7 +21,12 @@ import type {
 export interface SavedAnalysisSnapshot {
   readonly path: string;
   readonly bytes: number;
-  readonly entries: number;
+  /** Eligible primitive query bindings. */
+  readonly primitive_entries: number;
+  /** Eligible composed workflow bindings, separate from primitive queries. */
+  readonly workflow_entries: number;
+  /** All retained Evidence records, including observations without a replay binding. */
+  readonly evidence_records: number;
 }
 
 /** Target lifecycle used by CLI and MCP without exposing a concrete provider. */
@@ -62,7 +67,6 @@ export interface BinarySessionPort
   recordWorkflowSnapshot(
     input: WorkflowSnapshotRecordInput,
   ): Result<null, EvidenceIntegrityError>;
-  openCompatibility(): Readonly<Record<string, JsonValue>>;
   onAvailabilityChanged?(listener: () => void | Promise<void>): () => void;
   onAnalysisSnapshotChanged?(listener: () => void | Promise<void>): () => void;
 }

@@ -264,9 +264,9 @@ Xem [CONTRIBUTING.md](CONTRIBUTING.md) về thiết lập môi trường phát t
 
 ## Lịch sử sao
 
-🎉 **20.000 sao trên GitHub — xin cảm ơn!**
+🎉 **30.000 sao trên GitHub — xin cảm ơn!**
 
-Cảm ơn mọi người đã sử dụng REA, báo lỗi, kiểm thử bản dựng và đóng góp bản sửa lỗi.
+Cảm ơn mọi người đã sử dụng REA, báo lỗi, đề xuất tính năng, kiểm thử bản dựng và đóng góp bản sửa lỗi.
 
 <a href="https://www.star-history.com/?repos=morluto%2Frea&amp;type=date">
   <picture>

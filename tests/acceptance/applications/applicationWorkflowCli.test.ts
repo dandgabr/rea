@@ -10,8 +10,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
 
 import {
-  JAVASCRIPT_FEATURE_TRACE_FULL_EVIDENCE_EXAMPLE,
-  JAVASCRIPT_VERSION_COMPARISON_FULL_EVIDENCE_EXAMPLE,
+  JAVASCRIPT_FEATURE_TRACE_EXAMPLE,
+  JAVASCRIPT_APPLICATION_VERSION_COMPARISON_EXAMPLE,
   SOURCE_TO_BUNDLE_COMPARISON_EXAMPLE,
 } from "../../../src/contracts/javascript/javascriptApplicationWorkflowExamples.js";
 import { analyzeJavaScriptApplication } from "../../../src/application/javascript/JavaScriptApplicationService.js";
@@ -154,8 +154,8 @@ const analyzeThroughStdioMcp = async (
       expect.arrayContaining([expect.objectContaining({ type: "text" })]),
     );
     const result = z
-      .object({ result: javascriptApplicationAnalysisResultSchema })
-      .parse(response.structuredContent).result;
+      .object({ normalized_result: javascriptApplicationAnalysisResultSchema })
+      .parse(response.structuredContent).normalized_result;
     expect(result).toMatchObject({
       input_path: inputPath,
       format: "directory",
@@ -226,7 +226,7 @@ describe("application workflow CLI parity", () => {
   it("accepts inline trace JSON and file-backed comparison JSON", async () => {
     const traced = await runCli([
       "trace-application-feature",
-      JSON.stringify(JAVASCRIPT_FEATURE_TRACE_FULL_EVIDENCE_EXAMPLE),
+      JSON.stringify(JAVASCRIPT_FEATURE_TRACE_EXAMPLE),
       "--json",
     ]);
     expect(traced).toMatchObject({
@@ -258,7 +258,7 @@ describe("application workflow CLI parity", () => {
     const comparisonPath = join(root, "comparison.json");
     await writeFile(
       comparisonPath,
-      JSON.stringify(JAVASCRIPT_VERSION_COMPARISON_FULL_EVIDENCE_EXAMPLE),
+      JSON.stringify(JAVASCRIPT_APPLICATION_VERSION_COMPARISON_EXAMPLE),
     );
     const compared = await runCli([
       "compare-application-versions",
@@ -289,7 +289,7 @@ describe("application workflow CLI parity", () => {
       "compare-source-to-bundle",
       JSON.stringify({
         reference: SOURCE_TO_BUNDLE_COMPARISON_EXAMPLE.reference,
-        application: JAVASCRIPT_FEATURE_TRACE_FULL_EVIDENCE_EXAMPLE.application,
+        application: JAVASCRIPT_FEATURE_TRACE_EXAMPLE.application,
       }),
       "--json",
     ]);
@@ -445,10 +445,10 @@ describe("application workflow CLI input", () => {
     const result = await runCli([
       "compare-application-versions",
       JSON.stringify({
-        left: JAVASCRIPT_VERSION_COMPARISON_FULL_EVIDENCE_EXAMPLE.left
+        left: JAVASCRIPT_APPLICATION_VERSION_COMPARISON_EXAMPLE.left
           .evidence_id,
         right:
-          JAVASCRIPT_VERSION_COMPARISON_FULL_EVIDENCE_EXAMPLE.right.evidence_id,
+          JAVASCRIPT_APPLICATION_VERSION_COMPARISON_EXAMPLE.right.evidence_id,
       }),
       "--json",
     ]);
@@ -509,9 +509,107 @@ describe("application workflow CLI export Evidence", () => {
           {
             status: "added",
             path: "/depth",
+            presence: { left: "absent", right: "present" },
             right: { availability: "literal", value: 1 },
           },
         ],
+      },
+    });
+  }, 20_000);
+});
+
+describe("application workflow CLI export property presence", () => {
+  it("reports tagged search property presence through compare-javascript-export-shapes", async () => {
+    const root = await createTestTempDirectory(
+      "rea-export-shape-presence-cli-",
+    );
+    temporary.push(root);
+    const leftRoot = join(root, "left");
+    const rightRoot = join(root, "right");
+    await Promise.all([mkdir(leftRoot), mkdir(rightRoot)]);
+    await Promise.all([
+      writeFile(
+        join(leftRoot, "search.js"),
+        [
+          "export function search(items, q) {",
+          "  const matches = items.filter((item) => item.includes(q));",
+          '  return { kind: "results", matches, count: matches.length };',
+          "}",
+          "",
+        ].join("\n"),
+      ),
+      writeFile(
+        join(rightRoot, "search.js"),
+        [
+          "export function search(items, q) {",
+          "  const matches = items.filter((item) => item.includes(q));",
+          '  return { kind: "results", matches, total: matches.length, query: String(q) };',
+          "}",
+          "",
+        ].join("\n"),
+      ),
+    ]);
+    const [left, right] = await Promise.all([
+      analyzeJavaScriptApplication({ input_path: leftRoot }),
+      analyzeJavaScriptApplication({ input_path: rightRoot }),
+    ]);
+    if (!left.ok) throw left.error;
+    if (!right.ok) throw right.error;
+    const inputPath = join(root, "comparison.json");
+    await writeFile(
+      inputPath,
+      JSON.stringify({
+        left: left.value,
+        right: right.value,
+        left_module_path: "search.js",
+        left_export_name: "search",
+        right_module_path: "search.js",
+        right_export_name: "search",
+      }),
+    );
+    const compared = await runCli([
+      "compare-javascript-export-shapes",
+      inputPath,
+      "--json",
+    ]);
+    expect(compared).toMatchObject({
+      operation: "compare_javascript_export_shapes",
+      normalized_result: {
+        summary: { added: 2, removed: 1 },
+        property_inventories: expect.arrayContaining([
+          expect.objectContaining({
+            side: "left",
+            paired: true,
+            properties: expect.arrayContaining(["/count", "/kind", "/matches"]),
+          }),
+          expect.objectContaining({
+            side: "right",
+            paired: true,
+            properties: expect.arrayContaining([
+              "/kind",
+              "/matches",
+              "/query",
+              "/total",
+            ]),
+          }),
+        ]),
+        changes: expect.arrayContaining([
+          expect.objectContaining({
+            status: "removed",
+            path: "/count",
+            presence: { left: "present", right: "absent" },
+          }),
+          expect.objectContaining({
+            status: "added",
+            path: "/total",
+            presence: { left: "absent", right: "present" },
+          }),
+          expect.objectContaining({
+            status: "added",
+            path: "/query",
+            presence: { left: "absent", right: "present" },
+          }),
+        ]),
       },
     });
   }, 20_000);

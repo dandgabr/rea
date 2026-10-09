@@ -266,9 +266,9 @@ npx rea-agents@latest setup
 
 ## Star 歷史
 
-🎉 **GitHub Star 達到 20,000 個，感謝大家！**
+🎉 **GitHub Star 達到 30,000 個，感謝大家！**
 
-感謝每一位使用 REA、報告錯誤、測試建置和貢獻修復的朋友。
+感謝每一位使用 REA、報告錯誤、提出功能需求、測試建置和貢獻修復的朋友。
 
 <a href="https://www.star-history.com/?repos=morluto%2Frea&amp;type=date">
   <picture>

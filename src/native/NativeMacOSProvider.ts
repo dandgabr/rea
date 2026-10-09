@@ -1,8 +1,8 @@
+import { snapshotEnvironment } from "../process/snapshotEnvironment.js";
 import {
   NATIVE_MACOS_PROVIDER_IDENTITY as IDENTITY,
   nativeMacOSCapabilities,
 } from "./NativeMacOSProviderMetadata.js";
-export { NATIVE_MACOS_PROVIDER_IDENTITY } from "./NativeMacOSProviderMetadata.js";
 import { inspectAppleDispatchMetadata } from "./AppleDispatchMetadata.js";
 import { observeNativeUi } from "./NativeUiObservation.js";
 import { LldbCallTracer, type NativeCallTracer } from "./LldbCallTracer.js";
@@ -25,6 +25,8 @@ import {
   type NativeToolName,
 } from "../contracts/native/nativeToolContracts.js";
 import type { BinaryTarget } from "../domain/binaryTarget.js";
+import { toolContract } from "../contracts/toolContracts.js";
+import { analysisInputErrorFromIssues } from "../domain/inputIssueProjection.js";
 import type { EvidenceLocation } from "../domain/evidence.js";
 import {
   AnalysisCancelledError,
@@ -79,12 +81,17 @@ import {
 /** Read-only semantic provider composed from Xcode command-line utilities. */
 export class NativeMacOSProvider implements AnalysisProvider {
   readonly #capabilities: readonly CapabilityDescriptor[];
+  readonly #environment: NodeJS.ProcessEnv;
 
   constructor(
-    private readonly runner: NativeCommandRunner = new XcrunCommandRunner(),
+    environment: Readonly<NodeJS.ProcessEnv>,
+    private readonly runner: NativeCommandRunner = new XcrunCommandRunner(
+      environment,
+    ),
     platform: NodeJS.Platform = process.platform,
-    private readonly tracer: NativeCallTracer = new LldbCallTracer(),
+    private readonly tracer: NativeCallTracer = new LldbCallTracer(environment),
   ) {
+    this.#environment = snapshotEnvironment(environment, platform);
     this.#capabilities = nativeMacOSCapabilities(platform);
   }
 
@@ -97,7 +104,12 @@ export class NativeMacOSProvider implements AnalysisProvider {
   }
 
   createClient(target: BinaryTarget): AnalysisClient {
-    return new NativeMacOSClient(target, this.runner, this.tracer);
+    return new NativeMacOSClient(
+      target,
+      this.runner,
+      this.tracer,
+      this.#environment,
+    );
   }
 }
 
@@ -106,6 +118,7 @@ class NativeMacOSClient implements AnalysisClient {
     private readonly target: BinaryTarget,
     private readonly runner: NativeCommandRunner,
     private readonly tracer: NativeCallTracer,
+    private readonly environment: Readonly<NodeJS.ProcessEnv>,
   ) {}
 
   async execute(
@@ -118,6 +131,18 @@ class NativeMacOSClient implements AnalysisClient {
     if (operation === "health")
       return ok(createAnalysisExecution(null, IDENTITY));
     if (operation === "inspect_native_dispatch_metadata") {
+      const input = toolContract(operation).inputSchema.safeParse(parameters);
+      if (!input.success)
+        return err(
+          analysisInputErrorFromIssues(
+            operation,
+            input.error.issues,
+            parameters,
+            {
+              cause: input.error,
+            },
+          ),
+        );
       if (this.target.kind !== "executable" || this.target.format !== "mach-o")
         return err(
           new AnalysisCapabilityUnavailableError(
@@ -127,15 +152,9 @@ class NativeMacOSClient implements AnalysisClient {
           ),
         );
       try {
-        const maxRecords = z
-          .number()
-          .int()
-          .min(1)
-          .max(20000)
-          .parse(parameters.max_records ?? 5000);
         const result = await inspectAppleDispatchMetadata(
           this.target,
-          maxRecords,
+          input.data.max_records,
           options?.signal,
         );
         return ok(
@@ -191,6 +210,7 @@ class NativeMacOSClient implements AnalysisClient {
       operation === "capture_native_ui_scenario"
     ) {
       const result = await observeNativeUi(this.target, operation, parameters, {
+        environment: this.environment,
         signal: options?.signal,
       });
       return result.ok
@@ -225,8 +245,8 @@ class NativeMacOSClient implements AnalysisClient {
     }
   }
 
-  close(): Promise<void> {
-    return Promise.resolve();
+  close(): Promise<Result<null, AnalysisError>> {
+    return Promise.resolve(ok(null));
   }
 
   #dispatch(
@@ -668,13 +688,15 @@ const translateCommandFailure = (
     ...(capturedOutput === undefined ? {} : { capturedOutput }),
     ...(cleanup === undefined ? {} : { cleanup }),
   };
-  if (failure.reason === "unavailable")
+  if (failure.reason === "unavailable") {
+    const reason = `${failure.tool} is unavailable through xcrun.`;
     return new AnalysisCapabilityUnavailableError(
       IDENTITY.id,
       operation,
-      `${failure.tool} is unavailable through xcrun.`,
-      errorOptions,
+      reason,
+      { ...errorOptions, userMessage: reason },
     );
+  }
   if (failure.reason === "cancelled")
     return new AnalysisCancelledError(operation, errorOptions);
   if (failure.reason === "timeout")
@@ -817,11 +839,14 @@ const unreadablePlist = (
   reason: string,
 ): AnalysisError => {
   const sentence = reason.endsWith(".") ? reason : `${reason}.`;
+  // Name the default that is missing and the selection that still works.
+  const missingDefault = `The target has no readable Contents/Info.plist at ${path}: ${sentence} Select another plist in the target with the path input (CLI: --relative-path).`;
   return requested === undefined
     ? new AnalysisCapabilityUnavailableError(
         IDENTITY.id,
         "inspect_plist",
-        `The target has no readable Contents/Info.plist at ${path}: ${sentence} Pass path to inspect another plist.`,
+        missingDefault,
+        { userMessage: missingDefault },
       )
     : new AnalysisInputError("inspect_plist", undefined, [
         {

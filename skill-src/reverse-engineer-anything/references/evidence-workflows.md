@@ -1,11 +1,15 @@
 # Evidence, comparison, and verification workflows
 
-REA returns Evidence with each result. Read that result directly, cite its
-Evidence ID when another tool or your explanation needs a stable reference, and
-preserve authority, limitations, coverage, and residual unknowns. If a result
+Evidence-producing tools return the complete Evidence record directly in MCP
+`structuredContent` and CLI JSON. Read `normalized_result` for operation data,
+and cite `evidence_id` when another tool or your explanation needs a stable
+reference. Preserve authority, limitations, coverage, and residual unknowns. If a result
 is incomplete or paginated, continue only when the remaining data matters to
 the task; do not fetch a bundle or resource merely to read a result already
-returned inline.
+returned inline. When complete `inspect_binary_layout` or
+`analyze_javascript_application` Evidence is already retained, call
+`inspect_analysis_view` for a summary, one section/symbol/module, or a stable
+page instead of repeating the producer.
 
 Use `record_unknown` to track unresolved questions in the user's investigation
 and name the authority or environment still required. Supply supporting and

@@ -264,9 +264,9 @@ Die Entwicklungsumgebung und Prüfungen beschreibt [CONTRIBUTING.md](CONTRIBUTIN
 
 ## Sternverlauf
 
-🎉 **20.000 GitHub-Sterne – vielen Dank!**
+🎉 **30.000 GitHub-Sterne – vielen Dank!**
 
-Danke an alle, die REA nutzen, Fehler melden, Builds testen und Fehlerbehebungen beitragen.
+Danke an alle, die REA nutzen, Fehler melden, Funktionswünsche äußern, Builds testen und Fehlerbehebungen beitragen.
 
 <a href="https://www.star-history.com/?repos=morluto%2Frea&amp;type=date">
   <picture>

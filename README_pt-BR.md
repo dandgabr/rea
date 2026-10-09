@@ -264,9 +264,9 @@ Consulte [CONTRIBUTING.md](CONTRIBUTING.md) para configurar o ambiente de desenv
 
 ## Histórico de estrelas
 
-🎉 **20.000 estrelas no GitHub — muito obrigado!**
+🎉 **30.000 estrelas no GitHub — muito obrigado!**
 
-Obrigado a todos que usam o REA, relatam bugs, testam builds e contribuem com correções.
+Obrigado a todos que usam o REA, relatam bugs, sugerem funcionalidades, testam builds e contribuem com correções.
 
 <a href="https://www.star-history.com/?repos=morluto%2Frea&amp;type=date">
   <picture>

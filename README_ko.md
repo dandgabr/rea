@@ -266,9 +266,9 @@ REA에 도움을 보태 주세요! [issue를 등록](https://github.com/morluto/
 
 ## 스타 기록
 
-🎉 **GitHub 스타 20,000개, 감사합니다!**
+🎉 **GitHub 스타 30,000개, 감사합니다!**
 
-REA를 사용하고, 버그를 보고하고, 빌드를 테스트하고, 수정에 기여해 주신 모든 분께 감사드립니다.
+REA를 사용하고, 버그를 보고하고, 기능을 요청하고, 빌드를 테스트하고, 수정에 기여해 주신 모든 분께 감사드립니다.
 
 <a href="https://www.star-history.com/?repos=morluto%2Frea&amp;type=date">
   <picture>

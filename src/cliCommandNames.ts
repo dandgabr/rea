@@ -47,6 +47,7 @@ export const CLI_COMMANDS = Object.freeze({
   debugWithRizin: "debug-with-rizin",
   listCutterSessions: "list-cutter-sessions",
   cutterCommand: "cutter-command",
+  inspectAnalysisView: "inspect-analysis-view",
   inspectFirmwareRegions: "inspect-firmware-regions",
   extractFirmware: "extract-firmware",
   inspectAndroidPackage: "inspect-android-package",

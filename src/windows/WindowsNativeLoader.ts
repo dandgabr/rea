@@ -44,6 +44,7 @@ const inspectionSchema = z.strictObject({
   privateBridgeDescriptorAccess: z.literal(true),
   atomicJobAssignment: z.literal(true),
   killOnOwnerClose: z.literal(true),
+  protocolStdin: z.boolean().optional(),
 });
 
 type NativeCall = (

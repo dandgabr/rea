@@ -264,9 +264,9 @@ npx rea-agents@latest setup
 
 ## ประวัติดาว
 
-🎉 **20,000 ดาวบน GitHub — ขอบคุณทุกคน!**
+🎉 **30,000 ดาวบน GitHub — ขอบคุณทุกคน!**
 
-ขอบคุณทุกคนที่ใช้ REA รายงานบั๊ก ทดสอบบิลด์ และช่วยแก้ไข
+ขอบคุณทุกคนที่ใช้ REA รายงานบั๊ก เสนอฟีเจอร์ ทดสอบบิลด์ และช่วยแก้ไข
 
 <a href="https://www.star-history.com/?repos=morluto%2Frea&amp;type=date">
   <picture>
