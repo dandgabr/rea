@@ -31,6 +31,9 @@ class FakeScript implements Script {
   readonly message =
     signal<(message: FridaMessage, data: Buffer | null) => void>();
   isDestroyed = false;
+  loadFailure: Error | undefined;
+  unloadFailureCount = 0;
+  unloadCalls = 0;
 
   constructor(
     readonly payload: unknown = { event: "loaded" },
@@ -41,6 +44,7 @@ class FakeScript implements Script {
 
   async load(): Promise<void> {
     await this.beforeLoad();
+    if (this.loadFailure !== undefined) throw this.loadFailure;
     this.message.emit(
       {
         type: "send",
@@ -53,6 +57,12 @@ class FakeScript implements Script {
   }
 
   async unload(): Promise<void> {
+    this.unloadCalls += 1;
+    if (this.unloadFailureCount > 0) {
+      this.unloadFailureCount -= 1;
+      throw new Error("script unload failed");
+    }
+    if (this.isDestroyed) throw new Error("Script is destroyed");
     this.isDestroyed = true;
   }
 }
@@ -63,6 +73,9 @@ class FakeSession implements Session {
   nextPayload: unknown = { event: "loaded" };
   nextDescription = "script loaded";
   nextStack = "";
+  nextLoadFailure: Error | undefined;
+  nextUnloadFailureCount = 0;
+  detachFailureCount = 0;
   scriptLoadGate: Promise<void> | undefined;
   onScriptLoadStarted: (() => void) | undefined;
   private detachedState = false;
@@ -82,16 +95,33 @@ class FakeSession implements Session {
       this.nextDescription,
       this.nextStack,
     );
+    script.loadFailure = this.nextLoadFailure;
+    script.unloadFailureCount = this.nextUnloadFailureCount;
     this.nextPayload = { event: "loaded" };
     this.nextDescription = "script loaded";
     this.nextStack = "";
+    this.nextLoadFailure = undefined;
+    this.nextUnloadFailureCount = 0;
     this.scripts.push(script);
     return script;
   }
 
   async detach(): Promise<void> {
+    if (this.detachFailureCount > 0) {
+      this.detachFailureCount -= 1;
+      throw new Error("session detach failed");
+    }
+    for (const script of this.scripts) script.isDestroyed = true;
+    this.markDetached();
+  }
+
+  markDetached(): void {
     this.detachedState = true;
     this.detached.emit();
+  }
+
+  markDetachedWithoutSignal(): void {
+    this.detachedState = true;
   }
 }
 
@@ -102,6 +132,7 @@ class FakeDevice implements Device {
   readonly process = { pid: 512, name: "fixture" } satisfies Process;
   readonly session = new FakeSession();
   resumed: number[] = [];
+  resumeFailureCount = 0;
   readonly spawned: string[] = [];
 
   async enumerateProcesses(): Promise<Process[]> {
@@ -118,6 +149,10 @@ class FakeDevice implements Device {
   }
 
   async resume(pid: number): Promise<void> {
+    if (this.resumeFailureCount > 0) {
+      this.resumeFailureCount -= 1;
+      throw new Error("target resume failed");
+    }
     this.resumed.push(pid);
   }
 
@@ -153,6 +188,7 @@ class FakeDeviceManager implements DeviceManager {
   }
 }
 
+// eslint-disable-next-line max-lines-per-function -- related manager lifecycle cases share the same focused fake provider.
 describe("FridaInstrumentationManager", () => {
   it("loads instrumentation before resuming a spawned target", async () => {
     const bindings = new FakeDeviceManager();
@@ -294,6 +330,242 @@ describe("FridaInstrumentationManager", () => {
     expect(bindings.device.session.scripts[0]?.isDestroyed).toBe(true);
     expect(bindings.device.resumed).toEqual([512]);
     expect(bindings.device.session.isDetached()).toBe(true);
+  });
+
+  it("retains a failed script handle until a later cleanup retry releases it", async () => {
+    const bindings = new FakeDeviceManager();
+    bindings.device.session.nextLoadFailure = new Error("script load failed");
+    bindings.device.session.nextUnloadFailureCount = 1;
+    const manager = new FridaInstrumentationManager({
+      deviceManager: bindings,
+    });
+    const started = await manager.startSession({
+      mode: "attach",
+      deviceId: "local",
+      pid: 512,
+    });
+    expect(started.ok).toBe(true);
+    if (!started.ok) return;
+
+    const loaded = await manager.loadScript(started.value.sessionId, {
+      sourceKind: "inline",
+      source: "send('ready');",
+    });
+
+    expect(loaded.ok).toBe(false);
+    if (!loaded.ok) expect(loaded.error.cleanupIncomplete).toBe(true);
+    expect(manager.status(started.value.sessionId)?.scripts).toHaveLength(1);
+    expect(bindings.device.session.scripts[0]?.unloadCalls).toBe(1);
+
+    const closed = await manager.closeSession(started.value.sessionId);
+
+    expect(closed.ok).toBe(true);
+    expect(bindings.device.session.scripts[0]?.unloadCalls).toBe(2);
+    expect(bindings.device.session.scripts[0]?.isDestroyed).toBe(true);
+    expect(manager.status(started.value.sessionId)).toBeUndefined();
+  });
+
+  it("closes a session when its target already destroyed the script", async () => {
+    const bindings = new FakeDeviceManager();
+    const manager = new FridaInstrumentationManager({
+      deviceManager: bindings,
+    });
+    const started = await manager.startSession({
+      mode: "attach",
+      deviceId: "local",
+      pid: 512,
+    });
+    expect(started.ok).toBe(true);
+    if (!started.ok) return;
+    const loaded = await manager.loadScript(started.value.sessionId, {
+      sourceKind: "inline",
+      source: "send('ready');",
+    });
+    expect(loaded.ok).toBe(true);
+    const script = bindings.device.session.scripts[0];
+    expect(script).toBeDefined();
+    if (script === undefined) return;
+    script.isDestroyed = true;
+    bindings.device.session.markDetached();
+
+    const closed = await manager.closeSession(started.value.sessionId);
+
+    expect(closed.ok).toBe(true);
+    expect(script.unloadCalls).toBe(0);
+    expect(manager.status(started.value.sessionId)).toBeUndefined();
+  });
+
+  it("does not resume a paused spawn after its parent session detached", async () => {
+    const bindings = new FakeDeviceManager();
+    const manager = new FridaInstrumentationManager({
+      deviceManager: bindings,
+    });
+    const started = await manager.startSession({
+      mode: "spawn",
+      deviceId: "local",
+      program: "/tmp/fixture",
+    });
+    expect(started.ok).toBe(true);
+    if (!started.ok) return;
+    bindings.device.session.markDetachedWithoutSignal();
+
+    const closed = await manager.closeSession(started.value.sessionId);
+
+    expect(closed.ok).toBe(true);
+    expect(bindings.device.resumed).toEqual([]);
+    expect(manager.status(started.value.sessionId)).toBeUndefined();
+  });
+
+  it("uses successful parent-session detach to release a script after unload fails", async () => {
+    const bindings = new FakeDeviceManager();
+    const manager = new FridaInstrumentationManager({
+      deviceManager: bindings,
+    });
+    const started = await manager.startSession({
+      mode: "attach",
+      deviceId: "local",
+      pid: 512,
+    });
+    expect(started.ok).toBe(true);
+    if (!started.ok) return;
+    const loaded = await manager.loadScript(started.value.sessionId, {
+      sourceKind: "inline",
+      source: "send('ready');",
+    });
+    expect(loaded.ok).toBe(true);
+    const script = bindings.device.session.scripts[0];
+    expect(script).toBeDefined();
+    if (script === undefined) return;
+    script.unloadFailureCount = 1;
+
+    const closed = await manager.closeSession(started.value.sessionId);
+
+    expect(closed.ok).toBe(true);
+    expect(script.isDestroyed).toBe(true);
+    expect(manager.status(started.value.sessionId)).toBeUndefined();
+  });
+
+  it("keeps a paused spawn paused when script unload and session detach fail", async () => {
+    const bindings = new FakeDeviceManager();
+    const manager = new FridaInstrumentationManager({
+      deviceManager: bindings,
+    });
+    const started = await manager.startSession({
+      mode: "spawn",
+      deviceId: "local",
+      program: "/tmp/fixture",
+    });
+    expect(started.ok).toBe(true);
+    if (!started.ok) return;
+    const loaded = await manager.loadScript(started.value.sessionId, {
+      sourceKind: "inline",
+      source: "send('ready');",
+    });
+    expect(loaded.ok).toBe(true);
+    const script = bindings.device.session.scripts[0];
+    expect(script).toBeDefined();
+    if (script === undefined) return;
+    script.unloadFailureCount = 1;
+    bindings.device.session.detachFailureCount = 1;
+
+    const closed = await manager.closeSession(started.value.sessionId);
+
+    expect(closed.ok).toBe(false);
+    expect(bindings.device.resumed).toEqual([]);
+    expect(manager.status(started.value.sessionId)?.scripts).toHaveLength(1);
+  });
+
+  it("retries resuming a spawn after detach succeeded but resume failed", async () => {
+    const bindings = new FakeDeviceManager();
+    const manager = new FridaInstrumentationManager({
+      deviceManager: bindings,
+    });
+    const started = await manager.startSession({
+      mode: "spawn",
+      deviceId: "local",
+      program: "/tmp/fixture",
+    });
+    expect(started.ok).toBe(true);
+    if (!started.ok) return;
+    const loaded = await manager.loadScript(started.value.sessionId, {
+      sourceKind: "inline",
+      source: "send('ready');",
+    });
+    expect(loaded.ok).toBe(true);
+    bindings.device.resumeFailureCount = 1;
+
+    const firstClose = await manager.closeSession(started.value.sessionId);
+
+    expect(firstClose.ok).toBe(false);
+    expect(bindings.device.session.isDetached()).toBe(true);
+    expect(manager.status(started.value.sessionId)).toBeDefined();
+
+    const retry = await manager.closeSession(started.value.sessionId);
+
+    expect(retry.ok).toBe(true);
+    expect(bindings.device.resumed).toEqual([512]);
+    expect(manager.status(started.value.sessionId)).toBeUndefined();
+  });
+
+  it("keeps a remote device while a spawned target resume is pending", async () => {
+    const bindings = new FakeDeviceManager();
+    const manager = new FridaInstrumentationManager({
+      deviceManager: bindings,
+    });
+    const started = await manager.startSession({
+      mode: "spawn",
+      remote: { address: "127.0.0.1:27042" },
+      program: "/tmp/fixture",
+    });
+    expect(started.ok).toBe(true);
+    if (!started.ok) return;
+    bindings.device.resumeFailureCount = 1;
+
+    const firstClose = await manager.closeSession(started.value.sessionId);
+
+    expect(firstClose.ok).toBe(false);
+    expect(bindings.removedRemote).toEqual([]);
+
+    const retry = await manager.closeSession(started.value.sessionId);
+
+    expect(retry.ok).toBe(true);
+    expect(bindings.device.resumed).toEqual([512]);
+    expect(bindings.removedRemote).toEqual(["127.0.0.1:27042"]);
+  });
+
+  it("keeps a remote device while script and session cleanup are pending", async () => {
+    const bindings = new FakeDeviceManager();
+    const manager = new FridaInstrumentationManager({
+      deviceManager: bindings,
+    });
+    const started = await manager.startSession({
+      mode: "attach",
+      remote: { address: "127.0.0.1:27042" },
+      pid: 512,
+    });
+    expect(started.ok).toBe(true);
+    if (!started.ok) return;
+    const loaded = await manager.loadScript(started.value.sessionId, {
+      sourceKind: "inline",
+      source: "send('ready');",
+    });
+    expect(loaded.ok).toBe(true);
+    const script = bindings.device.session.scripts[0];
+    expect(script).toBeDefined();
+    if (script === undefined) return;
+    script.unloadFailureCount = 1;
+    bindings.device.session.detachFailureCount = 1;
+
+    const firstClose = await manager.closeSession(started.value.sessionId);
+
+    expect(firstClose.ok).toBe(false);
+    expect(bindings.removedRemote).toEqual([]);
+
+    const retry = await manager.closeSession(started.value.sessionId);
+
+    expect(retry.ok).toBe(true);
+    expect(script.isDestroyed).toBe(true);
+    expect(bindings.removedRemote).toEqual(["127.0.0.1:27042"]);
   });
 });
 

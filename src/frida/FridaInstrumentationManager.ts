@@ -53,6 +53,7 @@ interface ManagedScript {
   readonly name: string;
   readonly script: Script;
   readonly onMessage: (message: FridaMessage, data: Buffer | null) => void;
+  released: boolean;
 }
 
 interface ManagedSession {
@@ -68,6 +69,7 @@ interface ManagedSession {
   readonly scripts: Map<string, ManagedScript>;
   readonly messages: JsonValue[];
   state: "paused" | "running" | "detached";
+  resumeAfterDetachPending: boolean;
   capturedBytes: number;
   messagesTruncated: boolean;
 }
@@ -251,6 +253,7 @@ export class FridaInstrumentationManager implements FridaInstrumentationPort {
         scripts: new Map(),
         messages: [],
         state: input.mode === "spawn" ? "paused" : "running",
+        resumeAfterDetachPending: false,
         capturedBytes: 0,
         messagesTruncated: false,
       };
@@ -342,14 +345,16 @@ export class FridaInstrumentationManager implements FridaInstrumentationPort {
       nativeScript = await managed.session.createScript(scriptSource, {
         name: scriptName,
       });
-      nativeScript.message.connect(onMessage);
-      await nativeScript.load();
-      managed.scripts.set(scriptId, {
+      const entry: ManagedScript = {
         id: scriptId,
         name: scriptName,
         script: nativeScript,
         onMessage,
-      });
+        released: false,
+      };
+      managed.scripts.set(scriptId, entry);
+      nativeScript.message.connect(onMessage);
+      await nativeScript.load();
       return ok({
         scriptId,
         sourceKind: source.sourceKind,
@@ -359,11 +364,19 @@ export class FridaInstrumentationManager implements FridaInstrumentationPort {
         messagesTruncated: managed.messagesTruncated,
       });
     } catch (cause: unknown) {
-      if (nativeScript !== undefined) {
-        nativeScript.message.disconnect(onMessage);
-        await nativeScript.unload().catch(() => undefined);
-      }
-      return err(providerError("load_frida_script", cause, managed.remote));
+      const entry = managed.scripts.get(scriptId);
+      const cleanupReason =
+        entry === undefined
+          ? undefined
+          : await this.#releaseScript(managed, entry);
+      return err(
+        providerError(
+          "load_frida_script",
+          cause,
+          managed.remote,
+          cleanupReason,
+        ),
+      );
     }
   }
 
@@ -390,6 +403,7 @@ export class FridaInstrumentationManager implements FridaInstrumentationPort {
     try {
       await managed.device.resume(managed.pid);
       managed.state = "running";
+      managed.resumeAfterDetachPending = false;
       return ok(null);
     } catch (cause: unknown) {
       return err(providerError("resume_frida_session", cause, managed.remote));
@@ -413,14 +427,42 @@ export class FridaInstrumentationManager implements FridaInstrumentationPort {
     const entry = managed?.scripts.get(scriptId);
     if (managed === undefined || entry === undefined)
       return err(new AnalysisInputError("unload_frida_script"));
-    try {
-      await entry.script.unload();
-      entry.script.message.disconnect(entry.onMessage);
-      managed.scripts.delete(scriptId);
-      return ok(null);
-    } catch (cause: unknown) {
-      return err(providerError("unload_frida_script", cause, managed.remote));
+    const cleanupReason = await this.#releaseScript(managed, entry);
+    return cleanupReason === undefined
+      ? ok(null)
+      : err(
+          providerError(
+            "unload_frida_script",
+            new Error(cleanupReason),
+            managed.remote,
+            cleanupReason,
+          ),
+        );
+  }
+
+  async #releaseScript(
+    managed: ManagedSession,
+    entry: ManagedScript,
+    parentSessionReleased = false,
+  ): Promise<string | undefined> {
+    if (parentSessionReleased || entry.script.isDestroyed)
+      entry.released = true;
+    if (!entry.released) {
+      try {
+        await entry.script.unload();
+        entry.released = true;
+      } catch (cause: unknown) {
+        if (entry.script.isDestroyed) entry.released = true;
+        else return sanitizeError(cause, managed.remote);
+      }
     }
+    try {
+      entry.script.message.disconnect(entry.onMessage);
+    } catch (cause: unknown) {
+      return sanitizeError(cause, managed.remote);
+    }
+    managed.scripts.delete(entry.id);
+    return undefined;
   }
 
   status(sessionId: string): FridaSessionStatus | undefined {
@@ -456,36 +498,60 @@ export class FridaInstrumentationManager implements FridaInstrumentationPort {
     const managed = this.#sessions.get(sessionId);
     if (managed === undefined)
       return err(new AnalysisInputError("close_frida_session"));
-    const failures: string[] = [];
+    const scriptFailures = new Map<string, string>();
+    const cleanupFailures: string[] = [];
+    let parentSessionReleased =
+      managed.state === "detached" || managed.session.isDetached();
+    const shouldResumePausedSpawn =
+      managed.mode === "spawn" &&
+      ((!parentSessionReleased && managed.state === "paused") ||
+        managed.resumeAfterDetachPending);
     for (const entry of [...managed.scripts.values()]) {
-      try {
-        await entry.script.unload();
-        entry.script.message.disconnect(entry.onMessage);
-        managed.scripts.delete(entry.id);
-      } catch (cause: unknown) {
-        failures.push(sanitizeError(cause, managed.remote));
-        entry.script.message.disconnect(entry.onMessage);
-      }
-    }
-    if (managed.mode === "spawn" && managed.state === "paused") {
-      try {
-        await managed.device.resume(managed.pid);
-        managed.state = "running";
-      } catch (cause: unknown) {
-        failures.push(
-          `Unable to resume spawned target: ${sanitizeError(cause, managed.remote)}`,
-        );
-      }
+      const failure = await this.#releaseScript(
+        managed,
+        entry,
+        parentSessionReleased,
+      );
+      if (failure !== undefined) scriptFailures.set(entry.id, failure);
     }
     try {
       if (!managed.session.isDetached()) await managed.session.detach();
       managed.state = "detached";
+      parentSessionReleased = true;
     } catch (cause: unknown) {
-      failures.push(
+      cleanupFailures.push(
         `Unable to detach Frida session: ${sanitizeError(cause, managed.remote)}`,
       );
+      parentSessionReleased =
+        managed.state === "detached" || managed.session.isDetached();
     }
-    if (managed.remote !== undefined && managed.remoteReferenceHeld) {
+    if (parentSessionReleased) {
+      for (const entry of [...managed.scripts.values()]) {
+        const failure = await this.#releaseScript(managed, entry, true);
+        if (failure === undefined) scriptFailures.delete(entry.id);
+        else scriptFailures.set(entry.id, failure);
+      }
+    }
+    if (shouldResumePausedSpawn && managed.scripts.size === 0) {
+      try {
+        await managed.device.resume(managed.pid);
+        managed.state = "running";
+        managed.resumeAfterDetachPending = false;
+      } catch (cause: unknown) {
+        managed.resumeAfterDetachPending = true;
+        cleanupFailures.push(
+          `Unable to resume spawned target: ${sanitizeError(cause, managed.remote)}`,
+        );
+      }
+    }
+    const failures = [...scriptFailures.values(), ...cleanupFailures];
+    if (
+      managed.remote !== undefined &&
+      managed.remoteReferenceHeld &&
+      parentSessionReleased &&
+      managed.scripts.size === 0 &&
+      !managed.resumeAfterDetachPending
+    ) {
       try {
         await this.#releaseRemote(
           managed.deviceManager,

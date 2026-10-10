@@ -1,7 +1,7 @@
 import { setTimeout as delay } from "node:timers/promises";
 
 import { createEvidence, type Evidence } from "../../domain/evidence.js";
-import { jsonValueSchema } from "../../domain/jsonValue.js";
+import { jsonObjectSchema, jsonValueSchema } from "../../domain/jsonValue.js";
 import type { AnalysisError } from "../../domain/analysisErrorBase.js";
 import {
   AnalysisCancelledError,
@@ -14,6 +14,7 @@ import type {
   FridaRemoteConnection,
   FridaScriptObservation,
   FridaScriptSource,
+  FridaSessionObservation,
   FridaSessionStatus,
   StartFridaSessionInput,
 } from "./FridaInstrumentationPort.js";
@@ -35,18 +36,69 @@ export class FridaInstrumentationService {
   }
 
   async startSession(input: StartFridaSessionInput, signal?: AbortSignal) {
+    return this.#startSession(input, signal, "start_frida_session");
+  }
+
+  async #startSession(
+    input: StartFridaSessionInput,
+    signal: AbortSignal | undefined,
+    operation: string,
+  ) {
+    if (signal?.aborted)
+      return err(
+        new AnalysisCancelledError(operation, (signal.reason === undefined ? {} : { cause: signal.reason })),
+      );
     const started = await this.#provider.startSession(input);
     if (!started.ok || !signal?.aborted) return started;
-    const closed = await this.#provider.closeSession(started.value.sessionId);
+    return this.#cancelSession(operation, started.value, input, signal.reason);
+  }
+
+  async #cancelSession(
+    operation: string,
+    session: FridaSessionObservation,
+    input: StartFridaSessionInput,
+    cause: unknown,
+    loaded?: FridaScriptObservation,
+  ): Promise<Result<never, AnalysisError>> {
+    const status = this.#provider.status(session.sessionId);
+    const observation = status ?? {
+      ...session,
+      scripts: [],
+      messages: loaded?.messages ?? [],
+      messagesTruncated: loaded?.messagesTruncated ?? false,
+    };
+    const closed = await this.#provider.closeSession(session.sessionId);
+    const partialObservation = fridaEvidence(
+      operation,
+      {
+        ...sessionStatusOutput(observation),
+        ...(loaded === undefined
+          ? {}
+          : {
+              source_kind: loaded.sourceKind,
+              source_path: loaded.sourcePath,
+              source_sha256: loaded.sourceSha256,
+            }),
+        cleanup_error: closed.ok ? null : closed.error.message,
+        target_resume_observed:
+          observation.mode === "spawn" && observation.state === "running",
+        instrumentation_cleanup: closed.ok
+          ? "released"
+          : "incomplete_or_unknown",
+        target_liveness_after_cleanup: "unknown",
+      },
+      fridaParameters(session.sessionId, input, session.deviceId),
+    );
     return err(
-      new AnalysisCancelledError("start_frida_session", {
-        cause: signal.reason,
+      new AnalysisCancelledError(operation, {
+        ...(cause === undefined ? {} : { cause }),
+        partialObservation,
         ...(closed.ok
           ? {}
           : {
               cleanup: {
                 reason: closed.error.message,
-                resources: [started.value.sessionId],
+                resources: [session.sessionId],
               },
             }),
       }),
@@ -60,11 +112,9 @@ export class FridaInstrumentationService {
     const loaded = await this.#provider.loadScript(sessionId, source);
     return loaded.ok
       ? ok(
-          fridaEvidence(
-            "load_frida_script",
-            scriptOutput(loaded.value),
-            sessionId,
-          ),
+          fridaEvidence("load_frida_script", scriptOutput(loaded.value), {
+            session_id: sessionId,
+          }),
         )
       : loaded;
   }
@@ -85,11 +135,9 @@ export class FridaInstrumentationService {
     const status = this.#provider.status(sessionId);
     return status === undefined
       ? undefined
-      : fridaEvidence(
-          "frida_session_status",
-          sessionStatusOutput(status),
-          sessionId,
-        );
+      : fridaEvidence("frida_session_status", sessionStatusOutput(status), {
+          session_id: sessionId,
+        });
   }
 
   async instrument(
@@ -104,16 +152,35 @@ export class FridaInstrumentationService {
       AnalysisError
     >
   > {
-    const started = await this.startSession(input, signal);
+    const started = await this.#startSession(
+      input,
+      signal,
+      "instrument_with_frida",
+    );
     if (!started.ok) return started;
+    if (signal?.aborted)
+      return this.#cancelSession(
+        "instrument_with_frida",
+        started.value,
+        input,
+        signal.reason,
+      );
     const loaded = await this.#provider.loadScript(
       started.value.sessionId,
       input.source,
     );
+    if (signal?.aborted)
+      return this.#cancelSession(
+        "instrument_with_frida",
+        started.value,
+        input,
+        signal.reason,
+        loaded.ok ? loaded.value : undefined,
+      );
     if (!loaded.ok) {
       const closed = await this.#provider.closeSession(started.value.sessionId);
       return closed.ok
-        ? loaded
+        ? err(withRecoveredCleanup(loaded.error))
         : err(
             withCleanupFailure(
               loaded.error,
@@ -126,6 +193,14 @@ export class FridaInstrumentationService {
       const resumed = await this.#provider.resumeSession(
         started.value.sessionId,
       );
+      if (signal?.aborted)
+        return this.#cancelSession(
+          "instrument_with_frida",
+          started.value,
+          input,
+          signal.reason,
+          loaded.value,
+        );
       if (!resumed.ok) {
         const closed = await this.#provider.closeSession(
           started.value.sessionId,
@@ -144,21 +219,22 @@ export class FridaInstrumentationService {
     try {
       await delay(input.durationMs, undefined, { signal });
     } catch (cause: unknown) {
-      const closed = await this.#provider.closeSession(started.value.sessionId);
-      return err(
-        new AnalysisCancelledError("instrument_with_frida", {
-          cause,
-          ...(closed.ok
-            ? {}
-            : {
-                cleanup: {
-                  reason: closed.error.message,
-                  resources: [started.value.sessionId],
-                },
-              }),
-        }),
+      return this.#cancelSession(
+        "instrument_with_frida",
+        started.value,
+        input,
+        cause,
+        loaded.value,
       );
     }
+    if (signal?.aborted)
+      return this.#cancelSession(
+        "instrument_with_frida",
+        started.value,
+        input,
+        signal.reason,
+        loaded.value,
+      );
     const status = this.#provider.status(started.value.sessionId);
     const observation = status ?? {
       ...started.value,
@@ -177,7 +253,7 @@ export class FridaInstrumentationService {
         source_sha256: loaded.value.sourceSha256,
         cleanup_error: cleanupError,
       },
-      started.value.sessionId,
+      fridaParameters(started.value.sessionId, input, started.value.deviceId),
     );
     return ok({
       evidence,
@@ -197,7 +273,7 @@ export class FridaInstrumentationService {
 const fridaEvidence = (
   operation: string,
   result: unknown,
-  sessionId: string,
+  parameters: unknown,
 ): Evidence =>
   createEvidence(
     undefined,
@@ -205,7 +281,7 @@ const fridaEvidence = (
     {
       predicateType: "rea.frida.instrumentation-observation",
       operation,
-      parameters: { session_id: sessionId },
+      parameters: jsonObjectSchema.parse(parameters),
       result: jsonValueSchema.parse(result),
       confidence: "observed",
       authority: "external-service",
@@ -215,6 +291,35 @@ const fridaEvidence = (
       ],
     },
   );
+
+const fridaParameters = (
+  sessionId: string,
+  input: StartFridaSessionInput,
+  deviceId: string,
+) => ({
+  session_id: sessionId,
+  device_id: deviceId,
+  ...(input.remote === undefined
+    ? {}
+    : {
+        remote: {
+          address: input.remote.address,
+          ...(input.remote.origin === undefined
+            ? {}
+            : { origin: input.remote.origin }),
+          ...(input.remote.keepaliveInterval === undefined
+            ? {}
+            : { keepalive_interval: input.remote.keepaliveInterval }),
+        },
+      }),
+  mode: input.mode,
+  ...(input.mode === "attach"
+    ? { pid: input.pid }
+    : {
+        program: input.program,
+        ...(input.argv === undefined ? {} : { argv: input.argv }),
+      }),
+});
 
 const withCleanupFailure = (
   original: AnalysisError,
@@ -233,6 +338,21 @@ const withCleanupFailure = (
       },
     },
   );
+
+const withRecoveredCleanup = (error: AnalysisError): AnalysisError =>
+  error instanceof AnalysisCapabilityUnavailableError && error.cleanupIncomplete
+    ? new AnalysisCapabilityUnavailableError(
+        error.providerId,
+        error.operation,
+        error.reason,
+        {
+          cause: error.cause,
+          ...(error.userMessage === undefined
+            ? {}
+            : { userMessage: error.userMessage }),
+        },
+      )
+    : error;
 
 const scriptOutput = (script: FridaScriptObservation) => ({
   script_id: script.scriptId,
