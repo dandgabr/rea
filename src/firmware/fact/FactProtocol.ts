@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { jsonValueSchema, type JsonValue } from "../../domain/jsonValue.js";
+import type { JsonValue } from "../../domain/jsonValue.js";
 import { firmwareCorpusResultSchema } from "../../domain/corpus/firmwareCorpus.js";
 
 /** Raw binary and JSON envelope constraints; base64 expansion is measured separately. */
@@ -26,39 +26,84 @@ export const factRedactor = (secret: string | undefined) => {
           encodeURIComponent(secret),
           Buffer.from(secret).toString("base64"),
           Buffer.from(secret).toString("hex"),
+          Buffer.from(secret).toString("hex").toUpperCase(),
           JSON.stringify(secret).slice(1, -1),
         ];
   const percent =
     secret === undefined
       ? undefined
       : new RegExp(
-          [...Buffer.from(secret)]
-            .map((byte) => {
-              const char = String.fromCharCode(byte);
+          [...secret]
+            .map((char) => {
               const escaped = char.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
-              return `(?:${escaped}|%${byte.toString(16).padStart(2, "0")})`;
+              const encoded = [...Buffer.from(char)]
+                .map(
+                  (byte) =>
+                    "%" +
+                    byte
+                      .toString(16)
+                      .padStart(2, "0")
+                      .replace(
+                        /[a-f]/gu,
+                        (hex) => `[${hex}${hex.toUpperCase()}]`,
+                      ),
+                )
+                .join("");
+              return `(?:${escaped}|${encoded})`;
             })
             .join(""),
-          "giu",
+          "gu",
         );
   const redact = (text: string) => {
     for (const value of variants)
       if (value.length) text = text.split(value).join("[REDACTED]");
     return percent === undefined ? text : text.replace(percent, "[REDACTED]");
   };
-  const value = (input: JsonValue): JsonValue =>
-    typeof input === "string"
-      ? redact(input)
-      : Array.isArray(input)
-        ? input.map(value)
-        : input !== null && typeof input === "object"
-          ? Object.fromEntries(
-              Object.entries(input).map(([key, item]) => [
-                redact(key),
-                value(item),
-              ]),
-            )
-          : input;
+  // The parser transfers exclusive ownership. Redact that representation once,
+  // rather than allocating a second expanded producer graph.
+  const value = (input: JsonValue): JsonValue => {
+    if (secret === undefined) return input;
+    if (typeof input === "string") return redact(input);
+    const pending: JsonValue[] = [input];
+    while (pending.length) {
+      const item = pending.pop();
+      if (Array.isArray(item)) {
+        for (let at = 0; at < item.length; at++) {
+          const child = item[at]!;
+          if (typeof child === "string") item[at] = redact(child);
+          else if (child !== null && typeof child === "object")
+            pending.push(child);
+        }
+      } else if (item !== null && typeof item === "object") {
+        for (const key of Object.keys(item)) {
+          const child = item[key]!;
+          const redacted = typeof child === "string" ? redact(child) : child;
+          const replacement = redact(key);
+          if (replacement !== key) {
+            delete item[key];
+            let selected = replacement;
+            let suffix = 1;
+            while (Object.hasOwn(item, selected))
+              selected = `${replacement} (${suffix++})`;
+            Object.defineProperty(item, selected, {
+              value: redacted,
+              enumerable: true,
+              writable: true,
+              configurable: true,
+            });
+          } else
+            Object.defineProperty(item, key, {
+              value: redacted,
+              enumerable: true,
+              writable: true,
+              configurable: true,
+            });
+          if (child !== null && typeof child === "object") pending.push(child);
+        }
+      }
+    }
+    return input;
+  };
   return { text: redact, value };
 };
 
@@ -85,14 +130,19 @@ export async function readFactResponse(
         throw Error("FACT response exceeds its wire byte budget");
       chunks.push(Buffer.from(item.value));
     }
-    return Buffer.concat(chunks, size);
+    const owned = Buffer.allocUnsafeSlow(size);
+    let at = 0;
+    for (const chunk of chunks) {
+      chunk.copy(owned, at);
+      at += chunk.length;
+    }
+    chunks.length = 0;
+    return owned;
   } finally {
     await reader.cancel().catch(() => undefined);
     reader.releaseLock();
   }
 }
-export const parseFactJson = (bytes: Buffer): JsonValue =>
-  jsonValueSchema.parse(JSON.parse(bytes.toString("utf8")));
 export const factResult = (
   input: Parameters<typeof firmwareCorpusResultSchema.parse>[0],
 ) => firmwareCorpusResultSchema.parse(input);
