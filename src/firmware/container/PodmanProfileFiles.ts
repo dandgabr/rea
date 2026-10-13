@@ -158,13 +158,14 @@ export const identifyPodmanProfileFile = (
         );
       const hash = createHash("sha256");
       let size = 0;
-      for await (const chunk of handle.createReadStream({
-        autoClose: false,
-        signal,
-      })) {
+      const buffer = Buffer.allocUnsafe(64 * 1024);
+      for (;;) {
         signal.throwIfAborted();
-        hash.update(chunk);
-        size += chunk.length;
+        const { bytesRead } = await handle.read(buffer, 0, buffer.length, null);
+        signal.throwIfAborted();
+        if (bytesRead === 0) break;
+        hash.update(buffer.subarray(0, bytesRead));
+        size += bytesRead;
       }
       signal.throwIfAborted();
       if (

@@ -34,7 +34,11 @@ lifecycle authority over that helper.
 The SQLite staging budget is 128 MiB per admission, a resource policy rather
 than a SQLite format limit. Admission checks the authoritative size before
 copying and meters each 64 KiB chunk before writing. Stable source FD and path
-generation, absent sidecars and private-copy digest/readback must agree. A
+generation, absent sidecars and private-copy digest/readback must agree. Reads
+and partial writes are awaited on the admitted descriptors, with cancellation
+checks around each operation. A stream abort cannot take over their close
+authority. Failed output-descriptor cleanup retains its private snapshot root;
+retry closes the same descriptor and removes the root without copying again. A
 separate supervised Node helper opens only this private copy, uses a 64 MiB
 JavaScript heap ceiling, a 2 MiB SQLite page cache, no mmap/extensions, fixed
 queries with at most two rows, 64 KiB SQLite value limits and 4 KiB SQL limits.

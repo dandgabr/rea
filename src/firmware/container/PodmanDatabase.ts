@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { createWriteStream } from "node:fs";
-import { chmod, lstat, realpath, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { chmod, lstat, open, realpath, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ProviderProcessSupervisor } from "../../process/ProviderProcess.js";
@@ -9,8 +9,6 @@ import {
   type FirmwareLauncher,
 } from "../FirmwareCommand.js";
 import { launchPodmanDirectClient } from "./PodmanClientCleanup.js";
-import { Transform } from "node:stream";
-import { pipeline } from "node:stream/promises";
 import { z } from "zod";
 import type { ArtifactResourceScope } from "../../artifacts/ArtifactResourceScope.js";
 import { AnalysisError } from "../../domain/analysisErrorBase.js";
@@ -19,8 +17,12 @@ import { ProviderAdapterError } from "../../domain/providerAdapterError.js";
 import { ProviderCleanupError } from "../../domain/providerCleanupError.js";
 import { projectAnalysisError } from "../../domain/analysisErrorProjection.js";
 import { sameRegularFileState } from "../../filesystem/RegularFile.js";
+import { OwnedFileHandle } from "../../filesystem/OwnedFileHandle.js";
 import { PrivateRuntimeRoot } from "../../process/PrivateRuntimeRoot.js";
-import { withFirmwareFiles } from "../FirmwareFiles.js";
+import {
+  FirmwareFileCleanupError,
+  withFirmwareFiles,
+} from "../FirmwareFiles.js";
 import {
   identifyPodmanProfileFile,
   observePodmanProfileFile,
@@ -73,6 +75,7 @@ export const observePodmanDatabase = async (
     prefix: "rea-podman-db-admission-",
   });
   const pending = new Set<ProviderProcessSupervisor>();
+  let snapshotOutput: OwnedFileHandle | undefined;
   let observed:
     | {
         source: PodmanDescriptorIdentity;
@@ -93,6 +96,8 @@ export const observePodmanDatabase = async (
         }
         if (pending.size > 0)
           throw Error("Snapshot parser cleanup remains pending");
+        // A failed output close keeps the exact private snapshot workspace owned.
+        await snapshotOutput?.close();
         await root.close();
       },
     },
@@ -123,34 +128,77 @@ export const observePodmanDatabase = async (
         await noSidecars(path, signal);
         const hash = createHash("sha256");
         let size = 0;
-        const meter = new Transform({
-          transform(chunk: Buffer, _encoding, callback) {
-            size += chunk.length;
-            if (size > PODMAN_DATABASE_SNAPSHOT_BYTES) {
-              callback(
-                podmanProfileUnavailable(
-                  "Database grew beyond the bounded private snapshot resource budget",
-                ),
-              );
-              return;
-            }
-            hash.update(chunk);
-            callback(null, chunk);
-          },
-        });
-        await pipeline(
-          handle.createReadStream({
-            autoClose: false,
-            highWaterMark: 64 * 1024,
-          }),
-          meter,
-          createWriteStream(snapshot, {
-            flags: "wx",
-            mode: 0o600,
-            highWaterMark: 64 * 1024,
-          }),
-          { signal },
+        const output = await open(
+          snapshot,
+          constants.O_WRONLY |
+            constants.O_CREAT |
+            constants.O_EXCL |
+            constants.O_NOFOLLOW |
+            constants.O_NONBLOCK,
+          0o600,
         );
+        snapshotOutput = new OwnedFileHandle(output);
+        const outputOwner = {
+          kind: "file-handle" as const,
+          resource: snapshot,
+          handle: snapshotOutput,
+        };
+        let copyFailure: unknown;
+        try {
+          const buffer = Buffer.allocUnsafe(64 * 1024);
+          for (;;) {
+            signal.throwIfAborted();
+            const { bytesRead } = await handle.read(
+              buffer,
+              0,
+              buffer.length,
+              null,
+            );
+            signal.throwIfAborted();
+            if (bytesRead === 0) break;
+            if (bytesRead > PODMAN_DATABASE_SNAPSHOT_BYTES - size)
+              throw podmanProfileUnavailable(
+                "Database grew beyond the bounded private snapshot resource budget",
+              );
+            let written = 0;
+            while (written < bytesRead) {
+              signal.throwIfAborted();
+              const { bytesWritten } = await output.write(
+                buffer,
+                written,
+                bytesRead - written,
+                null,
+              );
+              signal.throwIfAborted();
+              if (bytesWritten === 0)
+                throw Error("Private database snapshot write made no progress");
+              written += bytesWritten;
+            }
+            hash.update(buffer.subarray(0, bytesRead));
+            size += bytesRead;
+          }
+        } catch (cause: unknown) {
+          copyFailure =
+            cause instanceof AnalysisError
+              ? cause
+              : signal.aborted
+                ? new AnalysisCancelledError("firmware_container_runtime", {
+                    cause,
+                  })
+                : cause;
+          throw copyFailure;
+        } finally {
+          const closed = await scope.release(outputOwner);
+          if (closed.kind === "failed")
+            throw new FirmwareFileCleanupError(
+              scope,
+              snapshot,
+              "firmware_container_runtime",
+              closed.cause,
+              copyFailure,
+              "podman",
+            );
+        }
         await noSidecars(path, signal);
         const current = await lstat(path, { bigint: true });
         if (
