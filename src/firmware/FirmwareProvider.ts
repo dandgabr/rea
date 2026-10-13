@@ -321,12 +321,15 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
         result = firmwareResultSchemas.inspect_firmware_regions.parse({
           engine,
           input_size: target.size,
-          selection: target.selection,
-          regions: normalizeBinwalkReport(
-            report,
-            target.inputPath,
-            target.selection,
-          ),
+          ...(request.input.range === undefined
+            ? {}
+            : { selection: target.selection }),
+          regions: normalizeBinwalkReport(report, target.inputPath, {
+            inputSize: target.size,
+            ...(request.input.range === undefined
+              ? {}
+              : { selection: target.selection }),
+          }),
           coverage: "signature_scan",
         });
         raw = { report, execution: processRun, version_execution: versionRun };

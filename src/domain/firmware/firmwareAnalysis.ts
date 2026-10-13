@@ -183,16 +183,16 @@ export const firmwareResultSchemas = {
   inspect_firmware_regions: z.strictObject({
     engine: firmwareEngineSchema,
     input_size: bytes,
-    selection: firmwareSelectionSchema,
+    selection: firmwareSelectionSchema.optional(),
     regions: z.array(
       z.strictObject({
         provider_id: z.string(),
         offset: bytes.describe(
           "Original-file byte offset, adjusted once from the selection",
         ),
-        local_offset: bytes.describe(
-          "Native byte offset within the immutable selected input",
-        ),
+        local_offset: bytes
+          .describe("Native byte offset within the immutable selected input")
+          .optional(),
         reported_size: bytes,
         signature: z.string(),
         description: z.string(),

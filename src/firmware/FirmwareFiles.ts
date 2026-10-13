@@ -44,7 +44,10 @@ export const hashFirmwareFile = async (
   path: string,
   signal?: AbortSignal,
 ): Promise<string> => {
-  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  const handle = await open(
+    path,
+    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+  );
   const hash = createHash("sha256");
   try {
     if (!(await handle.stat()).isFile())
@@ -70,7 +73,10 @@ export const snapshotFirmware = async (
   const fullPath = join(root, "source", basename(sourcePath));
   const hash = createHash("sha256");
   let size = 0;
-  const handle = await open(source, constants.O_RDONLY | constants.O_NOFOLLOW);
+  const handle = await open(
+    source,
+    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+  );
   try {
     await mkdir(join(root, "source"), { mode: 0o700 });
     const stat = await handle.stat();
@@ -155,7 +161,10 @@ export const readFirmwareReport = async (
   path: string,
   operation: string,
 ): Promise<unknown> => {
-  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  const handle = await open(
+    path,
+    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+  );
   try {
     if (!(await handle.stat()).isFile())
       throw new AnalysisOutputError(operation, "Report is not a regular file");

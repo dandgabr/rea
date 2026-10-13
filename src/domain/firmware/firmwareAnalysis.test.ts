@@ -1,5 +1,8 @@
 import { expect, it } from "vitest";
-import { firmwareInputSchemas } from "./firmwareAnalysis.js";
+import {
+  firmwareInputSchemas,
+  firmwareResultSchemas,
+} from "./firmwareAnalysis.js";
 
 it("preserves legacy provider defaults while selecting strict Unblob inspection options", () => {
   expect(
@@ -70,4 +73,33 @@ it("validates real Unblob option grammars without silently dropping caller choic
       firmwareInputSchemas.extract_firmware.safeParse({ ...base, options })
         .success,
     ).toBe(false);
+});
+
+it("accepts legacy inspection payloads without fabricating selected coordinates or digest", () => {
+  const legacy = {
+    engine: {
+      name: "binwalk",
+      version: "3.1.0",
+      executable_path: "/selected/binwalk",
+      executable_sha256: "a".repeat(64),
+      source_revision: null,
+      worker_count: 1,
+    },
+    input_size: 100,
+    regions: [
+      {
+        provider_id: "native-id",
+        offset: 2,
+        reported_size: 4,
+        signature: "gzip",
+        description: "gzip data",
+        reported_confidence: 250,
+        size_basis: "provider_reported_validation_unknown",
+      },
+    ],
+    coverage: "signature_scan",
+  };
+  expect(firmwareResultSchemas.inspect_firmware_regions.parse(legacy)).toEqual(
+    legacy,
+  );
 });

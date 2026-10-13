@@ -104,6 +104,8 @@ it("binds region observations to exact bytes and preserves provider-reported unc
     reported_size: 4,
     size_basis: "provider_reported_validation_unknown",
   });
+  expect(normalized).not.toHaveProperty("selection");
+  expect(normalized.regions[0]).not.toHaveProperty("local_offset");
   expect(result.value.subject?.local_path).toBe(fixture.path);
   expect(result.value.subject?.format).toBe("file");
   expect(result.value.raw_result).toMatchObject({

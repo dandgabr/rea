@@ -922,8 +922,7 @@ describe("firmware producer boundaries", () => {
     };
     expect(
       normalizeBinwalkReport([record], context.inputPath, {
-        offset: 0,
-        length: 20,
+        inputSize: 20,
       }),
     ).toEqual([]);
     for (const report of [
@@ -940,8 +939,7 @@ describe("firmware producer boundaries", () => {
     ])
       expect(() =>
         normalizeBinwalkReport(report, context.inputPath, {
-          offset: 0,
-          length: 20,
+          inputSize: 20,
         }),
       ).toThrow();
   });
