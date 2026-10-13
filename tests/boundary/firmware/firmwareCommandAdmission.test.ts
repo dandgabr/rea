@@ -3,7 +3,9 @@ import { expect } from "vitest";
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
 import { processTest } from "../../support/process/processFixture.js";
 
-processTest.skipIf(process.platform !== "linux").for(["caller", "deadline"])(
+processTest
+  .skipIf(process.platform !== "linux")
+  .for(["caller", "deadline", "cleanup"])(
   "stops actual executable fingerprint reads at first-chunk %s cancellation",
   async (mode, { processes }) => {
     const root = await createTestTempDirectory("rea-firmware-fingerprint-");
@@ -45,7 +47,11 @@ processTest.skipIf(process.platform !== "linux").for(["caller", "deadline"])(
       closed_handles: 1,
       producer_launches: 0,
       error:
-        mode === "deadline" ? "AnalysisTimeoutError" : "AnalysisCancelledError",
+        mode === "cleanup"
+          ? "ProviderAdapterError"
+          : mode === "deadline"
+            ? "AnalysisTimeoutError"
+            : "AnalysisCancelledError",
     });
   },
 );

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
+import type { ArtifactResourceScope } from "../artifacts/ArtifactResourceScope.js";
 import { join } from "node:path";
 import type { z } from "zod";
 import { SafeOutputTree } from "../artifacts/SafeOutputTree.js";
@@ -11,10 +12,15 @@ import {
   firmwareResultSchemas,
   type FirmwarePartialObservation,
 } from "../domain/firmware/firmwareAnalysis.js";
+import { analysisErrorWithCleanupFailure } from "../domain/analysisErrorCleanup.js";
 import { AnalysisError } from "../domain/analysisErrorBase.js";
 import { ProviderAdapterError } from "../domain/providerAdapterError.js";
 import { createFirmwareExtractionObservation } from "./FirmwareExtractionObservation.js";
-import { hashFirmwareFile, type FirmwareEntry } from "./FirmwareFiles.js";
+import {
+  hashFirmwareFile,
+  withFirmwareFile,
+  type FirmwareEntry,
+} from "./FirmwareFiles.js";
 import type { normalizeUnblobReport } from "./FirmwareReports.js";
 import type { extractionGap } from "../domain/firmware/firmwareAnalysis.js";
 
@@ -95,6 +101,7 @@ export const publishFirmwareExtraction = async (context: {
   maxDepth: number;
   engine: z.infer<typeof firmwareResultSchemas.extract_firmware>["engine"];
   signal: AbortSignal;
+  scope?: ArtifactResourceScope;
   observation?: FirmwarePartialObservation;
   retainCleanup: (tree: SafeOutputTree) => void;
 }) => {
@@ -135,7 +142,12 @@ export const publishFirmwareExtraction = async (context: {
       }
       const logicalPath = `$output/${entry.relativePath}`;
       const reported = context.normalized.files.get(logicalPath);
-      const sha256 = await hashFirmwareFile(entry.path, context.signal);
+      const sha256 = await hashFirmwareFile(
+        entry.path,
+        context.signal,
+        context.scope,
+        "extract_firmware",
+      );
       if (
         (reported?.sha256 !== null &&
           reported?.sha256 !== undefined &&
@@ -147,11 +159,19 @@ export const publishFirmwareExtraction = async (context: {
           "extract_firmware",
           `Extracted bytes disagree with provider report: ${entry.relativePath}`,
         );
-      await tree.write(
-        entry.relativePath,
-        createReadStream(entry.path),
-        { sha256, bytes: entry.size },
+      const ownedTree = tree;
+      await withFirmwareFile(
+        entry.path,
+        "extract_firmware",
         context.signal,
+        context.scope,
+        (handle) =>
+          ownedTree.write(
+            entry.relativePath,
+            handle.createReadStream({ autoClose: false }),
+            { sha256, bytes: entry.size },
+            context.signal,
+          ),
       );
       files.push({
         relative_path: entry.relativePath,
@@ -208,7 +228,7 @@ export const publishFirmwareExtraction = async (context: {
                 : { provenance: observation.provenance }),
             }
           : observation;
-      throw new ProviderCleanupError(
+      const cleanup = new ProviderCleanupError(
         "unblob",
         [context.outputDirectory],
         {
@@ -225,6 +245,13 @@ export const publishFirmwareExtraction = async (context: {
           partialObservation: publishedResult,
         },
       );
+      if (cause instanceof AnalysisError && cause.cleanupIncomplete)
+        throw analysisErrorWithCleanupFailure(
+          cause.retainPartialObservation(publishedResult),
+          cleanup,
+          "extract_firmware",
+        );
+      throw cleanup;
     }
     if (tree?.published === true && result !== undefined) return result;
     if (cause instanceof AnalysisError)

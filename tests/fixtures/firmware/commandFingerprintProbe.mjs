@@ -41,6 +41,8 @@ const originalTimeout = AbortSignal.timeout;
 await descriptor.close();
 const controller = new AbortController();
 const handles = new Set();
+const closeControls = [];
+let allowClose = mode !== "cleanup";
 const events = [];
 let launches = 0;
 const service = new FirmwareAnalysisService(
@@ -54,6 +56,15 @@ prototype.createReadStream = function (...args) {
   const stream = originalStream.apply(this, args);
   if (readlinkSync(`/proc/self/fd/${this.fd}`) === executable) {
     handles.add(this);
+    if (mode === "cleanup") {
+      const originalClose = this.close.bind(this);
+      closeControls.push({ handle: this, originalClose });
+      this.close = async () => {
+        if (!allowClose)
+          throw Error("Injected selected executable close failure");
+        await originalClose();
+      };
+    }
     stream.on("data", (chunk) => {
       events.push({
         bytes: chunk.length,
@@ -81,8 +92,27 @@ try {
   assert.equal(outcome.ok, false);
   assert.equal(
     outcome.error._tag,
-    mode === "deadline" ? "AnalysisTimeoutError" : "AnalysisCancelledError",
+    mode === "cleanup"
+      ? "ProviderAdapterError"
+      : mode === "deadline"
+        ? "AnalysisTimeoutError"
+        : "AnalysisCancelledError",
   );
+  if (mode === "cleanup") {
+    assert.equal(outcome.error.cleanupIncomplete, true);
+    assert.ok(outcome.error.cleanupResources.includes(executable));
+    assert.equal(outcome.error.diagnostics.primary_error.code, "cancelled");
+    const refused = await service.execute("inspect_firmware_regions", {
+      path: input,
+      provider_id: "unblob",
+    });
+    assert.equal(refused.ok, false);
+    assert.equal(refused.error.cleanupIncomplete, true);
+    assert.equal(handles.size, 1);
+    await assert.rejects(service.close());
+    allowClose = true;
+    await service.close();
+  }
   assert.equal(outcome.error.operation, "inspect_firmware_regions");
   assert.equal(launches, 0);
   assert.equal(
@@ -120,5 +150,9 @@ try {
 } finally {
   prototype.createReadStream = originalStream;
   AbortSignal.timeout = originalTimeout;
+  for (const { handle, originalClose } of closeControls) {
+    handle.close = originalClose;
+    if (handle.fd >= 0) await originalClose();
+  }
   await service.close();
 }

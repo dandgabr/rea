@@ -1,3 +1,5 @@
+import type { ArtifactResourceScope } from "../artifacts/ArtifactResourceScope.js";
+import { AnalysisError } from "../domain/analysisErrorBase.js";
 import { randomUUID } from "node:crypto";
 import { access, realpath, stat } from "node:fs/promises";
 import { constants } from "node:fs";
@@ -45,6 +47,7 @@ export const resolveFirmwareCommand = async (
   engine: "binwalk" | "unblob",
   operation: string,
   signal?: AbortSignal,
+  scope?: ArtifactResourceScope,
 ) => {
   signal?.throwIfAborted();
   const variable =
@@ -77,9 +80,10 @@ export const resolveFirmwareCommand = async (
     signal?.throwIfAborted();
     if (!identity.isFile())
       throw new TypeError("Configured path is not a regular file");
-    sha256 = await hashFirmwareFile(command, signal);
+    sha256 = await hashFirmwareFile(command, signal, scope, operation);
     signal?.throwIfAborted();
   } catch (cause: unknown) {
+    if (cause instanceof AnalysisError && cause.cleanupIncomplete) throw cause;
     signal?.throwIfAborted();
     throw firmwareToolUnavailable(
       engine,
@@ -262,11 +266,20 @@ export const readFirmwareCommandReport = async (context: {
   path: string;
   engine: string;
   operation: string;
+  signal?: AbortSignal;
+  scope?: ArtifactResourceScope;
   execution: Awaited<ReturnType<typeof runFirmwareCommand>>;
 }): Promise<unknown> => {
   try {
-    return await readFirmwareReport(context.path, context.operation);
+    return await readFirmwareReport(
+      context.path,
+      context.operation,
+      context.signal,
+      context.scope,
+    );
   } catch (cause: unknown) {
+    if (cause instanceof AnalysisError && cause.cleanupIncomplete) throw cause;
+    context.signal?.throwIfAborted();
     if (context.execution.exit_code === 1)
       throw new ProviderAdapterError(context.engine, context.operation, {
         cause,

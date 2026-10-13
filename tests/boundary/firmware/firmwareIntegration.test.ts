@@ -38,6 +38,10 @@ const gapsWithContinuations = (
     return { ...gap, continuation: instruction };
   });
 };
+const fileCloseFailure = vi.hoisted(() => ({
+  enabled: false,
+  handles: [] as import("node:fs/promises").FileHandle[],
+}));
 
 const directoryCloseFailure = vi.hoisted(() => ({
   mode: "off" as "off" | "transient" | "persistent",
@@ -50,6 +54,18 @@ vi.mock("node:fs/promises", async (importOriginal) => {
     ...filesystem,
     open: async (...args: Parameters<typeof filesystem.open>) => {
       const handle = await filesystem.open(...args);
+      if (
+        fileCloseFailure.enabled &&
+        String(args[0]).endsWith("/extracted/rootfs/config")
+      ) {
+        const close = handle.close.bind(handle);
+        fileCloseFailure.handles.push(handle);
+        handle.close = async () => {
+          if (fileCloseFailure.enabled)
+            throw Error("injected extracted descriptor close failure");
+          await close();
+        };
+      }
       if (
         directoryCloseFailure.mode !== "off" &&
         (await handle.stat()).isDirectory()
@@ -1158,4 +1174,49 @@ it("selects real Unblob skip-extraction inspection without invoking Binwalk", as
   });
   expect(supported.ok && supported.value.provider.id).toBe("binwalk");
   await assertFirmwareCleanup(fixture.launches);
+});
+
+it("retains the descriptor owner when publication rollback also fails", async () => {
+  const fixture = await firmwareFixture();
+  fileCloseFailure.handles.length = 0;
+  fileCloseFailure.enabled = true;
+  const rollback = vi
+    .spyOn(SafeOutputTree.prototype, "rollback")
+    .mockRejectedValue(new Error("injected publication rollback failure"));
+  try {
+    const outcome = await fixture.service.execute("extract_firmware", {
+      path: fixture.path,
+      output_directory: fixture.output,
+    });
+    expect(outcome).toMatchObject({
+      ok: false,
+      error: {
+        cleanupIncomplete: true,
+        partialObservation: {
+          result: {
+            publication_state: "not_committed",
+            tasks: expect.any(Array),
+          },
+        },
+      },
+    });
+    expect(fileCloseFailure.handles.length).toBeGreaterThan(0);
+    expect(fileCloseFailure.handles.every((handle) => handle.fd >= 0)).toBe(
+      true,
+    );
+    fileCloseFailure.enabled = false;
+    rollback.mockRestore();
+    await fixture.close();
+    expect(fileCloseFailure.handles.every((handle) => handle.fd === -1)).toBe(
+      true,
+    );
+    await expect(access(fixture.output)).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  } finally {
+    fileCloseFailure.enabled = false;
+    rollback.mockRestore();
+    for (const handle of fileCloseFailure.handles)
+      if (handle.fd >= 0) await handle.close();
+  }
 });

@@ -54,7 +54,7 @@ if (mode === "snapshot") {
     snapshotFirmware(request(fifo), fifoStage, new AbortController().signal),
     { _tag: "AnalysisInputError" },
   );
-  assert.deepEqual(await readdir(join(fifoStage, "source")), []);
+  await assert.rejects(readdir(join(fifoStage, "source")), { code: "ENOENT" });
 } else if (mode === "hash") {
   await assert.rejects(hashFirmwareFile(fifo), /Not a regular file/);
 } else {
