@@ -363,6 +363,39 @@ const flattenRootObjectUnion = (
   const required = sharedRequiredProperties(branches);
   // A coarse property minimum rejects underspecified objects. Partner fields
   // and exact group membership remain enforced by the canonical runtime parser.
+  // A field unique to a group still needs that group's required partners.
+  // Counting properties alone would let optional fields pad an incomplete pair.
+  const dependencies: Record<string, readonly string[]> = Object.fromEntries(
+    [...variants.keys()].flatMap((name) => {
+      const owners = branches.filter((branch) =>
+        Object.hasOwn(branch.properties ?? {}, name),
+      );
+      const partners = sharedRequiredProperties(owners).filter(
+        (partner) => partner !== name && !required.includes(partner),
+      );
+      return partners.length > 0 ? [[name, partners]] : [];
+    }),
+  );
+  const dependencyKeyword =
+    root.$schema === "http://json-schema.org/draft-07/schema#"
+      ? "dependencies"
+      : "dependentRequired";
+  const declaredDependencies = rest[dependencyKeyword];
+  const combinedDependencies: Record<string, unknown> = isObject(
+    declaredDependencies,
+  )
+    ? { ...declaredDependencies }
+    : {};
+  for (const [name, partners] of Object.entries(dependencies)) {
+    if (!Object.hasOwn(combinedDependencies, name)) {
+      combinedDependencies[name] = partners;
+      continue;
+    }
+    const declared = combinedDependencies[name];
+    combinedDependencies[name] = Array.isArray(declared)
+      ? [...new Set([...declared, ...partners])]
+      : { allOf: [declared, { required: partners }] };
+  }
   const fewestRequired = Math.min(
     ...branches.map((branch) => requiredProperties(branch).length),
   );
@@ -391,6 +424,9 @@ const flattenRootObjectUnion = (
     ),
     ...(required.length > 0 ? { required } : {}),
     ...(fewestRequired > 0 ? { minProperties: fewestRequired } : {}),
+    ...(Object.keys(combinedDependencies).length > 0
+      ? { [dependencyKeyword]: combinedDependencies }
+      : {}),
     ...(branches.every((branch) => branch.additionalProperties === false)
       ? { additionalProperties: false }
       : {}),
