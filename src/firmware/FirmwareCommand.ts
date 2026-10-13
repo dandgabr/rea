@@ -124,16 +124,31 @@ export const runFirmwareCommand = async (context: {
     readonly maxBytes: number;
   }[];
   acceptReportedExtractionFailure?: boolean;
+  /** Host OCI clients have a distinct measured policy; producer limits remain the default. */
+  limitProfile?: "producer" | "container-transport";
   retainCleanup(supervisor: ProviderProcessSupervisor): void;
 }) => {
   const { engine, operation, signal } = context;
   signal.throwIfAborted();
+  if (
+    context.limitProfile === "container-transport" &&
+    context.launcher === undefined
+  )
+    throw firmwareToolUnavailable(
+      engine,
+      operation,
+      "Container transport requires its explicit direct-client cleanup owner",
+    );
   const runId = `rea-firmware-${randomUUID()}`;
   const spawned = await (context.launcher ?? spawnOwnedProviderProcess)({
     command: context.limiter,
     arguments: [
-      `--as=${FIRMWARE_LIMITS.addressSpaceBytes}`,
-      `--fsize=${context.outputBudget?.bytes ?? FIRMWARE_LIMITS.reportBytes}`,
+      ...(context.limitProfile === "container-transport"
+        ? []
+        : [
+            `--as=${FIRMWARE_LIMITS.addressSpaceBytes}`,
+            `--fsize=${context.outputBudget?.bytes ?? FIRMWARE_LIMITS.reportBytes}`,
+          ]),
       "--core=0",
       "--cpu=120",
       "--",
@@ -159,7 +174,14 @@ export const runFirmwareCommand = async (context: {
       ...spawned,
       ownsProcessLifetime: true,
       cleanup:
-        spawned.cleanup ?? (() => cleanupOwnedProcessGroup(spawned.ownership)),
+        spawned.cleanup ??
+        (context.limitProfile === "container-transport"
+          ? async () => ({
+              cleaned: false as const,
+              reason:
+                "Container transport launcher returned no direct-client cleanup owner; group signaling is refused",
+            })
+          : () => cleanupOwnedProcessGroup(spawned.ownership)),
     },
     {
       maxDiagnosticBytes: FIRMWARE_LIMITS.diagnosticBytes,
@@ -266,7 +288,7 @@ export const runFirmwareCommand = async (context: {
         captured_output: { ...captured, arguments: [...context.args] },
       },
       { operation },
-    );
+    ).retainCapturedOutput(captured);
   }
   if (failure !== undefined) throw failure;
   if (
@@ -287,7 +309,7 @@ export const runFirmwareCommand = async (context: {
         stdout_bytes: snapshot.stdout.bytes,
         stderr_bytes: snapshot.stderr.bytes,
       },
-    });
+    }).retainCapturedOutput(captured);
   return {
     stdout: snapshot.stdout,
     stderr: snapshot.stderr,
@@ -296,6 +318,7 @@ export const runFirmwareCommand = async (context: {
     command: context.command,
     args: [...context.args],
     resource_limiter: context.limiter,
+    captured_output: captured,
   };
 };
 
