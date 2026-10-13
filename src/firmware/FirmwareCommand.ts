@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { access, realpath, stat } from "node:fs/promises";
+import { access, lstat, realpath, stat } from "node:fs/promises";
 import { constants } from "node:fs";
 import { isAbsolute } from "node:path";
 import {
@@ -112,6 +112,10 @@ export const runFirmwareCommand = async (context: {
   signal: AbortSignal;
   launcher?: FirmwareLauncher;
   outputBudget?: { root: string; bytes: number; entries: number };
+  boundedOutputFiles?: readonly {
+    readonly path: string;
+    readonly maxBytes: number;
+  }[];
   acceptReportedExtractionFailure?: boolean;
   retainCleanup(supervisor: ProviderProcessSupervisor): void;
 }) => {
@@ -179,6 +183,10 @@ export const runFirmwareCommand = async (context: {
     const deadline = performance.now() + FIRMWARE_LIMITS.timeoutMs;
     while (!(await supervisor.waitForOutputClose(100))) {
       checkDiagnostics();
+      await assertFirmwareOutputBounds(
+        context.boundedOutputFiles ?? [],
+        operation,
+      );
       if (signal.aborted) throw new AnalysisCancelledError(operation);
       if (performance.now() >= deadline)
         throw new AnalysisTimeoutError(operation, FIRMWARE_LIMITS.timeoutMs);
@@ -192,6 +200,10 @@ export const runFirmwareCommand = async (context: {
         );
     }
     checkDiagnostics();
+    await assertFirmwareOutputBounds(
+      context.boundedOutputFiles ?? [],
+      operation,
+    );
     if (signal.aborted) throw new AnalysisCancelledError(operation);
   } catch (cause: unknown) {
     failure = cause;
@@ -200,18 +212,23 @@ export const runFirmwareCommand = async (context: {
   const snapshot = supervisor.snapshot();
   if (stopped.status === "incomplete") {
     context.retainCleanup(supervisor);
-    throw new ProviderCleanupError(engine, [runId, context.cwd], {
-      reason: stopped.reason,
-      leader_pid: spawned.ownership.leaderPid,
-      process_group_id: spawned.ownership.processGroupId,
-      exit_code: snapshot.exitCode ?? null,
-      signal: snapshot.signal ?? null,
-      stdout: snapshot.stdout.text,
-      stderr: snapshot.stderr.text,
-      stdout_bytes: snapshot.stdout.bytes,
-      stderr_bytes: snapshot.stderr.bytes,
-      previous_error: failure instanceof Error ? failure.message : null,
-    });
+    throw new ProviderCleanupError(
+      engine,
+      [runId, context.cwd],
+      {
+        reason: stopped.reason,
+        leader_pid: spawned.ownership.leaderPid,
+        process_group_id: spawned.ownership.processGroupId,
+        exit_code: snapshot.exitCode ?? null,
+        signal: snapshot.signal ?? null,
+        stdout: snapshot.stdout.text,
+        stderr: snapshot.stderr.text,
+        stdout_bytes: snapshot.stdout.bytes,
+        stderr_bytes: snapshot.stderr.bytes,
+        previous_error: failure instanceof Error ? failure.message : null,
+      },
+      { operation },
+    );
   }
   if (failure !== undefined) throw failure;
   if (
@@ -282,5 +299,30 @@ export const readFirmwareCommandReport = async (context: {
       `Tool did not produce the expected complete report: ${context.path}; ${diagnostics}`,
       { cause },
     );
+  }
+};
+
+/** Bound independently growing reports/artifacts without following producer links. */
+export const assertFirmwareOutputBounds = async (
+  files: readonly { readonly path: string; readonly maxBytes: number }[],
+  operation: string,
+): Promise<void> => {
+  for (const file of files) {
+    const stat = await lstat(file.path).catch((cause: unknown) => {
+      if (cause instanceof Error && "code" in cause && cause.code === "ENOENT")
+        return undefined;
+      throw cause;
+    });
+    if (stat === undefined) continue;
+    if (!stat.isFile())
+      throw new AnalysisOutputError(
+        operation,
+        `Private output is not a regular file: ${file.path}`,
+      );
+    if (stat.size > file.maxBytes)
+      throw new AnalysisOutputError(
+        operation,
+        `Private output exceeded ${file.maxBytes} bytes: ${file.path}`,
+      );
   }
 };
