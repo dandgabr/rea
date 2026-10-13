@@ -102,7 +102,11 @@ export const publishFirmwareExtraction = async (context: {
         .map((entry) => `$output/${entry.relativePath}`),
     );
     for (const path of context.normalized.files.keys()) {
-      if (path !== "$input" && !materialized.has(path))
+      if (
+        path !== "$input" &&
+        !materialized.has(path) &&
+        !context.normalized.deleted_files.some((entry) => entry.path === path)
+      )
         throw new AnalysisOutputError(
           "extract_firmware",
           `Reported regular file is absent from materialized output: ${path}`,
@@ -170,6 +174,10 @@ export const publishFirmwareExtraction = async (context: {
         context.normalized,
         context.maxDepth,
       ),
+      tasks: context.normalized.tasks,
+      randomness: context.normalized.randomness,
+      multifiles: context.normalized.multifiles,
+      deleted_files: context.normalized.deleted_files,
       published_bytes: files.reduce((sum, file) => sum + file.size, 0),
     });
     context.signal.throwIfAborted();

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { STDIO_DEFAULT_MAX_BUFFER_SIZE } from "@modelcontextprotocol/server";
-import { access, mkdir, readFile, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { expect, it as test, vi } from "vitest";
 import {
   firmwareFixture,
@@ -131,6 +131,33 @@ it.each(["wrong-input", "bounds"])(
     await assertFirmwareCleanup(fixture.launches);
   },
 );
+
+it("retains native intermediate deletion without publishing a nonexistent file", async () => {
+  const fixture = await firmwareFixture("deleted");
+  const result = await fixture.service.execute("extract_firmware", {
+    path: fixture.path,
+    output_directory: fixture.output,
+  });
+  expect(result.ok).toBe(true);
+  if (!result.ok) return;
+  const normalized = firmwareResultSchemas.extract_firmware.parse(
+    result.value.normalized_result,
+  );
+  expect(normalized.files).toEqual([]);
+  expect(normalized.published_bytes).toBe(0);
+  expect(normalized.deleted_files).toEqual([
+    {
+      path: "$output/rootfs/config",
+      handler: "gzip",
+      reported_sha256: createHash("sha256")
+        .update("firmware=true\n")
+        .digest("hex"),
+    },
+  ]);
+  expect(normalized.diagnostics).toEqual([]);
+  expect(await readdir(fixture.output)).toEqual([]);
+  await assertFirmwareCleanup(fixture.launches);
+});
 
 it("extracts a selected interval with verified file identity and parent-byte lineage", async () => {
   const fixture = await firmwareFixture();
@@ -660,7 +687,7 @@ it("distinguishes a real output file named $input from the selected original", a
   await assertFirmwareCleanup(fixture.launches);
 });
 
-it.each(["hash", "malformed", "budget", "missing-file"])(
+it.each(["hash", "malformed", "budget", "missing-file", "deleted-and-missing"])(
   "rejects invalid or over-budget extraction and rolls back output: %s",
   async (mode) => {
     const fixture = await firmwareFixture(mode);

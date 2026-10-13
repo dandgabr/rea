@@ -3,6 +3,12 @@ import { isAbsolute } from "node:path";
 import { digestSchema } from "../digests.js";
 import { jsonValueSchema, type JsonValue } from "../jsonValue.js";
 import { localPathStringSchema } from "../localPath.js";
+import {
+  firmwareTaskSchema,
+  firmwareRandomnessSchema,
+  firmwareMultiFileSchema,
+  firmwareDeletedFileSchema,
+} from "./firmwareObservations.js";
 
 const bytes = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
 const range = z.strictObject({ offset: bytes, length: bytes.positive() });
@@ -244,6 +250,10 @@ export const firmwareResultSchemas = {
     extraction_continuations: z.array(
       z.strictObject({ id: z.string(), instruction: z.string() }),
     ),
+    tasks: z.array(firmwareTaskSchema).optional(),
+    randomness: z.array(firmwareRandomnessSchema).optional(),
+    multifiles: z.array(firmwareMultiFileSchema).optional(),
+    deleted_files: z.array(firmwareDeletedFileSchema).optional(),
     published_bytes: bytes,
   }),
 } as const;

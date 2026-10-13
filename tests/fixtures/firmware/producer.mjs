@@ -61,6 +61,7 @@ if (args.includes("--version")) {
       ]),
     );
   } else {
+    const deleted = mode === "deleted" || mode === "deleted-and-missing";
     const output = args[args.indexOf("--extract-dir") + 1];
     await mkdir(output, { recursive: true });
     const child =
@@ -72,7 +73,8 @@ if (args.includes("--version")) {
     if (
       mode !== "missing-file" &&
       mode !== "depth-reentry" &&
-      mode !== "depth-orphan"
+      mode !== "depth-orphan" &&
+      !deleted
     )
       await writeFile(child, mode === "budget" ? Buffer.alloc(10000) : content);
     if (mode === "link") await symlink("/etc/passwd", join(output, "escape"));
@@ -286,6 +288,15 @@ if (args.includes("--version")) {
           ...(mode === "depth"
             ? []
             : [hash(mode === "hash" ? "a".repeat(64) : childHash)]),
+          ...(deleted
+            ? [
+                {
+                  __typename__: "ExtractedFileDeletedReport",
+                  path: child,
+                  handler_name: "gzip",
+                },
+              ]
+            : []),
         ],
         subtasks: [],
       },
@@ -376,6 +387,16 @@ if (args.includes("--version")) {
           dependencies: [],
         },
       ];
+    }
+    if (mode === "deleted-and-missing") {
+      const ghost = join(output, "unreported-deletion");
+      const ghostTask = task(ghost, 1, "gzip-id");
+      records[1].subtasks.push(ghostTask);
+      records.push({
+        task: ghostTask,
+        reports: [stat(ghost, content.length), hash(childHash)],
+        subtasks: [],
+      });
     }
     if (
       mode !== "depth-reentry" &&

@@ -4,6 +4,14 @@ import { jsonValueSchema, type JsonValue } from "../domain/jsonValue.js";
 import { digestSchema } from "../domain/digests.js";
 import { uniqueSorted } from "../domain/canonicalOrdering.js";
 import { firmwareLogicalPath } from "./FirmwareFiles.js";
+import { extname } from "node:path";
+import { UNBLOB_DEFAULT_SKIP_MAGIC } from "./UnblobOptions.js";
+import {
+  firmwareTaskSchema,
+  firmwareRandomnessSchema,
+  firmwareMultiFileSchema,
+  firmwareDeletedFileSchema,
+} from "../domain/firmware/firmwareObservations.js";
 
 const integer = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
 const signature = z.object({
@@ -51,7 +59,27 @@ const multiFile = z.object({
   paths: z.array(z.string()),
   extraction_reports: z.array(jsonValueSchema),
 });
-const hashes = z.object({ sha256: digestSchema });
+const hashes = z.object({
+  sha256: digestSchema,
+  md5: z
+    .string()
+    .regex(/^[a-f0-9]{32}$/u)
+    .optional(),
+  sha1: z
+    .string()
+    .regex(/^[a-f0-9]{40}$/u)
+    .optional(),
+});
+const fileMagic = z.object({ magic: z.string(), mime_type: z.string() });
+const measurements = z.object({
+  percentages: z.array(z.number().min(0).max(100)),
+  block_size: integer.positive(),
+  mean: z.number().min(0).max(100),
+});
+const nativeRandomness = z.object({
+  shannon: measurements,
+  chi_square: measurements,
+});
 /**
  * The provider's structured missing-dependency report. Non-strict on purpose:
  * unfamiliar extra fields stay in retained diagnostics, only the dependency
@@ -80,7 +108,41 @@ const known = new Set([
   "UnknownChunkReport",
   "CarveDirectoryReport",
   "MultiFileReport",
+  "ExtractedFileDeletedReport",
 ]);
+
+/** Mirror the native early returns, distinguishing missing processing evidence. */
+const taskDisposition = (context: {
+  task: z.infer<typeof task>;
+  stat: z.infer<typeof stat>;
+  hasHashAndMagic: boolean;
+  reportKinds: readonly string[];
+  maxDepth: number;
+  magicSkipped: boolean;
+  extensionSkipped: boolean;
+  explicitPlugins: boolean;
+}): z.infer<typeof firmwareTaskSchema>["processing_disposition"] => {
+  if (context.task.depth >= context.maxDepth) return "unexamined_depth_limit";
+  if (context.stat.is_dir)
+    return context.task.is_multi_file
+      ? "multifile_consumed"
+      : "directory_enumerated";
+  if (!context.stat.is_file || context.stat.is_link) return "nonregular";
+  if (context.task.is_multi_file) return "multifile_consumed";
+  if (context.stat.size === 0) return "empty";
+  if (context.reportKinds.includes("ChunkReport")) return "examined_recognized";
+  if (context.reportKinds.includes("UnknownChunkReport"))
+    return "examined_unrecognized";
+  if (context.explicitPlugins) return "unknown_plugin_processing";
+  if (
+    !context.hasHashAndMagic ||
+    context.reportKinds.some((kind) => !known.has(kind))
+  )
+    return "unknown_processing";
+  if (context.magicSkipped) return "skipped_magic";
+  if (context.extensionSkipped) return "skipped_extension";
+  return "examined_unrecognized";
+};
 
 const dependencyFailure = z.object({
   __typename__: z.literal("ExtractorDependencyNotFoundReport"),
@@ -180,6 +242,9 @@ export const normalizeUnblobReport = (
     length: number;
     offset: number;
     maxDepth: number;
+    skipMagic?: readonly string[];
+    skipExtensions?: readonly string[];
+    explicitPlugins?: boolean;
   },
 ) => {
   const records = extraction.parse(raw);
@@ -218,6 +283,43 @@ export const normalizeUnblobReport = (
     kind: "missing-extractor-dependency" | "extractor-failure";
   }[] = [];
   const diagnostics: JsonValue[] = [];
+  const tasks: z.infer<typeof firmwareTaskSchema>[] = [];
+  const randomness: z.infer<typeof firmwareRandomnessSchema>[] = [];
+  const deletedFiles: z.infer<typeof firmwareDeletedFileSchema>[] = [];
+  const multifileReports: {
+    inputPath: string;
+    report: z.infer<typeof multiFile>;
+  }[] = [];
+  const addRandomness = (
+    value: unknown,
+    path: string,
+    scope: "whole_file" | "unknown_chunk",
+    offset: number,
+    length: number,
+  ) => {
+    const parsed = nativeRandomness.parse(value);
+    randomness.push(
+      firmwareRandomnessSchema.parse({
+        input_path: path,
+        scope,
+        range: { offset, length },
+        root_file_range:
+          path === "$input"
+            ? { offset: context.offset + offset, length }
+            : null,
+        shannon: {
+          ...parsed.shannon,
+          algorithm: "shannon_entropy",
+          unit: "percent",
+        },
+        chi_square: {
+          ...parsed.chi_square,
+          algorithm: "chi_square_probability",
+          unit: "percent",
+        },
+      }),
+    );
+  };
   const blobOrigins = new Map<string, BlobOrigin>();
   const addBlobOrigin = (
     parentPath: string,
@@ -348,16 +450,106 @@ export const normalizeUnblobReport = (
     const magic = record.reports.find(
       (r) => r.__typename__ === "FileMagicReport",
     );
+    const parsedHash = hash === undefined ? null : hashes.parse(hash);
+    const parsedMagic = magic === undefined ? null : fileMagic.parse(magic);
+    const hasChunks = record.reports.some(
+      (r) =>
+        r.__typename__ === "ChunkReport" ||
+        r.__typename__ === "UnknownChunkReport",
+    );
+    const magicSkipped =
+      parsedMagic !== null &&
+      (context.skipMagic ?? UNBLOB_DEFAULT_SKIP_MAGIC).some((prefix) =>
+        parsedMagic.magic.startsWith(prefix),
+      );
+    const extensionSkipped = (context.skipExtensions ?? [".rlib"]).includes(
+      extname(record.task.path),
+    );
+    const processingDisposition = taskDisposition({
+      task: record.task,
+      stat: parsedStat,
+      hasHashAndMagic: parsedHash !== null && parsedMagic !== null,
+      reportKinds: record.reports.map((r) => r.__typename__),
+      maxDepth: context.maxDepth,
+      magicSkipped,
+      extensionSkipped,
+      explicitPlugins: context.explicitPlugins === true,
+    });
+    tasks.push(
+      firmwareTaskSchema.parse({
+        path,
+        depth: record.task.depth,
+        provider_blob_id: record.task.blob_id,
+        is_multi_file: record.task.is_multi_file,
+        stat: {
+          size: parsedStat.size,
+          is_file: parsedStat.is_file,
+          is_dir: parsedStat.is_dir,
+          is_link: parsedStat.is_link,
+          link_target: parsedStat.link_target,
+        },
+        hashes:
+          parsedHash === null
+            ? null
+            : {
+                md5: parsedHash.md5 ?? null,
+                sha1: parsedHash.sha1 ?? null,
+                sha256: parsedHash.sha256,
+              },
+        magic:
+          parsedMagic === null
+            ? null
+            : {
+                description: parsedMagic.magic,
+                mime_type: parsedMagic.mime_type,
+              },
+        processing_disposition: processingDisposition,
+        disposition_basis: "pinned_native_control_flow",
+        skip_reasons:
+          hasChunks ||
+          record.task.is_multi_file ||
+          record.task.depth >= context.maxDepth
+            ? []
+            : [
+                ...(magicSkipped ? ["magic"] : []),
+                ...(extensionSkipped ? ["extension"] : []),
+              ],
+      }),
+    );
     if (parsedStat.is_file && !parsedStat.is_link)
       files.set(path, {
-        sha256: hash === undefined ? null : hashes.parse(hash).sha256,
-        mimeType:
-          magic === undefined
-            ? null
-            : z.object({ mime_type: z.string() }).parse(magic).mime_type,
+        sha256: parsedHash?.sha256 ?? null,
+        mimeType: parsedMagic?.mime_type ?? null,
         depth: record.task.depth,
       });
     for (const item of record.reports) {
+      if (item.__typename__ === "RandomnessReport")
+        addRandomness(item, path, "whole_file", 0, parsedStat.size);
+      if (item.__typename__ === "ExtractedFileDeletedReport") {
+        const deleted = z
+          .object({ path: z.string(), handler_name: z.string() })
+          .parse(item);
+        if (
+          deleted.path !== record.task.path ||
+          path === "$input" ||
+          !parsedStat.is_file ||
+          parsedStat.is_link
+        )
+          throw new AnalysisOutputError(
+            "extract_firmware",
+            "Deletion report is bound to another task or a non-deletable input",
+          );
+        if (deletedFiles.some((entry) => entry.path === path))
+          throw new AnalysisOutputError(
+            "extract_firmware",
+            `Duplicate deletion report: ${path}`,
+          );
+        deletedFiles.push({
+          path,
+          handler: deleted.handler_name,
+          reported_sha256: parsedHash?.sha256 ?? null,
+        });
+      }
       if (!known.has(item.__typename__))
         diagnostics.push(
           jsonValueSchema.parse({ input_path: path, report: item }),
@@ -402,6 +594,19 @@ export const normalizeUnblobReport = (
             : null;
         const extractionFailed =
           detail !== null && detail.extraction_reports.length > 0;
+        if (detail === null) {
+          const unknown = z
+            .object({ randomness: nativeRandomness.nullable() })
+            .parse(item);
+          if (unknown.randomness !== null)
+            addRandomness(
+              unknown.randomness,
+              path,
+              "unknown_chunk",
+              parsed.start_offset,
+              parsed.size,
+            );
+        }
         if (detail !== null)
           for (const problem of detail.extraction_reports) {
             diagnostics.push(
@@ -436,6 +641,7 @@ export const normalizeUnblobReport = (
       }
       if (item.__typename__ === "MultiFileReport") {
         const parsed = multiFile.parse(item);
+        multifileReports.push({ inputPath: path, report: parsed });
         addBlobOrigin(path, parsed.id, {
           handler: parsed.handler_name,
           range: null,
@@ -528,6 +734,27 @@ export const normalizeUnblobReport = (
       "extract_firmware",
       "Report contains tasks disconnected from the selected input",
     );
+  const tasksByPath = new Map(tasks.map((item) => [item.path, item]));
+  const multifiles = multifileReports.map(({ inputPath, report: item }) =>
+    firmwareMultiFileSchema.parse({
+      input_path: inputPath,
+      provider_id: item.id,
+      handler: item.handler_name,
+      name: item.name,
+      constituents: item.paths.map((nativePath) => {
+        const path = logical(nativePath);
+        const constituent = tasksByPath.get(path);
+        return {
+          path,
+          provider_blob_id: constituent?.provider_blob_id ?? null,
+          depth: constituent?.depth ?? null,
+          is_multi_file: constituent?.is_multi_file ?? null,
+          reported_hashes: constituent?.hashes ?? null,
+          original_file_range: null,
+        };
+      }),
+    }),
+  );
   return {
     files,
     sizes,
@@ -576,9 +803,28 @@ export const normalizeUnblobReport = (
             ? 1
             : 0,
       ),
+    tasks,
+    randomness,
+    multifiles,
+    deleted_files: deletedFiles,
     coverage:
       depths.length > 0 ||
       diagnostics.length > 0 ||
+      multifiles.some((item) =>
+        item.constituents.some(
+          (member) =>
+            member.is_multi_file !== true || member.reported_hashes === null,
+        ),
+      ) ||
+      tasks.some(
+        (item) =>
+          ![
+            "examined_recognized",
+            "directory_enumerated",
+            "multifile_consumed",
+            "empty",
+          ].includes(item.processing_disposition),
+      ) ||
       chunks.some((c) => c.handler === null || c.encrypted === true)
         ? ("partial" as const)
         : ("complete" as const),

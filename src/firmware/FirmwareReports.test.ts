@@ -63,6 +63,285 @@ const nestedDependencyChunk = (id: string, offset: number) => ({
       : [],
 });
 
+const measurements = {
+  __typename__: "RandomnessReport",
+  shannon: { percentages: [12.5, 25], block_size: 10, mean: 18.75 },
+  chi_square: { percentages: [99, 1], block_size: 10, mean: 50 },
+};
+const unrecognized = () => {
+  const record = root();
+  const reports: Record<string, unknown>[] = [
+    ...record.reports.filter((r) => r.__typename__ !== "UnknownChunkReport"),
+    {
+      __typename__: "FileMagicReport",
+      magic: "data",
+      mime_type: "application/octet-stream",
+    },
+    measurements,
+  ];
+  return {
+    ...record,
+    reports,
+  };
+};
+it("retains whole-file percentages without asserting recognized or complete extraction", () => {
+  const record = unrecognized();
+  record.reports[1] = {
+    __typename__: "HashReport",
+    sha256: context.sha256,
+    md5: "b".repeat(32),
+    sha1: "c".repeat(40),
+  };
+  const normalized = normalizeUnblobReport([record], context);
+  expect(normalized).toMatchObject({
+    coverage: "partial",
+    tasks: [
+      {
+        path: "$input",
+        processing_disposition: "examined_unrecognized",
+        hashes: {
+          md5: "b".repeat(32),
+          sha1: "c".repeat(40),
+          sha256: context.sha256,
+        },
+        magic: { description: "data", mime_type: "application/octet-stream" },
+      },
+    ],
+    randomness: [
+      {
+        input_path: "$input",
+        scope: "whole_file",
+        range: { offset: 0, length: 20 },
+        root_file_range: { offset: 64, length: 20 },
+        shannon: {
+          algorithm: "shannon_entropy",
+          unit: "percent",
+          ...measurements.shannon,
+        },
+        chi_square: {
+          algorithm: "chi_square_probability",
+          unit: "percent",
+          ...measurements.chi_square,
+        },
+      },
+    ],
+  });
+  expect(() =>
+    normalizeUnblobReport(
+      [
+        {
+          ...record,
+          reports: [
+            ...record.reports,
+            {
+              ...measurements,
+              shannon: { ...measurements.shannon, percentages: [101] },
+            },
+          ],
+        },
+      ],
+      context,
+    ),
+  ).toThrow();
+});
+it("distinguishes native basename extension skips from examined unrecognized files", () => {
+  const record = unrecognized();
+  const path = "/private/image.rlib";
+  record.task.path = path;
+  record.reports[0] = { ...record.reports[0], path };
+  record.reports = record.reports.filter(
+    (r) => r.__typename__ !== "RandomnessReport",
+  );
+  const normalized = normalizeUnblobReport([record], {
+    ...context,
+    inputPath: path,
+  });
+  expect(normalized).toMatchObject({
+    coverage: "partial",
+    tasks: [{ processing_disposition: "skipped_extension" }],
+    randomness: [],
+  });
+});
+it("retains unknown-chunk measurements and distinguishes a replacement magic policy", () => {
+  const record = root();
+  const normalized = normalizeUnblobReport(
+    [
+      {
+        ...record,
+        reports: record.reports.map((r) =>
+          r.__typename__ === "UnknownChunkReport"
+            ? { ...r, randomness: measurements }
+            : r,
+        ),
+      },
+    ],
+    context,
+  );
+  expect(normalized.randomness).toMatchObject([
+    {
+      scope: "unknown_chunk",
+      input_path: "$input",
+      range: { offset: 0, length: 20 },
+      root_file_range: { offset: 64, length: 20 },
+      shannon: { unit: "percent", mean: 18.75 },
+      chi_square: { algorithm: "chi_square_probability", mean: 50 },
+    },
+  ]);
+  const skipped = unrecognized();
+  skipped.reports[2] = {
+    __typename__: "FileMagicReport",
+    magic: "PNG image data",
+    mime_type: "image/png",
+  };
+  skipped.reports = skipped.reports.filter(
+    (r) => r.__typename__ !== "RandomnessReport",
+  );
+  expect(
+    normalizeUnblobReport([skipped], context).tasks[0]?.processing_disposition,
+  ).toBe("skipped_magic");
+  expect(
+    normalizeUnblobReport([skipped], { ...context, skipMagic: [] }).tasks[0]
+      ?.processing_disposition,
+  ).toBe("examined_unrecognized");
+});
+it("joins unordered multifile constituent identity and hashes without original offsets", () => {
+  const parent = root();
+  const dirPath = `${context.outputRoot}/parts`;
+  const directory = {
+    path: dirPath,
+    depth: 1,
+    blob_id: "container",
+    is_multi_file: false,
+  };
+  const parts = ["first", "second"].map((name, index) => ({
+    task: {
+      path: `${dirPath}/${name}`,
+      depth: 1,
+      blob_id: "container",
+      is_multi_file: true,
+    },
+    reports: [
+      { ...parent.reports[0], path: `${dirPath}/${name}`, size: 4 },
+      {
+        __typename__: "HashReport",
+        md5: String(index + 1).repeat(32),
+        sha1: String(index + 1).repeat(40),
+        sha256: String(index + 1).repeat(64),
+      },
+    ],
+    subtasks: [],
+  }));
+  const normalized = normalizeUnblobReport(
+    [
+      parts[1],
+      {
+        task: directory,
+        reports: [
+          {
+            ...parent.reports[0],
+            path: dirPath,
+            size: 0,
+            is_file: false,
+            is_dir: true,
+          },
+          {
+            __typename__: "MultiFileReport",
+            id: "joined",
+            handler_name: "multipart",
+            name: "volume",
+            paths: parts.map((p) => p.task.path),
+            extraction_reports: [],
+          },
+        ],
+        subtasks: parts.map((p) => p.task),
+      },
+      { ...parent, subtasks: [directory] },
+      parts[0],
+    ],
+    context,
+  );
+  expect(normalized.multifiles).toMatchObject([
+    {
+      input_path: "$output/parts",
+      provider_id: "joined",
+      handler: "multipart",
+      constituents: [
+        {
+          path: "$output/parts/first",
+          provider_blob_id: "container",
+          is_multi_file: true,
+          reported_hashes: { sha256: "1".repeat(64) },
+          original_file_range: null,
+        },
+        {
+          path: "$output/parts/second",
+          provider_blob_id: "container",
+          is_multi_file: true,
+          reported_hashes: { sha256: "2".repeat(64) },
+          original_file_range: null,
+        },
+      ],
+    },
+  ]);
+  expect(
+    normalized.tasks
+      .filter((t) => t.is_multi_file)
+      .map((t) => t.processing_disposition),
+  ).toEqual(["multifile_consumed", "multifile_consumed"]);
+});
+it("retains exact native deletion identity separately from extraction errors", () => {
+  const parent = root();
+  const child = {
+    path: `${context.outputRoot}/intermediate.gz`,
+    depth: 1,
+    blob_id: "child",
+    is_multi_file: false,
+  };
+  const deleted = {
+    __typename__: "ExtractedFileDeletedReport",
+    path: child.path,
+    handler_name: "gzip",
+  };
+  const childRecord = {
+    task: child,
+    subtasks: [],
+    reports: [
+      { ...parent.reports[0], path: child.path },
+      { __typename__: "HashReport", sha256: "d".repeat(64) },
+      deleted,
+    ],
+  };
+  const normalized = normalizeUnblobReport(
+    [childRecord, { ...parent, subtasks: [child] }],
+    context,
+  );
+  expect(normalized).toMatchObject({
+    deleted_files: [
+      {
+        path: "$output/intermediate.gz",
+        handler: "gzip",
+        reported_sha256: "d".repeat(64),
+      },
+    ],
+  });
+  expect(normalized.diagnostics).toEqual([]);
+  expect(() =>
+    normalizeUnblobReport(
+      [
+        {
+          ...childRecord,
+          reports: [
+            ...childRecord.reports.slice(0, 2),
+            { ...deleted, path: `${context.outputRoot}/other.gz` },
+          ],
+        },
+        { ...parent, subtasks: [child] },
+      ],
+      context,
+    ),
+  ).toThrow("another task");
+});
+
 describe("firmware producer chunk observations", () => {
   it("retains unknown chunks and their selected original-file range", () => {
     const normalized = normalizeUnblobReport([root()], context);
