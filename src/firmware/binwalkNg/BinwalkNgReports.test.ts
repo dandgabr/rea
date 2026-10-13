@@ -209,6 +209,76 @@ describe("binwalk-ng extraction and identity validation", () => {
   });
 });
 
+describe("binwalk-ng partial candidate identity ownership", () => {
+  it("retains a valid candidate after an invalid same-file candidate in either order", () => {
+    const valid = record("/private/root");
+    const invalid = record("/private/root", [hit("local", 9, 2)]);
+    for (const raw of [
+      [invalid, valid],
+      [valid, invalid],
+    ]) {
+      let observed: unknown;
+      try {
+        parseBinwalkNgAnalyses(raw, context);
+      } catch (cause) {
+        observed = cause;
+      }
+      expect(observed).toMatchObject({
+        _tag: "AnalysisOutputError",
+        partialObservation: {
+          kind: "firmware",
+          result: {
+            coverage: "partial",
+            analyses: [
+              {
+                file_path: "/private/root",
+                regions: [
+                  {
+                    provider_local_id: "local",
+                    local_range: { offset: 2, length: 4 },
+                    root_file_range: { offset: 66, length: 4 },
+                  },
+                ],
+              },
+            ],
+            diagnostics: expect.arrayContaining([
+              "Duplicate analysis file: /private/root",
+              "Reported signature lies outside its owning file: local",
+            ]),
+          },
+          provenance: { raw_result: raw },
+        },
+      });
+    }
+  });
+  it("diagnoses genuinely valid duplicate files and preserves one valid partial candidate", () => {
+    const valid = record("/private/root");
+    let observed: unknown;
+    try {
+      parseBinwalkNgAnalyses([valid, valid], context);
+    } catch (cause) {
+      observed = cause;
+    }
+    expect(observed).toMatchObject({
+      _tag: "AnalysisOutputError",
+      reason: "Duplicate analysis file: /private/root",
+      partialObservation: {
+        result: {
+          coverage: "partial",
+          analyses: [
+            {
+              file_path: "/private/root",
+              regions: [{ root_file_range: { offset: 66, length: 4 } }],
+            },
+          ],
+          diagnostics: ["Duplicate analysis file: /private/root"],
+        },
+        provenance: { raw_result: [valid, valid] },
+      },
+    });
+  });
+});
+
 describe("binwalk-ng source-native Shannon entropy", () => {
   for (const size of [2047, 2048, 2049]) {
     it(`preserves native block windows and raw bits/byte for ${size} bytes`, () => {

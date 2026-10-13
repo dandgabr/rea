@@ -41,17 +41,12 @@ const fail = (reason: string): never => {
 };
 
 const normalizeAnalysis = (
-  raw: unknown,
+  analysis: z.infer<typeof analysisSchema>["Analysis"],
   files: ReadonlyMap<string, BinwalkNgFileContext>,
-  seen: Set<string>,
 ) => {
-  const { Analysis: analysis } = analysisSchema.parse(raw);
   const file = files.get(analysis.file_path);
   if (file === undefined)
     return fail(`Report references unowned file: ${analysis.file_path}`);
-  if (seen.has(analysis.file_path))
-    return fail(`Duplicate analysis file: ${analysis.file_path}`);
-  seen.add(analysis.file_path);
   const signatures = new Map<string, z.infer<typeof signatureSchema>>();
   const regions = analysis.file_map.map((hit) => {
     if (signatures.has(hit.id))
@@ -126,12 +121,22 @@ export const parseBinwalkNgAnalyses = (
   files: ReadonlyMap<string, BinwalkNgFileContext>,
 ) => {
   const records = z.array(z.unknown()).parse(raw);
-  const seen = new Set<string>();
+  const encountered = new Set<string>();
+  const accepted = new Set<string>();
   const analyses: ReturnType<typeof normalizeAnalysis>[] = [];
   const failures: string[] = [];
   for (const record of records) {
     try {
-      analyses.push(normalizeAnalysis(record, files, seen));
+      const { Analysis: analysis } = analysisSchema.parse(record);
+      if (encountered.has(analysis.file_path))
+        failures.push(`Duplicate analysis file: ${analysis.file_path}`);
+      encountered.add(analysis.file_path);
+      // A rejected candidate cannot reserve the accepted file identity.
+      const normalized = normalizeAnalysis(analysis, files);
+      if (!accepted.has(normalized.file_path)) {
+        accepted.add(normalized.file_path);
+        analyses.push(normalized);
+      }
     } catch (cause: unknown) {
       failures.push(
         cause instanceof AnalysisOutputError
