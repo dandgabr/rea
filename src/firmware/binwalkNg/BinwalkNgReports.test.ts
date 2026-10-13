@@ -39,7 +39,7 @@ describe("binwalk-ng native report boundary", () => {
       root_file_range: { offset: 66, length: 4 },
     });
   });
-  it("retains unsuccessful extraction, declined extraction and unrecognized examined files without false completion", () => {
+  it("retains unsuccessful extraction, declined extraction and unknown examination without false completion", () => {
     const extraction = {
       size: null,
       success: false,
@@ -69,10 +69,77 @@ describe("binwalk-ng native report boundary", () => {
       ],
     });
     expect(parsed[1]).toMatchObject({
-      coverage: "examined_unrecognized",
+      coverage: "none_reported",
+      examination: "unknown",
+      diagnostics: null,
       regions: [],
     });
   });
+  it("cannot distinguish healthy unrecognized bytes from native read failure using identical JSON", () => {
+    // Pinned main.rs substitutes b"" on read_or_map_file failure, then logs
+    // the same empty Analysis emitted by a successful unrecognized scan.
+    const healthyNativeJson = [record("/private/root", [])];
+    const readFailureNativeJson = [record("/private/root", [])];
+    expect(healthyNativeJson).toEqual(readFailureNativeJson);
+    for (const raw of [healthyNativeJson, readFailureNativeJson]) {
+      expect(parseBinwalkNgAnalyses(raw, context)[0]).toMatchObject({
+        file_path: "/private/root",
+        coverage: "none_reported",
+        examination: "unknown",
+        diagnostics: null,
+        regions: [],
+      });
+    }
+    expect(
+      parseBinwalkNgAnalyses([record("/private/root")], context)[0]?.coverage,
+    ).toBe("signature_scan");
+  });
+  it("preserves empty expected context as unknown examination and never invents examined coverage", () => {
+    expect(
+      parseBinwalkNgAnalyses(
+        [record("/private/empty", [])],
+        new Map([["/private/empty", { size: 0, depth: 1, rootOffset: null }]]),
+      )[0],
+    ).toMatchObject({
+      coverage: "none_reported",
+      examination: "unknown",
+      expected_input_size: 0,
+    });
+  });
+  it("preserves valid observations beside invalid records regardless of report order", () => {
+    const valid = record("/private/root");
+    const invalid = record("/private/child", [hit("bad", 9, 2)]);
+    for (const raw of [
+      [valid, invalid],
+      [invalid, valid],
+    ]) {
+      let observed: unknown;
+      try {
+        parseBinwalkNgAnalyses(raw, context);
+      } catch (cause) {
+        observed = cause;
+      }
+      expect(observed).toMatchObject({
+        _tag: "AnalysisOutputError",
+        partialObservation: {
+          kind: "firmware",
+          result: {
+            analyses: [
+              {
+                file_path: "/private/root",
+                regions: [{ provider_local_id: "local" }],
+              },
+            ],
+            coverage: "partial",
+          },
+          provenance: { raw_result: raw },
+        },
+      });
+    }
+  });
+});
+
+describe("binwalk-ng extraction and identity validation", () => {
   it("marks native failed extraction partial independently of declined signatures", () => {
     const extraction = {
       size: 4,
@@ -175,6 +242,26 @@ describe("binwalk-ng source-native Shannon entropy", () => {
       });
     });
   }
+  it("retains native windows larger than one and the final partial block without root correspondence", () => {
+    const size = 4097;
+    const blocks = Array.from({ length: 2049 }, (_, index) => ({
+      start: index * 2,
+      end: Math.min(size, index * 2 + 2),
+      entropy: index === 2048 ? 0 : 1,
+    }));
+    const parsed = parseBinwalkNgEntropy(
+      [{ Entropy: { file: "/private/child", blocks } }],
+      { path: "/private/child", size, rootOffset: null },
+    );
+    expect(parsed.nominal_window_bytes).toBe(2);
+    expect(parsed.blocks.at(-1)).toEqual({
+      start: 4096,
+      end: 4097,
+      entropy: 0,
+      root_file_range: null,
+    });
+    expect(parsed.examined_bytes).toBe(4097);
+  });
   it("rejects missing/discontinuous coverage, wrong native windows and values beyond native units", () => {
     const parse = (blocks: unknown[]) =>
       parseBinwalkNgEntropy([{ Entropy: { file: "/private/root", blocks } }], {
