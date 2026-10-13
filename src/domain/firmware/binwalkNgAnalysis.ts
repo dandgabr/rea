@@ -25,6 +25,9 @@ const outputFields = {
 const signatureName = z
   .string()
   .min(1)
+  .regex(/^[^\uD800-\uDFFF]*$/u, {
+    message: "Signature names must be representable as UTF-8",
+  })
   .refine((name) => !name.includes(",") && !name.includes("\0"), {
     message: "Signature names cannot contain native list separators or NUL",
   });

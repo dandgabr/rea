@@ -82,7 +82,10 @@ rea inspect-firmware-entropy /path/firmware.bin \
 ```
 
 Repeat `--include` or `--exclude` for multiple exact native signature names.
-They are mutually exclusive. `--workers` is positive, default 1; `--no-mmap`
+They are mutually exclusive. Names must be representable as UTF-8: unpaired
+UTF-16 surrogates are refused before provider admission, while valid Unicode,
+intentional U+FFFD, spaces and flag-like names remain exact values. Commas and
+NUL are not native signature-name values. `--workers` is positive, default 1; `--no-mmap`
 preserves the native opt-out. Ng-only options on legacy provider requests are
 rejected rather than ignored. Recursion defaults to true for ng extraction;
 `--no-recursive` disables it. Every output directory must be absent and absolute
@@ -117,7 +120,11 @@ it returns corpus Evidence with `subject: null`, native format/extractor labels,
 reported counts and runtime fingerprints. An extractor label does not establish
 its availability. Ambiguous native display rows remain raw/unparsed and cause
 partial inventory coverage; absent color leaves `requires_search_all` unknown.
-Inventory does not probe the `entropy-plot` feature.
+Inventory does not probe the `entropy-plot` feature. Invalid UTF-8 output is
+retained as raw command evidence with its retained-byte SHA-256, byte counts
+and encoding validity; it is not normalized into format names. Valid U+FFFD
+is preserved. Bounded command captures retain these facts on cancellation,
+output-limit failure and cleanup uncertainty.
 
 ## Interpret the observations
 

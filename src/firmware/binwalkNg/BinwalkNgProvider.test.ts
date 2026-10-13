@@ -342,3 +342,102 @@ it.runIf(real)(
   },
   120000,
 );
+
+it("refuses actual malformed captured inventory bytes while retaining the source digest and valid replacement-character controls", async () => {
+  const { createHash } = await import("node:crypto");
+  const root = await createTestTempDirectory("rea-ng-inventory-utf8-");
+  const manifest = join(root, "runtime.json");
+  await writeFile(
+    manifest,
+    JSON.stringify({ profile: "binwalk-ng-4.0.0", mounts: [] }),
+  );
+  const header = Buffer.from(
+    "Signature Description".padEnd(35) +
+      "Signature Name".padEnd(35) +
+      "Extraction Utility\n" +
+      "source description".padEnd(35),
+  );
+  const suffix = Buffer.from(
+    " ".repeat(31) +
+      "Built-in\nTotal signatures: 1\nExtractable signatures: 1\n",
+  );
+  for (const name of [
+    Buffer.from("gzip"),
+    Buffer.from("gz�p"),
+    Buffer.from([0x67, 0x7a, 0xff, 0x70]),
+  ]) {
+    const bytes = Buffer.concat([header, name, suffix]);
+    const valid = !name.includes(0xff);
+    const provider = new BinwalkNgProvider(
+      {
+        REA_BINWALK_NG_COMMAND: "/usr/bin/true",
+        REA_FIRMWARE_BWRAP_COMMAND: "/usr/bin/true",
+        REA_BINWALK_NG_RUNTIME_MANIFEST: manifest,
+      },
+      async (options) =>
+        spawnOwnedProviderProcess({
+          ...options,
+          command: process.execPath,
+          arguments: [
+            "-e",
+            options.arguments.at(-1) === "--version"
+              ? 'process.stdout.write("binwalk-ng 4.0.0\\n")'
+              : `process.stdout.write(Buffer.from(${JSON.stringify(bytes.toString("hex"))},"hex"))`,
+          ],
+        }),
+    );
+    try {
+      const outcome = await provider.execute({
+        operation: "inspect_firmware_provider",
+        input: { provider_id: "binwalk-ng" },
+      });
+      const expected = {
+        text: bytes.toString("utf8"),
+        bytes: bytes.length,
+        observedBytes: bytes.length,
+        sha256: createHash("sha256").update(bytes).digest("hex"),
+        utf8Valid: valid,
+      };
+      if (valid) {
+        expect(outcome.ok).toBe(true);
+        if (!outcome.ok) throw outcome.error;
+        expect(outcome.value.result).toMatchObject({
+          formats: [{ name: name.toString("utf8") }],
+          inventory_coverage: "native_reported",
+        });
+        expect(outcome.value.rawResult).toMatchObject({
+          inventory_execution: { stdout: expected },
+        });
+      } else {
+        expect(outcome).toMatchObject({
+          ok: false,
+          error: {
+            _tag: "AnalysisOutputError",
+            partialObservation: {
+              result: { inventory_coverage: "partial" },
+              provenance: {
+                raw_result: {
+                  version_execution: {
+                    stdout: { text: "binwalk-ng 4.0.0\n", utf8Valid: true },
+                  },
+                  inventory_execution: { stdout: expected },
+                },
+              },
+            },
+          },
+        });
+        if (outcome.ok) throw Error("Invalid bytes were normalized");
+        const partial = outcome.error.partialObservation;
+        if (
+          partial === undefined ||
+          !("kind" in partial) ||
+          partial.kind !== "firmware"
+        )
+          throw Error("Missing inventory observation");
+        expect(partial.result).not.toHaveProperty("formats");
+      }
+    } finally {
+      await provider.close();
+    }
+  }
+});

@@ -144,6 +144,11 @@ export const inspectBinwalkNgRuntime = async (context: {
   let identity: "unknown" | "changed" = "unknown";
   try {
     observed = await runBinwalkNgCommand(commandContext, ["--list"]);
+    if (observed.stdout.utf8Valid === false)
+      throw new AnalysisOutputError(
+        "inspect_firmware_provider",
+        "Native format inventory contains invalid UTF-8; retained source bytes cannot be normalized",
+      );
     inventory = parseBinwalkNgInventory(observed.stdout.text);
     for (const file of [
       sandbox.command,

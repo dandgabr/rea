@@ -707,3 +707,142 @@ cliTest.skipIf(
   },
   125000,
 );
+
+test("public native UTF8 boundaries refuse unpaired UTF16 without launch and preserve exact valid fixed argv through CLI and MCP", async ({
+  processes,
+}) => {
+  const { root, path, bytes } = await fixture();
+  const names = ["😀", "\ufffd", "two words", "--help"];
+  const launches: string[][] = [];
+  const service = new FirmwareAnalysisService(
+    createFirmwareAnalysisProvider(runtime(), async (options) => {
+      launches.push([...options.arguments]);
+      return spawnOwnedProviderProcess(options);
+    }),
+  );
+  try {
+    for (const operation of [
+      "inspect_firmware_regions",
+      "extract_firmware",
+      "carve_firmware",
+    ] as const) {
+      for (const field of ["include", "exclude"]) {
+        for (const name of ["\ud800", "\udfff"]) {
+          const input = JSON.parse(
+            JSON.stringify({
+              path,
+              provider_id: "binwalk-ng",
+              ...(operation === "inspect_firmware_regions"
+                ? {}
+                : { output_directory: join(root, "never-published") }),
+              options: { [field]: [name] },
+            }),
+          );
+          expect(await service.execute(operation, input)).toMatchObject({
+            ok: false,
+            error: { _tag: "AnalysisInputError" },
+          });
+        }
+      }
+    }
+    expect(launches).toHaveLength(0);
+    const outcome = await service.execute("inspect_firmware_regions", {
+      path,
+      provider_id: "binwalk-ng",
+      options: { exclude: names },
+    });
+    expect(outcome.ok).toBe(true);
+    const argv = launches.at(-1);
+    expect(argv).toContain(`--exclude=${names.join(",")}`);
+    expect(argv?.filter((value) => value === "--help")).toEqual([]);
+    const retained = argv?.find((value) => value.startsWith("--exclude="));
+    expect(Buffer.from(retained ?? "", "utf8").toString("utf8")).toBe(retained);
+  } finally {
+    await service.close();
+  }
+  const cli = await nativeCli(
+    processes,
+    root,
+  )([
+    "inspect-firmware-regions",
+    path,
+    "--provider",
+    "binwalk-ng",
+    ...names.map((name) => `--exclude=${name}`),
+  ]);
+  expect(cli.parameters).toMatchObject({ options: { exclude: names } });
+  const entrypoint =
+    process.env.REA_FIRMWARE_TEST_ENTRYPOINT ?? resolve("scripts/rea.mjs");
+  const client = new Client({ name: "rea-ng-utf8-boundary", version: "1" });
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [entrypoint, "mcp"],
+    env: { PATH: process.env.PATH ?? "", ...runtime(), HOME: root },
+    stderr: "pipe",
+  });
+  try {
+    await client.connect(transport);
+    const advertised = await client.listTools();
+    const ajv = new Ajv2020({ strict: false });
+    for (const operation of [
+      "inspect_firmware_regions",
+      "extract_firmware",
+      "carve_firmware",
+    ] as const) {
+      const tool = advertised.tools.find(
+        (candidate) => candidate.name === operation,
+      );
+      if (!tool) throw Error("Missing named contract");
+      const validate = ajv.compile(tool.inputSchema);
+      for (const field of ["include", "exclude"]) {
+        for (const name of ["\ud800", "\udfff"]) {
+          const input = {
+            path,
+            provider_id: "binwalk-ng",
+            ...(operation === "inspect_firmware_regions"
+              ? {}
+              : { output_directory: join(root, "never-published") }),
+            options: { [field]: [name] },
+          };
+          expect(validate(input)).toBe(false);
+          const rejected = await client.callTool({
+            name: operation,
+            arguments: input,
+          });
+          expect(rejected.isError).toBe(true);
+          const refusal = rejected.content.find(
+            (item) => item.type === "text",
+          )?.text;
+          expect(refusal).toContain("Input validation error");
+          expect(refusal).toContain(
+            "Signature names must be representable as UTF-8",
+          );
+        }
+      }
+    }
+    const valid = {
+      path,
+      provider_id: "binwalk-ng",
+      options: { exclude: names },
+    };
+    const schema = advertised.tools.find(
+      (candidate) => candidate.name === "inspect_firmware_regions",
+    )?.inputSchema;
+    if (!schema) throw Error("Missing scan schema");
+    expect(ajv.compile(schema)(valid)).toBe(true);
+    const called = await client.callTool({
+      name: "inspect_firmware_regions",
+      arguments: valid,
+    });
+    expect(called.isError, JSON.stringify(called)).not.toBe(true);
+    const evidence = toolContract(
+      "inspect_firmware_regions",
+    ).outputSchema.parse(called.structuredContent);
+    expect(evidence.parameters).toMatchObject({ options: { exclude: names } });
+    expect(evidence.subject?.digest.sha256).toBe(digest(bytes));
+  } finally {
+    await client.close();
+    await transport.close();
+  }
+  expect(await readFile(path)).toEqual(bytes);
+}, 125000);
