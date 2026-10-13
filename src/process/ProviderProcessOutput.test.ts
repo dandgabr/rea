@@ -274,6 +274,83 @@ it("reports a reached process memory limit only when the handle observed one", (
   }
 });
 
+it("captures only decoded protocol payload under the shared stdout/stderr budget", () => {
+  const producer = Object.assign(new EventEmitter(), {
+    stdout: new PassThrough(),
+    stderr: new PassThrough(),
+    exitCode: null,
+    signalCode: null,
+    kill: () => false,
+  });
+  const supervisor = new ProviderProcessSupervisor(
+    { process: producer, ownsProcessLifetime: false },
+    { captureStdout: false, maxDiagnosticBytes: 5 },
+  );
+  try {
+    producer.stdout.write("private-control-handshake");
+    expect(supervisor.snapshot().stdout.bytes).toBe(0);
+    producer.stderr.write("ab");
+    const payload = Buffer.from([0x63, 0xff, 0x64, 0x65]);
+    expect(supervisor.captureDecodedStdout(payload)).toEqual({
+      ok: true,
+      value: undefined,
+    });
+    producer.stderr.write("f");
+    const snapshotCalls = vi.spyOn(supervisor, "snapshot");
+    expect(supervisor.diagnosticsTruncated()).toBe(true);
+    expect(snapshotCalls).not.toHaveBeenCalled();
+    expect(supervisor.snapshot()).toMatchObject({
+      diagnosticTruncated: true,
+      stdout: {
+        text: "c�d",
+        bytes: 3,
+        observedBytes: 4,
+        utf8Valid: false,
+        sha256: createHash("sha256")
+          .update(payload.subarray(0, 3))
+          .digest("hex"),
+      },
+      stderr: { text: "ab", bytes: 2, observedBytes: 3, utf8Valid: true },
+    });
+    producer.emit("exit", 1, null);
+    producer.emit("close", 1, null);
+    expect(supervisor.snapshot().stdout.text).not.toContain("private-control");
+  } finally {
+    supervisor.dispose();
+  }
+  expect(supervisor.captureDecodedStdout(Buffer.from("later"))).toMatchObject({
+    ok: false,
+    error: { _tag: "AnalysisOutputError" },
+  });
+  expect(supervisor.snapshot().stdout.observedBytes).toBe(4);
+});
+
+it("refuses decoded payload on a stream already attached for automatic capture", () => {
+  const producer = Object.assign(new EventEmitter(), {
+    stdout: new PassThrough(),
+    stderr: new PassThrough(),
+    exitCode: null,
+    signalCode: null,
+    kill: () => false,
+  });
+  const supervisor = new ProviderProcessSupervisor({
+    process: producer,
+    ownsProcessLifetime: false,
+  });
+  try {
+    producer.stdout.write("native");
+    expect(
+      supervisor.captureDecodedStdout(Buffer.from("native")),
+    ).toMatchObject({ ok: false, error: { _tag: "AnalysisOutputError" } });
+    expect(supervisor.snapshot().stdout).toMatchObject({
+      text: "native",
+      observedBytes: 6,
+    });
+  } finally {
+    supervisor.dispose();
+  }
+});
+
 it("projects provider output loss as truncated diagnostics without inventing a byte count", () => {
   const producer = Object.assign(new EventEmitter(), {
     stdout: new PassThrough(),

@@ -2,6 +2,8 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import type { EventEmitter } from "node:events";
 import type { Readable, Writable } from "node:stream";
+import { AnalysisOutputError } from "../domain/analysisErrorCore.js";
+import { err, ok, type Result } from "../domain/result.js";
 
 import { WindowsOwnedProcess } from "../windows/WindowsOwnedProcess.js";
 
@@ -368,6 +370,11 @@ export class ProviderProcessSupervisor {
     return { code: exit.code, signal: exit.signal };
   }
 
+  /** Observe capacity without allocating a detached copy of retained diagnostics. */
+  diagnosticsTruncated(): boolean {
+    return this.#diagnosticTruncated;
+  }
+
   /** Latest retained output and exit observation, with explicit configured truncation. */
   snapshot(): ProviderProcessSnapshot {
     const outputIncomplete = this.launch.process.outputIncomplete === true;
@@ -450,6 +457,27 @@ export class ProviderProcessSupervisor {
       },
       complete: !incomplete && !this.#diagnosticTruncated,
     };
+  }
+
+  /** Retain post-protocol producer bytes through the same aggregate capture owner.
+   * The format reader alone selects payload bytes; raw handshake/private control
+   * bytes must never reach this method. Automatic stdout capture is incompatible
+   * and disposed owners refuse late delivery without changing their observation.
+   */
+  captureDecodedStdout(bytes: Uint8Array): Result<void, AnalysisOutputError> {
+    if (this.#disposed || this.#options.captureStdout !== false)
+      return err(
+        new AnalysisOutputError(
+          "provider-process-capture",
+          "Decoded stdout requires an active exclusively protocol-owned stream",
+        ),
+      );
+    this.#capture(
+      "stdout",
+      this.#stdout,
+      Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength),
+    );
+    return ok(undefined);
   }
 
   /** Begin a new observation on a retained process without retaining earlier output. */
