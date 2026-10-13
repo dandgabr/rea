@@ -79,6 +79,13 @@ const native = {
   checkout: absoluteLocalPathSchema,
   profile: z.enum(["release-4.4.1", "source-54aed90b"]),
   binding_declaration: z.string().optional(),
+  max_output_bytes: z
+    .number()
+    .int()
+    .min(1)
+    .max(512 * 1024 * 1024)
+    .default(256 * 1024 * 1024),
+  max_output_files: z.number().int().min(1).max(100_000).default(10_000),
 };
 /** Named corpus workflows, separate from local artifact inspection and extraction. */
 export const firmwareCorpusInputs = {

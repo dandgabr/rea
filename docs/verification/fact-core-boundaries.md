@@ -91,13 +91,103 @@ The partial observation preserves independently verified response size, SHA-256
 and selected UID plus written-byte count and cleanup uncertainty. Publication is
 not claimed atomic, and a preexisting caller file is never overwritten or removed.
 
+## Native interchange boundary
+
+The native adapter has independent caller-declared interpreter/checkout/default
+configuration authority. It does not infer a binding to the REST endpoint.
+It checks twelve critical source files against the selected source/release pin,
+observes resolved executable identities while invoking the original selected
+venv path, and fingerprints the exact default `src/config/fact-core-config.toml`.
+Only PostgreSQL source/effective socket directory, port, database and storage root
+leave configuration parsing. Users and passwords are excluded from that
+projection; actual password/API-secret values are privately retained only for
+output redaction. Ordinary `postgres` role text and socket paths remain evidence.
+
+The pinned producer maps literal localhost/127.0.0.1/::1 to
+`/var/run/postgresql`; an explicit absolute Unix socket directory remains exact.
+Remote/unresolved database selectors and relative storage roots are rejected.
+Existing admin DB/storage privileges are prerequisites. REA never creates roles,
+rewrites configuration or supplies `--force`. Python usersite/bytecode and libpq
+ambient credential/service fallback are disabled through the owned command
+environment; HOME/XDG and PostgreSQL fallback paths belong to private staging.
+No ambient environment is persisted. Native storage-directory creation remains
+an upstream effect. Configuration, critical source, interpreter and limiter
+identity checks detect pre/post drift; they do not prevent races or attest every
+installed imported dependency.
+
+Archive preflight uses the locked zip.js reader with CRC32 and overlap checks,
+actual streamed expansion accounting and the bounded owned JSON parser. It never
+extracts archive paths. Duplicate member paths, traversal, links/special members,
+encryption, missing/undeclared binaries, mismatched UID/SHA/size and unsafe
+hierarchies are rejected before any selected import starts. Native object
+metadata can repeat a UID: preserve all ordered occurrences, validate each
+against actual binary bytes, and record the final occurrence selected by the
+pinned importer's dictionary comprehension. Parent graph validation uses those
+effective native objects. Simple native orphans remain explicit; cycles and
+unresolved descendants after one-pass orphan pruning are rejected. Failed
+preflight retains already verified binary hashes, metadata digest and the raw
+producer metadata as partial source evidence.
+
+All selected import archives are preflighted first, then official single-archive
+calls run in caller order under one shared 120s deadline/admission. Exact native
+import counts, existing-target skips and revision refusals are distinct
+observations. A skip/refusal continues; an ambiguous exception/cancel stops the
+remaining archives as `not_started`. Exit0 never establishes import. DB object
+writes precede native file writes and can partially fail or collide with a shared
+UID; no retry, rollback or compensating delete is attempted. Reported counts do
+not independently verify DB/storage commits. Rich diagnostics are interpreted
+only as exact whole acknowledgement rows; wrapped/unrecognized or invalid UTF-8
+output remains unknown. Original diagnostics, retained/observed byte counts,
+retained-byte digests and UTF-8 validity remain explicit after provider redaction.
+
+Exports run official multi-UID selection into private staging, monitor actual
+output growth, verify each selected ZIP and publish verified archives only into
+a fresh absent caller directory. Uncommitted publication is rolled back by the
+owned tree; failed cleanup retains that exact owner for explicit close. Verified
+archive facts survive publication or cleanup failure. Native export uses BytesIO;
+the existing producer limiter applies AS1GiB, CPU120s, file size and zero core
+before launch. Compressed staging and actual expanded bytes have separate
+budgets. Metadata and aggregate retained native diagnostics each have an 8MiB
+budget; crossing the aggregate diagnostic bound can transiently hold one more
+bounded command capture before rejection. This is not a global OOM prevention
+claim. Archive-member digests describe exact bytes; native capture representation
+digest describes serialized command observations before redaction, not a raw
+protocol stream.
+
+Pinned native producer: [source CLI](https://github.com/fkie-cad/FACT_core/blob/54aed90bacb13c484404018101527c72d0bff6c5/src/firmware_import_export.py),
+[source configuration](https://github.com/fkie-cad/FACT_core/blob/54aed90bacb13c484404018101527c72d0bff6c5/src/config.py),
+[source object conversion](https://github.com/fkie-cad/FACT_core/blob/54aed90bacb13c484404018101527c72d0bff6c5/src/objects/file.py),
+[release CLI](https://github.com/fkie-cad/FACT_core/blob/9ac65997a2b0fdaabd61bca2280fa22c441b1f92/src/firmware_import_export.py).
+
+| Native choice       | Adapter disposition                                                    | Verification                                                                    |
+| ------------------- | ---------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| `export UID...`     | Exact official selection; selected namespace has existing DB authority | Real host-native plain export and malformed producer export partial evidence    |
+| `-o/--output`       | Private staging, then fresh verified caller output                     | Actual ZIP byte/hash readback; publication cleanup faults                       |
+| `import ARCHIVE...` | Preflight all; ordered per-archive official calls with shared deadline | Real host-native import, shared-UID exception, skip and strict revision refusal |
+| `-f/--force`        | Excluded; strict producer revision check retained                      | Real zero-exit incompatible-revision refusal                                    |
+| `-h/--help`         | Presentation/developer; no raw CLI proxy                               | Root's direct producer help prerequisite check; not an analyst operation        |
+
 ## Verification scope
 
 Production-boundary tests use actual loopback HTTP and disposable files, including
 real socket disconnection, FIFO admission, exact metadata maxima, malformed
 compact download JSON, contradictory native request echoes, unfinished oversized
-HTTP bodies, cancellation, capacity and cleanup failures. These fixtures
-do not establish real FACT service or native database conformance. Public CLI/MCP
-composition and native import/export require their later integration and a supplied
-disposable service/database lane. No existing corpus or ambient credential store
-is used for these boundary checks.
+HTTP bodies, cancellation, capacity and cleanup failures. Native tests include
+actual supervised fixture processes, malformed byte digests, CRC-only corruption,
+last-occurrence graph semantics, all-input preflight and failed fresh publication.
+Fixture boundaries do not establish actual FACT conformance. Bounded seeded
+archive/config/acknowledgement properties and ten specific consequential
+mutants validate these owning rules; no global fuzz/mutation score is claimed.
+
+A supplied disposable source54aed service and host-native checkout/venv/socket DB
+were separately exercised with the compiled adapters. Host-native plain export
+was verified/published; original gzip imported with a producer acknowledgement,
+then a real shared-UID exception retained partial uncertainty and stopped the
+third selection. Explicit later calls confirmed native existing-target skip and
+strict revision refusal, both exit0. Another real host export omitted an effective
+object for a binary and was rejected; present verified facts remain partial.
+These checks concern supplied disposable resources only. Release native runtime,
+full plugin inventory and public CLI/MCP/container-native composition remain
+unverified until their later integration gates. No existing human corpus,
+configuration rewrite, DB-role installation, push or publication is part of this
+checkpoint.
