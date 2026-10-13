@@ -17,6 +17,7 @@ import { ProviderCleanupError } from "../../../src/domain/providerCleanupError.j
 import { AnalysisOutputError } from "../../../src/domain/analysisErrorCore.js";
 import { FirmwareFileCleanupError } from "../../../src/firmware/FirmwareFiles.js";
 import { FIRMWARE_LIMITS } from "../../../src/firmware/FirmwareRelease.js";
+import { PrivateRuntimeRoot } from "../../../src/process/PrivateRuntimeRoot.js";
 import { toolContract } from "../../../src/contracts/toolContracts.js";
 import { ToolResultDelivery } from "../../../src/server/toolResult.js";
 import { SafeOutputTree } from "../../../src/artifacts/SafeOutputTree.js";
@@ -1184,10 +1185,94 @@ it("selects real Unblob skip-extraction inspection without invoking Binwalk", as
   await assertFirmwareCleanup(fixture.launches);
 });
 
+/** An already stopped, disjoint root must remain independently cleanable. */
+const retainSettledFirmwareWorkspace = async (
+  fixture: Awaited<ReturnType<typeof firmwareFixture>>,
+  enabled: boolean,
+) => {
+  let unrelatedStaging: string | undefined;
+  let retainUnrelated = true;
+  const originalRootClose = PrivateRuntimeRoot.prototype.close;
+  const rootClose = enabled
+    ? vi
+        .spyOn(PrivateRuntimeRoot.prototype, "close")
+        .mockImplementation(async function (this: PrivateRuntimeRoot) {
+          if (
+            retainUnrelated &&
+            (unrelatedStaging === undefined || this.path === unrelatedStaging)
+          ) {
+            unrelatedStaging ??= this.path;
+            throw Error("Injected settled disjoint workspace removal failure");
+          }
+          await originalRootClose.call(this);
+        })
+    : undefined;
+  if (rootClose !== undefined) {
+    const prior = await fixture.service.execute("extract_firmware", {
+      path: fixture.path,
+      output_directory: `${fixture.root}/settled-output`,
+    });
+    expect(prior).toMatchObject({
+      ok: false,
+      error: { cleanupIncomplete: true },
+    });
+    expect(unrelatedStaging).toBeDefined();
+    await expect(access(unrelatedStaging!)).resolves.toBeUndefined();
+  }
+  return {
+    staging: unrelatedStaging,
+    release: () => {
+      retainUnrelated = false;
+    },
+    restore: () => rootClose?.mockRestore(),
+  };
+};
+
+/** Inspect the actual original primary/descriptor owner through bounded cause links. */
+const expectFirmwareDescriptorPrimary = (
+  error: Error,
+  primary: AnalysisOutputError,
+) => {
+  const causeChain: unknown[] = [];
+  let cause: unknown = error;
+  while (cause instanceof Error && !causeChain.includes(cause)) {
+    causeChain.push(cause);
+    cause = cause.cause;
+  }
+  const descriptor = causeChain.find(
+    (error): error is FirmwareFileCleanupError =>
+      error instanceof FirmwareFileCleanupError,
+  );
+  expect(descriptor).toBeDefined();
+  expect(causeChain).toContain(primary);
+  expect(descriptor?.diagnostics?.primary_error).toMatchObject({
+    code: "unreadable_output",
+    details: { reason: primary.reason },
+  });
+  expect(descriptor?.resourceScope).toBeDefined();
+  return descriptor!;
+};
+
+/** The exact staging bytes and live descriptors must survive every failed retry. */
+const expectRetainedFirmwareWorkspace = async (
+  staging: string,
+  bytes: string,
+) => {
+  await expect(access(staging)).resolves.toBeUndefined();
+  expect(fileCloseFailure.handles.every((handle) => handle.fd >= 0)).toBe(true);
+  expect(await readFile(`${staging}/extracted/rootfs/config`, "utf8")).toBe(
+    bytes,
+  );
+};
+
 it.each(["none", "caller", "deadline"] as const)(
   "retains the descriptor owner when publication rollback also fails: %s",
   async (lateAbort) => {
     const fixture = await firmwareFixture();
+    const disjoint = await retainSettledFirmwareWorkspace(
+      fixture,
+      lateAbort === "none",
+    );
     const caller = new AbortController();
     const deadline = new AbortController();
     const timeout =
@@ -1250,25 +1335,11 @@ it.each(["none", "caller", "deadline"] as const)(
         },
       });
       if (outcome.ok) throw Error("Expected compound cleanup failure");
-      const causeChain: unknown[] = [];
-      let cause: unknown = outcome.error;
-      while (cause instanceof Error && !causeChain.includes(cause)) {
-        causeChain.push(cause);
-        cause = cause.cause;
-      }
-      const descriptorError = causeChain.find(
-        (error): error is FirmwareFileCleanupError =>
-          error instanceof FirmwareFileCleanupError,
-      );
-      expect(descriptorError).toBeDefined();
-      expect(causeChain).toContain(primary);
-      expect(descriptorError?.diagnostics?.primary_error).toMatchObject({
-        code: "unreadable_output",
-        details: { reason: primary.reason },
-      });
-      const scope = descriptorError?.resourceScope;
-      expect(scope).toBeDefined();
-      const staging = fixture.launches[0]?.cwd;
+      const scope = expectFirmwareDescriptorPrimary(
+        outcome.error,
+        primary,
+      ).resourceScope;
+      const staging = fixture.launches.at(-1)?.cwd;
       expect(staging).toBeDefined();
       expect(outcome.error.cleanupResources).toEqual(
         expect.arrayContaining([
@@ -1286,6 +1357,7 @@ it.each(["none", "caller", "deadline"] as const)(
       );
       const launches = fixture.launches.length;
       const acquisitions = fileCloseFailure.acquisitions;
+      disjoint.release();
       const blocked = await fixture.service.execute("extract_firmware", {
         path: fixture.path,
         output_directory: fixture.output,
@@ -1296,14 +1368,30 @@ it.each(["none", "caller", "deadline"] as const)(
       });
       expect(fixture.launches).toHaveLength(launches);
       expect(fileCloseFailure.acquisitions).toBe(acquisitions);
+      await expectRetainedFirmwareWorkspace(staging!, bytes);
+
+      if (disjoint.staging !== undefined) {
+        await expect(access(disjoint.staging)).rejects.toMatchObject({
+          code: "ENOENT",
+        });
+        expect(
+          await readFile(
+            `${fixture.root}/settled-output/rootfs/config`,
+            "utf8",
+          ),
+        ).toBe(bytes);
+      }
       await expect(fixture.close()).rejects.toMatchObject({
         cleanupIncomplete: true,
       });
+      await expectRetainedFirmwareWorkspace(staging!, bytes);
       await expect(scope!.retryCleanup()).rejects.toBeDefined();
+      await expectRetainedFirmwareWorkspace(staging!, bytes);
       fileCloseFailure.enabled = false;
       write.mockRestore();
       rollback.mockRestore();
       timeout?.mockRestore();
+      disjoint.restore();
       await fixture.close();
       expect(fixture.launches).toHaveLength(launches);
       expect(fileCloseFailure.handles.every((handle) => handle.fd === -1)).toBe(
@@ -1321,6 +1409,7 @@ it.each(["none", "caller", "deadline"] as const)(
       write.mockRestore();
       rollback.mockRestore();
       timeout?.mockRestore();
+      disjoint.restore();
       await fixture.close();
     }
   },

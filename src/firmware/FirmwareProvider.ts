@@ -116,7 +116,11 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
   );
   readonly #pendingScopes = new Map<
     ArtifactResourceScope,
-    { resources: readonly string[]; operation: string }
+    {
+      resources: readonly string[];
+      operation: string;
+      workspace: PrivateRuntimeRoot | undefined;
+    }
   >();
   readonly #pendingCleanup = new Map<string, PendingFirmwareCleanup>();
   constructor(
@@ -174,6 +178,7 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
 
   async #retryCleanup(): Promise<FirmwareCleanupAttempt> {
     const failures: ProviderCleanupError[] = [];
+    const unsettledWorkspaces = new Set<PrivateRuntimeRoot>();
     let processUnverified = false;
     for (const [scope, observation] of this.#pendingScopes) {
       try {
@@ -181,6 +186,8 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
         this.#pendingScopes.delete(scope);
       } catch (cause: unknown) {
         processUnverified = true;
+        if (observation.workspace !== undefined)
+          unsettledWorkspaces.add(observation.workspace);
         failures.push(
           new ProviderCleanupError(
             "firmware",
@@ -234,6 +241,9 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
           ),
         );
       }
+      // A failed descriptor scope still depends on this exact invocation's staging.
+      // Settled disjoint roots retain their independent cleanup path.
+      if (unsettledWorkspaces.has(pending.root)) continue;
       try {
         await pending.root.close();
         if (pending.tree === undefined) this.#pendingCleanup.delete(path);
@@ -557,6 +567,7 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
           this.#pendingScopes.set(nested.resourceScope, {
             resources: nested.cleanupResources,
             operation: request.operation,
+            workspace: root,
           });
         nested = nested.cause;
       }
