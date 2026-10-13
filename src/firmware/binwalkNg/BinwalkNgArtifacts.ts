@@ -1,12 +1,9 @@
 import { createHash } from "node:crypto";
 import { sameRegularFileState } from "../../filesystem/RegularFile.js";
-import { constants } from "node:fs";
-import { open } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { ArtifactResourceScope } from "../../artifacts/ArtifactResourceScope.js";
 import { SafeOutputTree } from "../../artifacts/SafeOutputTree.js";
 import { SafeOutputTreeCreationFailure } from "../../artifacts/SafeOutputTreeCreationFailure.js";
-import { OwnedFileHandle } from "../../filesystem/OwnedFileHandle.js";
 import { AnalysisOutputError } from "../../domain/analysisErrorCore.js";
 import { ProviderCleanupError } from "../../domain/providerCleanupError.js";
 import { readPngHeaderDimensions } from "../../domain/pngHeader.js";
@@ -14,55 +11,10 @@ import { jsonValueSchema } from "../../domain/jsonValue.js";
 import {
   hashFirmwareFile,
   withFirmwareFile,
+  withFirmwareFiles,
   type FirmwareEntry,
 } from "../FirmwareFiles.js";
 import { FIRMWARE_LIMITS } from "../FirmwareRelease.js";
-
-/** Close every acquired descriptor, retaining failed owners instead of losing them. */
-const withFiles = async <T>(
-  scope: ArtifactResourceScope,
-  paths: readonly string[],
-  operation: string,
-  signal: AbortSignal,
-  use: (handles: readonly OwnedFileHandle[]) => Promise<T>,
-): Promise<T> => {
-  const owners: {
-    kind: "file-handle";
-    resource: string;
-    handle: OwnedFileHandle;
-  }[] = [];
-  try {
-    for (const path of paths) {
-      signal.throwIfAborted();
-      const handle = new OwnedFileHandle(
-        await open(
-          path,
-          constants.O_RDONLY |
-            constants.O_NOFOLLOW |
-            constants.O_NONBLOCK |
-            constants.O_NOCTTY,
-        ),
-      );
-      owners.push({ kind: "file-handle", resource: path, handle });
-      signal.throwIfAborted();
-      if (!(await handle.handle.stat()).isFile())
-        throw new AnalysisOutputError(operation, `Not a regular file: ${path}`);
-    }
-    return await use(owners.map((owner) => owner.handle));
-  } finally {
-    const failed: string[] = [];
-    for (const owner of owners)
-      if ((await scope.release(owner)).kind === "failed")
-        failed.push(owner.resource);
-    if (failed.length > 0)
-      throw new ProviderCleanupError(
-        "binwalk-ng",
-        failed,
-        { reason: "Owned artifact descriptors could not be closed" },
-        { operation },
-      );
-  }
-};
 
 /** A filename is only a candidate: exact source bytes must establish correspondence. */
 export interface BinwalkNgCarvingObservation {
@@ -93,16 +45,16 @@ export const verifyBinwalkNgCarving = async (context: {
     context.entry.size > context.inputSize - offset
   )
     return null;
-  return withFiles(
-    context.scope,
+  return withFirmwareFiles(
     [context.inputPath, context.entry.path],
     context.operation,
     context.signal,
+    context.scope,
     async ([source, candidate]) => {
       if (source === undefined || candidate === undefined)
         throw new Error("Missing acquired comparison descriptors");
-      const sourceInitial = await source.handle.stat({ bigint: true }),
-        candidateInitial = await candidate.handle.stat({ bigint: true });
+      const sourceInitial = await source.stat({ bigint: true }),
+        candidateInitial = await candidate.stat({ bigint: true });
       if (
         sourceInitial.size !== BigInt(context.inputSize) ||
         candidateInitial.size !== BigInt(context.entry.size)
@@ -116,8 +68,8 @@ export const verifyBinwalkNgCarving = async (context: {
         context.signal.throwIfAborted();
         const length = Math.min(a.length, context.entry.size - position);
         const [left, right] = await Promise.all([
-          source.handle.read(a, 0, length, offset + position),
-          candidate.handle.read(b, 0, length, position),
+          source.read(a, 0, length, offset + position),
+          candidate.read(b, 0, length, position),
         ]);
         if (
           left.bytesRead !== length ||
@@ -132,11 +84,11 @@ export const verifyBinwalkNgCarving = async (context: {
       if (
         !sameRegularFileState(
           sourceInitial,
-          await source.handle.stat({ bigint: true }),
+          await source.stat({ bigint: true }),
         ) ||
         !sameRegularFileState(
           candidateInitial,
-          await candidate.handle.stat({ bigint: true }),
+          await candidate.stat({ bigint: true }),
         )
       )
         return null;
@@ -154,6 +106,7 @@ export const verifyBinwalkNgCarving = async (context: {
       context.observe?.(proof);
       return proof;
     },
+    "binwalk-ng",
   );
 };
 
@@ -175,56 +128,78 @@ export const inspectBinwalkNgPng = async (
   operation: string,
   observe?: (png: BinwalkNgPngObservation) => void,
 ): Promise<BinwalkNgPngObservation> => {
-  return withFiles(scope, [path], operation, signal, async ([owner]) => {
-    if (owner === undefined) throw new Error("Missing acquired PNG descriptor");
-    const initial = await owner.handle.stat({ bigint: true });
-    const size = Number(initial.size);
-    if (size < 24 || size > FIRMWARE_LIMITS.reportBytes)
-      throw new AnalysisOutputError(
-        operation,
-        "Native PNG is absent or exceeds the private plot byte budget",
-      );
-    const bytes = Buffer.alloc(24);
-    const read = await owner.handle.read(bytes, 0, bytes.length, 0);
-    if (read.bytesRead !== bytes.length)
-      throw new AnalysisOutputError(
-        operation,
-        "Native PNG header is incomplete",
-      );
-    const dimensions = readPngHeaderDimensions(bytes);
-    if (dimensions?.width !== 2048 || dimensions.height !== 1024)
-      throw new AnalysisOutputError(
-        operation,
-        "Native PNG header does not match the 2048x1024 source profile",
-      );
-    const hash = createHash("sha256");
-    for await (const chunk of owner.handle.createReadStream({
-      autoClose: false,
-      start: 0,
-      signal,
-    })) {
-      signal.throwIfAborted();
-      hash.update(chunk);
-    }
-    if (
-      !sameRegularFileState(initial, await owner.handle.stat({ bigint: true }))
-    )
-      throw new AnalysisOutputError(
-        operation,
-        "Private PNG changed during inspection",
-      );
-    const png: BinwalkNgPngObservation = {
-      ...dimensions,
-      size,
-      sha256: hash.digest("hex"),
-      validation: "png_header",
-      path: null,
-      publication_state: "unpublished",
-    };
-    observe?.(png);
-    return png;
-  });
+  return withFirmwareFiles(
+    [path],
+    operation,
+    signal,
+    scope,
+    async ([owner]) => {
+      if (owner === undefined)
+        throw new Error("Missing acquired PNG descriptor");
+      const initial = await owner.stat({ bigint: true });
+      const size = Number(initial.size);
+      if (size < 24 || size > FIRMWARE_LIMITS.reportBytes)
+        throw new AnalysisOutputError(
+          operation,
+          "Native PNG is absent or exceeds the private plot byte budget",
+        );
+      const bytes = Buffer.alloc(24);
+      const read = await owner.read(bytes, 0, bytes.length, 0);
+      if (read.bytesRead !== bytes.length)
+        throw new AnalysisOutputError(
+          operation,
+          "Native PNG header is incomplete",
+        );
+      const dimensions = readPngHeaderDimensions(bytes);
+      if (dimensions?.width !== 2048 || dimensions.height !== 1024)
+        throw new AnalysisOutputError(
+          operation,
+          "Native PNG header does not match the 2048x1024 source profile",
+        );
+      const hash = createHash("sha256");
+      for await (const chunk of owner.createReadStream({
+        autoClose: false,
+        start: 0,
+        signal,
+      })) {
+        signal.throwIfAborted();
+        hash.update(chunk);
+      }
+      if (!sameRegularFileState(initial, await owner.stat({ bigint: true })))
+        throw new AnalysisOutputError(
+          operation,
+          "Private PNG changed during inspection",
+        );
+      const png: BinwalkNgPngObservation = {
+        ...dimensions,
+        size,
+        sha256: hash.digest("hex"),
+        validation: "png_header",
+        path: null,
+        publication_state: "unpublished",
+      };
+      observe?.(png);
+      return png;
+    },
+    "binwalk-ng",
+  );
 };
+
+export interface BinwalkNgPublication {
+  readonly output_directory: string;
+  readonly files: {
+    relative_path: string;
+    path: string;
+    size: number;
+    sha256: string;
+  }[];
+  readonly unpublished_entries: {
+    relative_path: string;
+    kind: "symlink" | "special";
+    link_target: string | null;
+  }[];
+  readonly published_bytes: number;
+}
 
 /** Fresh, verified regular-file publication; nonregular entries remain metadata. */
 export const publishBinwalkNgFiles = async (context: {
@@ -236,6 +211,7 @@ export const publishBinwalkNgFiles = async (context: {
   expectedIdentities?: ReadonlyMap<string, string> | undefined;
   ownTree(tree: SafeOutputTree): void;
   releaseTree(): void;
+  observePublished?: ((publication: BinwalkNgPublication) => void) | undefined;
 }) => {
   let tree: SafeOutputTree | undefined;
   const files: {
@@ -249,14 +225,14 @@ export const publishBinwalkNgFiles = async (context: {
     kind: "symlink" | "special";
     link_target: string | null;
   }[] = [];
-  let prepared:
-    | {
-        output_directory: string;
-        files: typeof files;
-        unpublished_entries: typeof unpublished;
-        published_bytes: number;
-      }
-    | undefined;
+  let prepared: BinwalkNgPublication | undefined;
+  let notified = false;
+  const observeDurablePublication = () => {
+    if (tree?.published === true && prepared !== undefined && !notified) {
+      notified = true;
+      context.observePublished?.(prepared);
+    }
+  };
   try {
     tree = await SafeOutputTree.create(context.outputDirectory);
     context.ownTree(tree);
@@ -314,9 +290,11 @@ export const publishBinwalkNgFiles = async (context: {
       published_bytes: files.reduce((sum, file) => sum + file.size, 0),
     };
     await tree.commit();
+    observeDurablePublication();
     context.releaseTree();
     return prepared;
   } catch (cause: unknown) {
+    observeDurablePublication();
     if (cause instanceof SafeOutputTreeCreationFailure) {
       tree = cause.tree;
       context.ownTree(tree);

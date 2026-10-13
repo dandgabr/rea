@@ -25,6 +25,7 @@ import {
   publishBinwalkNgFiles,
   verifyBinwalkNgCarving,
   type BinwalkNgCarvingObservation,
+  type BinwalkNgPublication,
 } from "./BinwalkNgArtifacts.js";
 import {
   probeBinwalkNgSandbox,
@@ -164,6 +165,7 @@ export const runBinwalkNgWorkflow = async (
     entries: readonly FirmwareEntry[],
     outputDirectory: string,
     expectedIdentities?: ReadonlyMap<string, string>,
+    observePublished?: (publication: BinwalkNgPublication) => void,
   ) =>
     publishBinwalkNgFiles({
       entries,
@@ -172,6 +174,7 @@ export const runBinwalkNgWorkflow = async (
       operation: request.operation,
       scope: context.scope,
       expectedIdentities,
+      observePublished,
       ownTree: context.ownTree,
       releaseTree: context.releaseTree,
     });
@@ -329,7 +332,7 @@ export const runBinwalkNgWorkflow = async (
         pngObservation = png;
         await recheckRuntime(sandbox, signal, request.operation, context.scope);
         if (request.input.output_directory !== undefined) {
-          const output = await publication(
+          await publication(
             [
               {
                 path: pngPath,
@@ -341,15 +344,19 @@ export const runBinwalkNgWorkflow = async (
             ],
             request.input.output_directory,
             new Map([["entropy.png", png.sha256]]),
+            (output) => {
+              const publishedPng = output.files.find(
+                (file) =>
+                  file.relative_path === "entropy.png" &&
+                  file.sha256 === png.sha256 &&
+                  file.size === png.size,
+              );
+              if (publishedPng !== undefined) {
+                png.path = publishedPng.path;
+                png.publication_state = "published";
+              }
+            },
           );
-          const publishedPng = output.files[0];
-          if (publishedPng?.sha256 !== png.sha256)
-            throw new AnalysisOutputError(
-              request.operation,
-              "Private PNG identity changed before publication",
-            );
-          png.path = publishedPng.path;
-          png.publication_state = "published";
         }
         return {
           result: {

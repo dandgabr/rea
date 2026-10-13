@@ -1,3 +1,4 @@
+import { OwnedFileHandle } from "../../filesystem/OwnedFileHandle.js";
 import { createHash } from "node:crypto";
 import { readlinkSync } from "node:fs";
 import {
@@ -436,3 +437,138 @@ it("bounded workflow fuzz: seed 0x4e473208, 12 protocol cases bind final ranges,
     }
   }
 }, 45000);
+
+it("keeps a durably published PNG facet through repeated directory-close failures and retries cleanup only", async () => {
+  const { root, path, environment } = await setup();
+  const output = join(root, "output");
+  const originalClose = OwnedFileHandle.prototype.close;
+  const originalCommit = SafeOutputTree.prototype.commit;
+  let inCommit = false,
+    launches = 0,
+    failedHandle: OwnedFileHandle | undefined;
+  let failedCloseAttempts = 0;
+  const commit = vi
+    .spyOn(SafeOutputTree.prototype, "commit")
+    .mockImplementation(async function (this: SafeOutputTree) {
+      inCommit = true;
+      try {
+        await originalCommit.call(this);
+      } finally {
+        inCommit = false;
+      }
+    });
+  const close = vi
+    .spyOn(OwnedFileHandle.prototype, "close")
+    .mockImplementation(async function (this: OwnedFileHandle) {
+      if (
+        this === failedHandle ||
+        (inCommit &&
+          this.handle.fd >= 0 &&
+          readlinkSync(`/proc/self/fd/${this.handle.fd}`) === output)
+      ) {
+        failedHandle = this;
+        failedCloseAttempts++;
+        if (failedCloseAttempts <= 2)
+          throw new Error("injected durable directory close failure");
+      }
+      await originalClose.call(this);
+    });
+  const launch = protocolLauncher("png");
+  const provider = new BinwalkNgProvider(environment, async (options) => {
+    launches++;
+    return launch(options);
+  });
+  try {
+    const outcome = await provider.execute({
+      operation: "inspect_firmware_entropy",
+      input: binwalkNgInputSchemas.inspect_firmware_entropy.parse({
+        path,
+        provider_id: "binwalk-ng",
+        output_directory: output,
+      }),
+    });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) throw Error("Expected cleanup uncertainty");
+    const partial = outcome.error.partialObservation;
+    if (
+      partial === undefined ||
+      !("kind" in partial) ||
+      partial.kind !== "firmware"
+    )
+      throw Error("Missing firmware facts");
+    const bytes = await readFile(join(output, "entropy.png"));
+    const digest = createHash("sha256").update(bytes).digest("hex");
+    expect(bytes).toHaveLength(24);
+    expect(outcome.error.cleanupIncomplete).toBe(true);
+    expect(partial.result).toMatchObject({
+      png: {
+        path: join(output, "entropy.png"),
+        publication_state: "published",
+        sha256: digest,
+        size: bytes.length,
+      },
+      retained_observation: {
+        result: {
+          files: [{ path: join(output, "entropy.png"), sha256: digest }],
+        },
+      },
+    });
+    expect(failedCloseAttempts).toBe(2);
+    expect((await failedHandle?.handle.stat())?.isDirectory()).toBe(true);
+    expect(launches).toBe(2);
+    expect(commit).toHaveBeenCalledTimes(1);
+    await provider.close();
+    expect(failedCloseAttempts).toBe(3);
+    expect(failedHandle?.handle.fd).toBe(-1);
+    expect(launches).toBe(2);
+    expect(commit).toHaveBeenCalledTimes(1);
+    expect(await readFile(join(output, "entropy.png"))).toEqual(bytes);
+  } finally {
+    await provider.close();
+    close.mockRestore();
+    commit.mockRestore();
+  }
+});
+
+it("keeps the PNG unpublished when commit fails before establishing durable publication", async () => {
+  const { root, path, environment } = await setup();
+  const output = join(root, "output");
+  const commit = vi
+    .spyOn(SafeOutputTree.prototype, "commit")
+    .mockRejectedValueOnce(new Error("injected before durable commit"));
+  const provider = new BinwalkNgProvider(environment, protocolLauncher("png"));
+  try {
+    const outcome = await provider.execute({
+      operation: "inspect_firmware_entropy",
+      input: binwalkNgInputSchemas.inspect_firmware_entropy.parse({
+        path,
+        provider_id: "binwalk-ng",
+        output_directory: output,
+      }),
+    });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) throw Error("Expected precommit failure");
+    const partial = outcome.error.partialObservation;
+    if (
+      partial === undefined ||
+      !("kind" in partial) ||
+      partial.kind !== "firmware"
+    )
+      throw Error("Missing private PNG observation");
+    expect(partial.result).toMatchObject({
+      png: {
+        path: null,
+        publication_state: "unpublished",
+        sha256:
+          "a7fa5ad7f75cf1bf5d34ad2beaad5b0b2b2c8de4dcc11bceb8e9b0ac891b654a",
+        size: 24,
+      },
+    });
+    await expect(stat(output)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(commit).toHaveBeenCalledTimes(1);
+    expect(outcome.error.cleanupIncomplete).toBe(false);
+  } finally {
+    await provider.close();
+    commit.mockRestore();
+  }
+});

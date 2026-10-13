@@ -1,4 +1,7 @@
-import { AnalysisError } from "../domain/analysisErrorBase.js";
+import {
+  AnalysisError,
+  type AnalysisCapturedOutput,
+} from "../domain/analysisErrorBase.js";
 import { projectAnalysisError } from "../domain/analysisErrorProjection.js";
 import { jsonValueSchema } from "../domain/jsonValue.js";
 import { createHash } from "node:crypto";
@@ -51,16 +54,23 @@ const throwIfFirmwareInventoryCancelled = (
 
 /** Retains a standalone caller's descriptor scope when cleanup cannot be confirmed. */
 export class FirmwareFileCleanupError extends ProviderCleanupError {
+  override readonly capturedOutput: AnalysisCapturedOutput | undefined;
   constructor(
     readonly resourceScope: ArtifactResourceScope,
-    path: string,
+    paths: string | readonly string[],
     operation: string,
     cause: unknown,
     primary?: unknown,
+    providerId = "firmware",
   ) {
     super(
-      "firmware",
-      [path],
+      providerId,
+      [
+        ...new Set([
+          ...(typeof paths === "string" ? [paths] : paths),
+          ...(primary instanceof AnalysisError ? primary.cleanupResources : []),
+        ]),
+      ],
       {
         reason: "Owned firmware descriptor could not be closed",
         ...(primary === undefined
@@ -78,8 +88,22 @@ export class FirmwareFileCleanupError extends ProviderCleanupError {
               ),
             }),
       },
-      { operation, cause },
+      {
+        operation,
+        cause:
+          primary === undefined
+            ? cause
+            : new AggregateError(
+                [primary, cause],
+                "Firmware file operation failed and descriptor cleanup remains incomplete",
+                { cause: primary },
+              ),
+      },
     );
+    this.capturedOutput =
+      primary instanceof AnalysisError && primary.capturedOutput !== undefined
+        ? { ...primary.capturedOutput }
+        : undefined;
     if (
       primary instanceof AnalysisError &&
       primary.partialObservation !== undefined
@@ -88,65 +112,91 @@ export class FirmwareFileCleanupError extends ProviderCleanupError {
   }
 }
 
-/** Authoritative nonblocking regular-file admission and retained descriptor cleanup. */
-export const withFirmwareFile = async <T>(
+/** Authoritative admission and one cleanup owner rule for one or multiple regular files. */
+export const withFirmwareFiles = async <T>(
+  paths: readonly string[],
+  operation: string,
+  signal: AbortSignal | undefined,
+  scope: ArtifactResourceScope | undefined,
+  use: (handles: readonly FileHandle[]) => Promise<T>,
+  providerId = "firmware",
+): Promise<T> => {
+  const resources = scope ?? new ArtifactResourceScope();
+  const owners: {
+    kind: "file-handle";
+    resource: string;
+    handle: OwnedFileHandle;
+  }[] = [];
+  let primary: unknown;
+  try {
+    for (const path of paths) {
+      try {
+        const handle = await openRegularFile(path, {
+          symlinks: "reject",
+          signal,
+        });
+        owners.push({
+          kind: "file-handle",
+          resource: path,
+          handle: new OwnedFileHandle(handle),
+        });
+      } catch (cause: unknown) {
+        if (cause instanceof RegularFileAdmissionFailure) {
+          owners.push({
+            kind: "file-handle",
+            resource: path,
+            handle: cause.owner,
+          });
+          throw cause.cause;
+        }
+        throw cause;
+      }
+      signal?.throwIfAborted();
+    }
+    return await use(owners.map((owner) => owner.handle.handle));
+  } catch (cause: unknown) {
+    primary =
+      cause instanceof AnalysisError
+        ? cause
+        : signal?.aborted
+          ? new AnalysisCancelledError(operation, { cause })
+          : cause;
+    throw cause;
+  } finally {
+    const failures: { resource: string; cause: unknown }[] = [];
+    for (const owner of owners) {
+      const attempt = await resources.release(owner);
+      if (attempt.kind === "failed")
+        failures.push({ resource: owner.resource, cause: attempt.cause });
+    }
+    if (failures.length > 0)
+      throw new FirmwareFileCleanupError(
+        resources,
+        failures.map((f) => f.resource),
+        operation,
+        new AggregateError(
+          failures.map((f) => f.cause),
+          "Firmware descriptors could not be closed",
+        ),
+        primary,
+        providerId,
+      );
+  }
+};
+
+/** One-file consumers share the same acquisition, primary-error and cleanup boundary. */
+export const withFirmwareFile = <T>(
   path: string,
   operation: string,
   signal: AbortSignal | undefined,
   scope: ArtifactResourceScope | undefined,
   use: (handle: FileHandle) => Promise<T>,
-): Promise<T> => {
-  const resources = scope ?? new ArtifactResourceScope();
-  let owner: OwnedFileHandle;
-  try {
-    owner = new OwnedFileHandle(
-      await openRegularFile(path, { symlinks: "reject", signal }),
-    );
-  } catch (cause: unknown) {
-    if (cause instanceof RegularFileAdmissionFailure) {
-      const retry = await resources.release({
-        kind: "file-handle",
-        resource: path,
-        handle: cause.owner,
-      });
-      if (retry.kind === "released") throw cause.cause;
-      throw new FirmwareFileCleanupError(
-        resources,
-        path,
-        operation,
-        cause,
-        signal?.aborted
-          ? new AnalysisCancelledError(operation, { cause: cause.cause })
-          : cause.cause,
-      );
-    }
-    throw cause;
-  }
-  let primary: unknown;
-  try {
-    signal?.throwIfAborted();
-    return await use(owner.handle);
-  } catch (cause: unknown) {
-    primary = signal?.aborted
-      ? new AnalysisCancelledError(operation, { cause })
-      : cause;
-    throw cause;
-  } finally {
-    const attempt = await resources.release({
-      kind: "file-handle",
-      resource: path,
-      handle: owner,
-    });
-    if (attempt.kind === "failed")
-      throw new FirmwareFileCleanupError(
-        resources,
-        path,
-        operation,
-        attempt.cause,
-        primary,
-      );
-  }
-};
+): Promise<T> =>
+  withFirmwareFiles([path], operation, signal, scope, async ([handle]) => {
+    if (handle === undefined)
+      throw new Error("Missing acquired firmware descriptor");
+    return use(handle);
+  });
 
 /** Hash a stable regular tool or extracted file without retaining its bytes in memory. */
 export const hashFirmwareFile = async (
