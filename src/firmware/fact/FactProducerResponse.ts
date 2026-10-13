@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { isDeepStrictEqual } from "node:util";
 import type { JsonValue } from "../../domain/jsonValue.js";
 import {
   corpusUidSchema,
@@ -101,6 +102,83 @@ const schemas = {
   }),
 };
 
+/** Native echoes describe the selection, never an independent target authority. */
+function contradictoryRequest(
+  operation: FirmwareCorpusOperation,
+  input: FirmwareCorpusInput,
+  data: JsonValue,
+): string | undefined {
+  // Statistics are a raw data dictionary, without an envelope/request namespace.
+  if (
+    operation === "inspect_corpus_statistics" ||
+    !isObject(data) ||
+    !isObject(data.request)
+  )
+    return undefined;
+  const request = data.request;
+  const expected: Record<string, JsonValue> = {};
+  if ("uid" in input && input.uid !== undefined) expected.uid = input.uid;
+  if ("plugin" in input) expected.plugin = input.plugin;
+  if ("repacked" in input) expected.tar = input.repacked;
+  if ("search_id" in input) expected.search_id = input.search_id;
+  if (operation === "search_corpus_objects" && "query" in input) {
+    expected.query = input.query;
+    expected.offset = input.offset;
+    expected.limit = input.limit;
+    if (input.kind === "firmware") {
+      expected.recursive = input.recursive;
+      expected.inverted = input.inverted;
+    }
+  }
+  if (
+    operation === "start_corpus_comparison" &&
+    "uids" in input &&
+    "redo" in input
+  ) {
+    expected.uid_list = input.uids;
+    expected.redo = input.redo;
+  }
+  if (operation === "inspect_corpus_comparison" && "uids" in input)
+    expected.compare_id = [...input.uids].sort().join(";");
+  if (
+    operation === "upload_corpus_firmware" &&
+    "metadata" in input &&
+    "plugins" in input
+  ) {
+    Object.assign(expected, input.metadata);
+    expected.requested_analysis_systems = input.plugins;
+    // The returned UID and any binary echo are checked against the snapshot by
+    // the adapter that owns it, rather than reconstructed from a local path.
+  }
+  for (const key of Object.keys(expected))
+    if (
+      Object.hasOwn(request, key) &&
+      !isDeepStrictEqual(request[key], expected[key])
+    )
+      return `Native request.${key} contradicts the caller's selected ${operation}`;
+  if (
+    operation === "reanalyze_corpus_firmware" &&
+    "plugins" in input &&
+    "re_unpack" in input &&
+    Object.hasOwn(request, "update")
+  ) {
+    const actual = request.update;
+    const effective = [
+      ...input.plugins,
+      ...(input.re_unpack && data.status === 0 ? ["unpacker"] : []),
+    ];
+    // FACT removes every unpacker occurrence, schedules plugins, and appends one
+    // unpacker on successful unpack requests. Plugin-validation errors precede
+    // that append. Compare selection/multiplicity, not ordering.
+    if (
+      !Array.isArray(actual) ||
+      !isDeepStrictEqual([...actual].sort(), effective.sort())
+    )
+      return "Native request.update contradicts the selected plugins/re_unpack";
+  }
+  return undefined;
+}
+
 /** Validate the selected producer representation before asserting job or fact completion. */
 export function validateFactProducerResponse(
   operation: FirmwareCorpusOperation,
@@ -137,6 +215,13 @@ export function validateFactProducerResponse(
                       ? "/rest/statistics"
                       : "/rest/binary";
   const error = errorEnvelope.safeParse(data);
+  const contradiction = contradictoryRequest(operation, input, data);
+  if (contradiction !== undefined)
+    return {
+      state: "unknown" as const,
+      diagnostics: [contradiction],
+      collectionDisposition: "retain" as const,
+    };
   if (error.success && error.data.request_resource === resource)
     return {
       state: "failed" as const,

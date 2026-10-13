@@ -1,11 +1,18 @@
 import { writeFile, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { createTestTempDirectory } from "../../../tests/fixtures/temporaryDirectory.js";
-import { FACT_LIMITS, factHash, factUid } from "./FactProtocol.js";
+import {
+  FACT_LIMITS,
+  FactResponseResources,
+  factHash,
+  factUid,
+} from "./FactProtocol.js";
 import { FactFileResources } from "./FactFiles.js";
 import { createServer } from "node:http";
 import { once } from "node:events";
+import { setTimeout as delay } from "node:timers/promises";
 import { afterEach, expect, it } from "vitest";
+import { firmwareCorpusResultSchema } from "../../domain/corpus/firmwareCorpus.js";
 import { FirmwareCorpusService } from "../../application/corpus/FirmwareCorpusService.js";
 import { FactRestProvider } from "./FactRestProvider.js";
 
@@ -90,6 +97,453 @@ const producerAnalysis = (result: Record<string, unknown>) => ({
   summary: [],
   tags: {},
   result,
+});
+it("cancels unfinished oversized response bodies without accumulating transports", async () => {
+  const unfinished = new Set<import("node:net").Socket>();
+  let calls = 0;
+  const server = createServer((req, res) => {
+    calls++;
+    if (calls <= 3) {
+      unfinished.add(req.socket);
+      req.socket.once("close", () => unfinished.delete(req.socket));
+      res.writeHead(200, {
+        "content-length": String(FACT_LIMITS.jsonBytes + 1),
+      });
+      res.write("{"); // Deliberately never finish the rejected body.
+    } else {
+      res.end(
+        JSON.stringify({
+          status: 0,
+          timestamp: 42,
+          request_resource: "/rest/status",
+          system_status: { frontend: {}, database: {}, backend: {} },
+          plugins: {},
+        }),
+      );
+    }
+  });
+  servers.push(server);
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  if (!address || typeof address === "string") throw Error("address");
+  const connection = {
+    endpoint: `http://127.0.0.1:${address.port}`,
+    profile: "source-54aed90b" as const,
+  };
+  const service = new FirmwareCorpusService(new FactRestProvider());
+  try {
+    for (let at = 0; at < 3; at++) {
+      const result = await service.execute("inspect_firmware_corpus", {
+        connection,
+      });
+      if (!result.ok) throw result.error;
+      const resultObservation = firmwareCorpusResultSchema.parse(
+        result.value.normalized_result,
+      );
+      expect(resultObservation.state).toBe("unknown");
+      expect(resultObservation.diagnostics.join(" ")).toContain(
+        "wire byte budget",
+      );
+      for (let waited = 0; unfinished.size && waited < 100; waited++)
+        await delay(10);
+      expect(unfinished.size).toBe(0);
+    }
+    const admitted = await service.execute("inspect_firmware_corpus", {
+      connection,
+    });
+    if (!admitted.ok) throw admitted.error;
+    const admittedObservation = firmwareCorpusResultSchema.parse(
+      admitted.value.normalized_result,
+    );
+    expect(admittedObservation.state).toBe("completed");
+    await service.close();
+    for (let at = 0; unfinished.size && at < 100; at++) await delay(10);
+    expect(unfinished.size).toBe(0);
+    expect(calls).toBe(4);
+  } finally {
+    await service.close();
+  }
+});
+
+it("binds reanalysis acknowledgements to the selected UID and effective plugin/unpacker selection", async () => {
+  let reply: Record<string, unknown> = {};
+  let calls = 0;
+  const connection = await fixture(() => {
+    calls++;
+    return { body: { status: 0, request: reply } };
+  });
+  const service = new FirmwareCorpusService(new FactRestProvider());
+  const other = "b".repeat(64) + "_3";
+  try {
+    for (const [request, re_unpack, state] of [
+      [{ uid, update: ["file_type", "file_hashes"] }, false, "accepted"],
+      [{ uid: other, update: ["file_type", "file_hashes"] }, false, "unknown"],
+      [{ uid, update: ["qemu_exec"] }, false, "unknown"],
+      [
+        { uid, update: ["file_hashes", "unpacker", "file_type"] },
+        true,
+        "accepted",
+      ],
+      [{ uid, update: ["file_type", "file_hashes"] }, true, "unknown"],
+      [
+        { uid, update: ["file_type", "file_hashes", "unpacker"] },
+        false,
+        "unknown",
+      ],
+      [
+        { uid, update: ["file_type", "file_type", "file_hashes"] },
+        false,
+        "unknown",
+      ],
+    ] as const) {
+      reply = request;
+      const result = await service.execute("reanalyze_corpus_firmware", {
+        connection,
+        uid,
+        plugins: ["file_type", "file_hashes"],
+        re_unpack,
+      });
+      if (!result.ok) throw result.error;
+      const resultObservation = firmwareCorpusResultSchema.parse(
+        result.value.normalized_result,
+      );
+      expect(resultObservation.state).toBe(state);
+      expect(resultObservation.data).toMatchObject({ request });
+      expect(resultObservation.raw_sha256).toMatch(/^[a-f0-9]{64}$/u);
+      if (state === "unknown")
+        expect(resultObservation.diagnostics.join(" ")).toContain("request");
+    }
+    expect(calls).toBe(7);
+  } finally {
+    await service.close();
+  }
+});
+
+it("rejects contradictory deletion and single-file analysis request echoes without retry", async () => {
+  let request: Record<string, unknown> = { uid };
+  let calls = 0;
+  const connection = await fixture((url, method) => {
+    calls++;
+    return {
+      body: {
+        status: 0,
+        request,
+        ...(url.pathname.startsWith("/rest/analysis")
+          ? method === "PUT"
+            ? { success: true }
+            : { analysis: producerAnalysis({ password: "finding" }) }
+          : { deleted_files: 1 }),
+      },
+    };
+  });
+  const service = new FirmwareCorpusService(new FactRestProvider());
+  try {
+    for (const selected of [uid, "b".repeat(64) + "_3"]) {
+      request = { uid: selected };
+      const result = await service.execute("delete_corpus_firmware", {
+        connection,
+        uid,
+      });
+      if (!result.ok) throw result.error;
+      const resultObservation = firmwareCorpusResultSchema.parse(
+        result.value.normalized_result,
+      );
+      expect(resultObservation.state).toBe(
+        selected === uid ? "completed" : "unknown",
+      );
+      expect(resultObservation.data).toMatchObject({
+        request,
+        deleted_files: 1,
+      });
+    }
+    for (const operation of [
+      "inspect_corpus_analysis",
+      "enqueue_corpus_analysis",
+    ] as const) {
+      for (const plugin of ["file_type", "qemu_exec"]) {
+        request = { uid, plugin };
+        const result = await service.execute(operation, {
+          connection,
+          uid,
+          plugin: "file_type",
+        });
+        if (!result.ok) throw result.error;
+        const resultObservation = firmwareCorpusResultSchema.parse(
+          result.value.normalized_result,
+        );
+        expect(resultObservation.state).toBe(
+          plugin === "file_type"
+            ? operation === "enqueue_corpus_analysis"
+              ? "accepted"
+              : "completed"
+            : "unknown",
+        );
+        expect(resultObservation.data).toMatchObject({ request });
+      }
+    }
+    expect(calls).toBe(6);
+  } finally {
+    await service.close();
+  }
+});
+it("preserves native reanalysis errors after the producer removes unpacker before plugin validation", async () => {
+  const connection = await fixture(() => ({
+    body: {
+      status: 1,
+      error_message: "Unknown analysis system 'unavailable_plugin'",
+      request: { uid, update: ["unavailable_plugin"] },
+    },
+  }));
+  const service = new FirmwareCorpusService(new FactRestProvider());
+  try {
+    const result = await service.execute("reanalyze_corpus_firmware", {
+      connection,
+      uid,
+      plugins: ["unavailable_plugin"],
+      re_unpack: true,
+    });
+    if (!result.ok) throw result.error;
+    expect(result.value.normalized_result).toMatchObject({
+      state: "failed",
+      data: { request: { update: ["unavailable_plugin"] } },
+    });
+  } finally {
+    await service.close();
+  }
+});
+it("surfaces retained response cleanup uncertainty without discarding completed observations", async () => {
+  let attempts = 0;
+  class FailingCleanup extends FactResponseResources {
+    override async release(reader: ReadableStreamDefaultReader<Uint8Array>) {
+      if (++attempts <= 2) throw Error("injected reader cleanup failure");
+      await super.release(reader);
+    }
+  }
+  const responses = new FailingCleanup();
+  let calls = 0;
+  const connection = await fixture(() => {
+    calls++;
+    return { body: { status: 0, deleted_files: 1, request: { uid } } };
+  });
+  const service = new FirmwareCorpusService(
+    new FactRestProvider(undefined, undefined, responses),
+  );
+  const result = await service.execute("delete_corpus_firmware", {
+    connection,
+    uid,
+  });
+  if (!result.ok) throw result.error;
+  const resultObservation = firmwareCorpusResultSchema.parse(
+    result.value.normalized_result,
+  );
+  expect(resultObservation).toMatchObject({
+    state: "completed",
+    data: { deleted_files: 1 },
+    diagnostics: [expect.stringContaining("FACT HTTP response body")],
+  });
+  expect(responses.pendingResources).toHaveLength(1);
+  await expect(service.close()).rejects.toThrow("cleanup remains unresolved");
+  expect(responses.pendingResources).toHaveLength(1);
+  await service.close();
+  expect(responses.pendingResources).toEqual([]);
+  expect(attempts).toBe(3);
+  expect(calls).toBe(1);
+});
+
+it("binds other native selection echoes and preserves ambiguous consuming errors without retry", async () => {
+  let body: Record<string, unknown> = {};
+  let calls = 0;
+  const connection = await fixture(() => {
+    calls++;
+    return { body };
+  });
+  const service = new FirmwareCorpusService(new FactRestProvider());
+  const uids = [uid, "b".repeat(64) + "_3"];
+  try {
+    for (const echoed of [false, true]) {
+      body = {
+        status: 0,
+        uids: [uid],
+        request: {
+          offset: 0,
+          limit: 0,
+          query: { vendor: "test" },
+          recursive: echoed,
+          inverted: false,
+        },
+      };
+      const result = await service.execute("search_corpus_objects", {
+        connection,
+        kind: "firmware",
+        query: { vendor: "test" },
+      });
+      if (!result.ok) throw result.error;
+      const resultObservation = firmwareCorpusResultSchema.parse(
+        result.value.normalized_result,
+      );
+      expect(resultObservation.state).toBe(echoed ? "unknown" : "completed");
+    }
+    for (const echoed of [false, true]) {
+      body = {
+        status: 0,
+        message: "Started",
+        request: { uid_list: uids, redo: echoed },
+      };
+      const result = await service.execute("start_corpus_comparison", {
+        connection,
+        uids,
+      });
+      if (!result.ok) throw result.error;
+      const resultObservation = firmwareCorpusResultSchema.parse(
+        result.value.normalized_result,
+      );
+      expect(resultObservation.state).toBe(echoed ? "unknown" : "accepted");
+    }
+    for (const echoed of [uids.join(";"), "wrong-id"]) {
+      body = {
+        status: 0,
+        _id: uids.join(";"),
+        general: { hid: { [uid]: "first", [uids[1]!]: "second" } },
+        submission_date: 42,
+        request: { compare_id: echoed },
+      };
+      const result = await service.execute("inspect_corpus_comparison", {
+        connection,
+        uids,
+      });
+      if (!result.ok) throw result.error;
+      const resultObservation = firmwareCorpusResultSchema.parse(
+        result.value.normalized_result,
+      );
+      expect(resultObservation.state).toBe(
+        echoed === "wrong-id" ? "unknown" : "completed",
+      );
+    }
+    body = {
+      status: 1,
+      error_message:
+        "The result is not ready yet or it has already been fetched",
+      request: { search_id: "different-search" },
+    };
+    const first = await service.execute("collect_corpus_yara", {
+      connection,
+      search_id: "selected-search",
+    });
+    if (!first.ok) throw first.error;
+    const firstObservation = firmwareCorpusResultSchema.parse(
+      first.value.normalized_result,
+    );
+    expect(firstObservation.state).toBe("unknown");
+    const repeated = await service.execute("collect_corpus_yara", {
+      connection,
+      search_id: "selected-search",
+    });
+    if (!repeated.ok) throw repeated.error;
+    expect(repeated.value).toBe(first.value);
+    expect(calls).toBe(7);
+  } finally {
+    await service.close();
+  }
+});
+
+it("does not publish a verified download whose available UID or tar echo contradicts selection", async () => {
+  const root = await createTestTempDirectory("rea-fact-download-correlation-");
+  const bytes = Buffer.from("abc");
+  let request: Record<string, unknown> = {};
+  let calls = 0;
+  const connection = await fixture(() => {
+    calls++;
+    return {
+      body: {
+        status: 0,
+        binary: bytes.toString("base64"),
+        SHA256: factHash(bytes),
+        file_name: "firmware.bin",
+        request,
+      },
+    };
+  });
+  const service = new FirmwareCorpusService(new FactRestProvider());
+  try {
+    for (const [echo, state] of [
+      [{ uid: "b".repeat(64) + "_3", tar: false }, "unknown"],
+      [{ uid: factUid(bytes), tar: true }, "unknown"],
+      [{ uid: factUid(bytes), tar: false }, "completed"],
+    ] as const) {
+      request = echo;
+      const output_path = join(root, `${calls}.bin`);
+      const result = await service.execute("download_corpus_binary", {
+        connection,
+        uid: factUid(bytes),
+        output_path,
+      });
+      if (!result.ok) throw result.error;
+      const resultObservation = firmwareCorpusResultSchema.parse(
+        result.value.normalized_result,
+      );
+      expect(resultObservation.state).toBe(state);
+      if (state === "unknown")
+        await expect(readFile(output_path)).rejects.toMatchObject({
+          code: "ENOENT",
+        });
+      else expect(await readFile(output_path)).toEqual(bytes);
+      expect(resultObservation.data).toMatchObject({ request });
+    }
+    expect(calls).toBe(3);
+  } finally {
+    await service.close();
+    await rm(root, { recursive: true });
+  }
+});
+
+it("binds an available upload request UID to the actual selected snapshot", async () => {
+  const root = await createTestTempDirectory("rea-fact-upload-correlation-");
+  const path = join(root, "firmware.bin");
+  const bytes = Buffer.from("abc");
+  await writeFile(path, bytes);
+  let selected = factUid(bytes);
+  let calls = 0;
+  const connection = await fixture(() => {
+    calls++;
+    return {
+      body: { status: 0, uid: factUid(bytes), request: { uid: selected } },
+    };
+  });
+  const service = new FirmwareCorpusService(new FactRestProvider());
+  try {
+    for (const echoed of [factUid(bytes), "b".repeat(64) + "_3"]) {
+      selected = echoed;
+      const result = await service.execute("upload_corpus_firmware", {
+        connection,
+        path,
+        plugins: [],
+        metadata: {
+          device_name: "",
+          device_part: "",
+          device_class: "",
+          file_name: "firmware.bin",
+          version: "",
+          vendor: "",
+        },
+      });
+      if (!result.ok) throw result.error;
+      const resultObservation = firmwareCorpusResultSchema.parse(
+        result.value.normalized_result,
+      );
+      expect(resultObservation.state).toBe(
+        echoed === factUid(bytes) ? "accepted" : "unknown",
+      );
+      expect(resultObservation.data).toMatchObject({
+        uid: factUid(bytes),
+        request: { uid: echoed },
+      });
+    }
+    expect(calls).toBe(2);
+  } finally {
+    await service.close();
+    await rm(root, { recursive: true });
+  }
 });
 it("preserves exact query, unbounded limit and literal raw Authorization without persisting credentials", async () => {
   const connection = await fixture((url, method, body, auth) => {
@@ -294,16 +748,16 @@ it("isolates consuming caches by private authorization and canonical origin", as
   const keys: (string | undefined)[] = [];
   const connection = await fixture((_url, _method, _body, auth) => {
     keys.push(auth);
-    return (auth === "secret-Key"
-        ? { body: { status: 0, binary_search_results: { privileged: [uid] } } }
-        : {
-            code: 403,
-            body: {
-              status: 1,
-              error_message:
-                "Caller does not have permission to collect this result",
-            },
-          });
+    return auth === "secret-Key"
+      ? { body: { status: 0, binary_search_results: { privileged: [uid] } } }
+      : {
+          code: 403,
+          body: {
+            status: 1,
+            error_message:
+              "Caller does not have permission to collect this result",
+          },
+        };
   });
   const service = new FirmwareCorpusService(new FactRestProvider());
   const first = await service.execute("collect_corpus_yara", {

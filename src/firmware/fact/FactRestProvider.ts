@@ -17,6 +17,7 @@ import {
   factUid,
   factRedactor,
   readFactResponse,
+  FactResponseResources,
   factResult,
 } from "./FactProtocol.js";
 import { FactJsonParser } from "./FactJsonParser.js";
@@ -53,11 +54,16 @@ export class FactRestProvider implements FirmwareCorpusPort {
   constructor(
     readonly files = new FactFileResources(),
     readonly parser = new FactJsonParser(),
+    readonly responses = new FactResponseResources(),
   ) {}
   async close(): Promise<void> {
     await this.admission.close();
     const failures: unknown[] = [];
-    for (const close of [() => this.parser.close(), () => this.files.close()]) {
+    for (const close of [
+      () => this.responses.close(),
+      () => this.parser.close(),
+      () => this.files.close(),
+    ]) {
       try {
         await close();
       } catch (cause) {
@@ -163,10 +169,11 @@ export class FactRestProvider implements FirmwareCorpusPort {
       }
       if (
         this.files.pendingResources.length ||
-        this.parser.pendingResources.length
+        this.parser.pendingResources.length ||
+        this.responses.pendingResources.length
       )
         diagnostics.push(
-          `Cleanup remains uncertain for owned resources: ${[...this.files.pendingResources, ...this.parser.pendingResources].join(", ")}`,
+          `Cleanup remains uncertain for owned resources: ${[...this.files.pendingResources, ...this.parser.pendingResources, ...this.responses.pendingResources].join(", ")}`,
         );
       const ownedData = redact.value(data);
       for (const step of freezeOwnedJsonSnapshotSteps(ownedData)) {
@@ -356,7 +363,12 @@ export class FactRestProvider implements FirmwareCorpusPort {
         signal,
       });
       httpStatus = response.status;
-      const raw = await readFactResponse(response, wireBudget, signal);
+      const raw = await readFactResponse(
+        response,
+        wireBudget,
+        signal,
+        this.responses,
+      );
       rawDigest = factHash(raw);
       const parsedEnvelope = await this.parser.parse(
         raw,
@@ -400,14 +412,25 @@ export class FactRestProvider implements FirmwareCorpusPort {
       if (outcome.state === "failed" || outcome.state === "unknown")
         return finish(outcome.state, data, outcome.diagnostics);
       if (operation === "upload_corpus_firmware" && snapshot !== undefined) {
+        const selectedUid = factUid(snapshot.bytes);
         if (
           data === null ||
           typeof data !== "object" ||
           Array.isArray(data) ||
-          data.uid !== factUid(snapshot.bytes)
+          data.uid !== selectedUid
         )
           return finish("unknown", data, [
             "Uploaded byte identity does not match the producer UID",
+          ]);
+        if (
+          data.request !== null &&
+          typeof data.request === "object" &&
+          !Array.isArray(data.request) &&
+          Object.hasOwn(data.request, "uid") &&
+          data.request.uid !== selectedUid
+        )
+          return finish("unknown", data, [
+            "Native request.uid contradicts the uploaded snapshot identity",
           ]);
       }
       if (

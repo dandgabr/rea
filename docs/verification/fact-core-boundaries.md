@@ -14,6 +14,12 @@ PUT sends the caller's `force` selection. Neither profile admits arbitrary route
 HTTP success alone does not establish an object, analysis or acknowledgement.
 The adapter checks the selected producer envelope and native fields, including
 analysis metadata, object metadata, comparison identity and mutation acknowledgements.
+Available native request echoes are bound to the selected UID, plugin, query,
+paging, comparison and binary representation. Reanalysis compares effective plugin
+selection and `re_unpack`, respecting native unpacker removal/reappend semantics
+without imposing plugin ordering. Contradictory echoes remain unknown with partial
+producer values and digest; mutations and consuming reads are never retried or
+compensated. Upload UID echoes are checked against the owned byte snapshot.
 Statistics use the producer's raw category dictionaries rather than a status envelope.
 Malformed responses remain unknown with their raw SHA-256 and available partial
 producer values. Malformed UTF-8, duplicate members and nonfinite JSON numbers are
@@ -66,6 +72,12 @@ Identical-authority YARA callers join the existing collection before admission.
 Cancellation terminates the owned parser worker. Failed termination retains its
 owner and an observable cleanup uncertainty for explicit close/retry.
 
+HTTP response readers are owned before header admission. An oversized declared
+body is canceled even if it never finishes; streaming overflow also cancels its
+reader. Failed cancellation retains the exact reader and lock for explicit close,
+with cleanup uncertainty in the observation. Cleanup does not replace useful
+admitted bytes or the original response failure and never repeats the request.
+
 Snapshot roots are owned from creation, including failed acquisitions. Input
 handles open nonblocking with no symlink following, then their actual descriptors
 must identify regular files; a FIFO needs no writer to be rejected. Descriptor
@@ -83,7 +95,8 @@ not claimed atomic, and a preexisting caller file is never overwritten or remove
 
 Production-boundary tests use actual loopback HTTP and disposable files, including
 real socket disconnection, FIFO admission, exact metadata maxima, malformed
-compact download JSON, cancellation, capacity and cleanup failures. These fixtures
+compact download JSON, contradictory native request echoes, unfinished oversized
+HTTP bodies, cancellation, capacity and cleanup failures. These fixtures
 do not establish real FACT service or native database conformance. Public CLI/MCP
 composition and native import/export require their later integration and a supplied
 disposable service/database lane. No existing corpus or ambient credential store

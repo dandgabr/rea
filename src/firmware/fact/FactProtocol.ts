@@ -107,20 +107,57 @@ export const factRedactor = (secret: string | undefined) => {
   return { text: redact, value };
 };
 
+/** A response reader remains owned until cancellation and lock release succeed. */
+export class FactResponseResources {
+  private readonly readers = new Set<ReadableStreamDefaultReader<Uint8Array>>();
+  get pendingResources(): string[] {
+    return [...this.readers].map(() => "FACT HTTP response body");
+  }
+  acquire(response: Response) {
+    const reader = response.body?.getReader();
+    if (reader !== undefined) this.readers.add(reader);
+    return reader;
+  }
+  async release(
+    reader: ReadableStreamDefaultReader<Uint8Array>,
+  ): Promise<void> {
+    // Retain the exact reader, including its lock, if cancellation fails.
+    await reader.cancel();
+    reader.releaseLock();
+    this.readers.delete(reader);
+  }
+  async close(): Promise<void> {
+    const failures: unknown[] = [];
+    for (const reader of this.readers) {
+      try {
+        await this.release(reader);
+      } catch (cause) {
+        failures.push(cause);
+      }
+    }
+    if (failures.length)
+      throw new AggregateError(
+        failures,
+        "FACT response body cleanup remains unresolved",
+      );
+  }
+}
+
 /** Bound incoming bytes before retaining or parsing the producer envelope. */
 export async function readFactResponse(
   response: Response,
   maxBytes: number,
   signal: AbortSignal,
+  resources: FactResponseResources,
 ): Promise<Buffer> {
-  const length = response.headers.get("content-length");
-  if (length !== null && Number(length) > maxBytes)
-    throw Error("FACT response exceeds its wire byte budget");
-  const reader = response.body?.getReader();
-  if (!reader) return Buffer.alloc(0);
+  const reader = resources.acquire(response);
   const chunks: Buffer[] = [];
   let size = 0;
   try {
+    const length = response.headers.get("content-length");
+    if (length !== null && Number(length) > maxBytes)
+      throw Error("FACT response exceeds its wire byte budget");
+    if (!reader) return Buffer.alloc(0);
     for (;;) {
       signal.throwIfAborted();
       const item = await reader.read();
@@ -139,8 +176,10 @@ export async function readFactResponse(
     chunks.length = 0;
     return owned;
   } finally {
-    await reader.cancel().catch(() => undefined);
-    reader.releaseLock();
+    // Cleanup uncertainty is reported by the resource owner without replacing
+    // useful observed bytes or the original admission/transport failure.
+    if (reader !== undefined)
+      await resources.release(reader).catch(() => undefined);
   }
 }
 export const factResult = (
