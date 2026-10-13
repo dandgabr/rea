@@ -1,0 +1,124 @@
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { readlinkSync } from "node:fs";
+import { open, readFile, symlink, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+
+const [
+  serviceModule,
+  compositionModule,
+  commandModule,
+  root,
+  mode,
+  requestedChunk = "1",
+] = process.argv.slice(2);
+const { FirmwareAnalysisService } = await import(serviceModule);
+const { createFirmwareAnalysisProvider } = await import(compositionModule);
+const { resolveFirmwareCommand } = await import(commandModule);
+const executable = join(root, "actual-tool");
+const selected = join(root, "selected-entrypoint");
+const input = join(root, "input.bin");
+const abortChunk = Number(requestedChunk);
+assert.ok(Number.isInteger(abortChunk) && abortChunk >= 1 && abortChunk <= 16);
+const bytes = Buffer.alloc(1024 * 1024, 0x61);
+const digest = createHash("sha256").update(bytes).digest("hex");
+await writeFile(executable, bytes, { mode: 0o700 });
+await symlink("actual-tool", selected);
+await writeFile(input, "abc");
+const admitted = await resolveFirmwareCommand(
+  { REA_UNBLOB_COMMAND: selected },
+  "unblob",
+  "inspect_firmware_regions",
+);
+assert.equal(admitted.command, selected);
+assert.equal(admitted.resolvedCommand, executable);
+assert.equal(admitted.sha256, digest);
+
+const descriptor = await open(executable, "r");
+const prototype = Object.getPrototypeOf(descriptor);
+const originalStream = prototype.createReadStream;
+const originalTimeout = AbortSignal.timeout;
+await descriptor.close();
+const controller = new AbortController();
+const handles = new Set();
+const events = [];
+let launches = 0;
+const service = new FirmwareAnalysisService(
+  createFirmwareAnalysisProvider({ REA_UNBLOB_COMMAND: selected }, async () => {
+    launches++;
+    throw Error("Canceled fingerprint must not launch a producer");
+  }),
+);
+if (mode === "deadline") AbortSignal.timeout = () => controller.signal;
+prototype.createReadStream = function (...args) {
+  const stream = originalStream.apply(this, args);
+  if (readlinkSync(`/proc/self/fd/${this.fd}`) === executable) {
+    handles.add(this);
+    stream.on("data", (chunk) => {
+      events.push({
+        bytes: chunk.length,
+        afterAbort: controller.signal.aborted,
+      });
+      if (!controller.signal.aborted && events.length === abortChunk)
+        controller.abort(
+          mode === "deadline"
+            ? new DOMException("Controlled deadline", "TimeoutError")
+            : undefined,
+        );
+    });
+  }
+  return stream;
+};
+try {
+  const outcome = await service.execute(
+    "inspect_firmware_regions",
+    {
+      path: input,
+      provider_id: "unblob",
+    },
+    mode === "deadline" ? undefined : { signal: controller.signal },
+  );
+  assert.equal(outcome.ok, false);
+  assert.equal(
+    outcome.error._tag,
+    mode === "deadline" ? "AnalysisTimeoutError" : "AnalysisCancelledError",
+  );
+  assert.equal(outcome.error.operation, "inspect_firmware_regions");
+  assert.equal(launches, 0);
+  assert.equal(
+    events.length,
+    abortChunk,
+    "Fingerprint must stop at the aborting chunk",
+  );
+  assert.ok(events.every((event) => event.bytes === 64 * 1024));
+  assert.equal(events.filter((e) => e.afterAbort).length, 0);
+  assert.equal(handles.size, 1);
+  for (const handle of handles) {
+    assert.equal(handle.fd, -1);
+    await assert.rejects(handle.stat(), { code: "EBADF" });
+  }
+  assert.equal(
+    createHash("sha256")
+      .update(await readFile(executable))
+      .digest("hex"),
+    digest,
+  );
+  assert.equal(await readFile(input, "utf8"), "abc");
+  console.log(
+    JSON.stringify({
+      mode,
+      positive_digest: digest,
+      invocation: "preserved",
+      bytes_read: events.reduce((total, event) => total + event.bytes, 0),
+      chunks: events.length,
+      chunks_after_abort: 0,
+      closed_handles: handles.size,
+      producer_launches: launches,
+      error: outcome.error._tag,
+    }),
+  );
+} finally {
+  prototype.createReadStream = originalStream;
+  AbortSignal.timeout = originalTimeout;
+  await service.close();
+}

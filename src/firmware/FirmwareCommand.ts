@@ -44,7 +44,9 @@ export const resolveFirmwareCommand = async (
   environment: Readonly<Record<string, string | undefined>>,
   engine: "binwalk" | "unblob",
   operation: string,
+  signal?: AbortSignal,
 ) => {
+  signal?.throwIfAborted();
   const variable =
     engine === "binwalk" ? "REA_BINWALK_COMMAND" : "REA_UNBLOB_COMMAND";
   const configured = environment[variable];
@@ -59,19 +61,26 @@ export const resolveFirmwareCommand = async (
       `This integration requires Linux and an absolute ${variable} path to the caller-supplied tool`,
     );
   const command = await realpath(configured).catch((cause: unknown) => {
+    signal?.throwIfAborted();
     throw firmwareToolUnavailable(
       engine,
       operation,
       `${variable} is unavailable: ${cause instanceof Error ? cause.message : String(cause)}`,
     );
   });
+  signal?.throwIfAborted();
   let sha256: string;
   try {
     await access(command, constants.R_OK | constants.X_OK);
-    if (!(await stat(command)).isFile())
+    signal?.throwIfAborted();
+    const identity = await stat(command);
+    signal?.throwIfAborted();
+    if (!identity.isFile())
       throw new TypeError("Configured path is not a regular file");
-    sha256 = await hashFirmwareFile(command);
+    sha256 = await hashFirmwareFile(command, signal);
+    signal?.throwIfAborted();
   } catch (cause: unknown) {
+    signal?.throwIfAborted();
     throw firmwareToolUnavailable(
       engine,
       operation,
@@ -88,9 +97,13 @@ export const resolveFirmwareCommand = async (
     );
   try {
     await access(limiter, constants.X_OK);
-    if (!(await stat(limiter)).isFile())
+    signal?.throwIfAborted();
+    const identity = await stat(limiter);
+    signal?.throwIfAborted();
+    if (!identity.isFile())
       throw new TypeError("Configured path is not a regular file");
   } catch (cause: unknown) {
+    signal?.throwIfAborted();
     throw firmwareToolUnavailable(
       engine,
       operation,

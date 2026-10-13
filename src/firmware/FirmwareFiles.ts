@@ -44,18 +44,21 @@ export const hashFirmwareFile = async (
   path: string,
   signal?: AbortSignal,
 ): Promise<string> => {
+  signal?.throwIfAborted();
   const handle = await open(
     path,
     constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
   );
   const hash = createHash("sha256");
   try {
-    if (!(await handle.stat()).isFile())
-      throw new Error(`Not a regular file: ${path}`);
+    const identity = await handle.stat();
+    signal?.throwIfAborted();
+    if (!identity.isFile()) throw new Error(`Not a regular file: ${path}`);
     for await (const chunk of handle.createReadStream({ autoClose: false })) {
       signal?.throwIfAborted();
       hash.update(chunk);
     }
+    signal?.throwIfAborted();
   } finally {
     await handle.close();
   }

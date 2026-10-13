@@ -256,9 +256,12 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
         this.environment,
         engineName,
         request.operation,
+        signal,
       );
+      signal.throwIfAborted();
       root = await PrivateRuntimeRoot.create({ prefix: "rea-firmware-" });
       const ownedRoot = root;
+      signal.throwIfAborted();
       const target = await snapshotFirmware(request, root.path, signal);
       const run = (
         args: readonly string[],
