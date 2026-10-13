@@ -42,6 +42,7 @@ graph TD
         RIZIN["src/rizin/<br/>Static command profile and persistent debugger sessions"]
         GDB["src/gdb/<br/>Persistent GDB/MI sessions<br/>owned process lifecycle and target state"]
 
+        CORPUS["src/firmware/fact/<br/>independent FACT REST/native adapters<br/>source/default-config identity, bounded JSON/ZIP, partial effects"]
         FIRMWARE["src/firmware/<br/>Binwalk / Unblob adapters<br/>owned processes, report normalization, private extraction"]
         ANDROID["src/android/<br/>Static APK adapter<br/>owned SDK stdio, pinned headless JADX, normalization"]
         REFERENCE["src/reference/<br/>Filesystem reference-source reader<br/>bounded traversal, validation, errors"]
@@ -161,6 +162,12 @@ graph TD
     TESTS -.-> BROWSER
     TESTS -.-> EVALUATION
     TESTS -.-> ERRORS
+
+    COMPOSITION --> CORPUS
+    SERVER -->|named corpus contracts| APP
+    APP -->|FirmwareCorpusPort| CORPUS
+    CORPUS --> PROCESS
+    CORPUS --> DOMAIN
 
     COMPOSITION --> EVM
     APP -->|EVM interface port| EVM

@@ -142,18 +142,22 @@ describe("tool effects", () => {
       "cutter_command",
       "execute_rizin_command",
       "gdb_console",
+      "enqueue_corpus_analysis",
       "install_adb_package",
       "instrument_with_frida",
       "load_frida_script",
       "observe_native_calls",
       "push_adb_file",
+      "reanalyze_corpus_firmware",
       "resume_frida_session",
       "rizin_debug_command",
       "start_adb_activity",
       "start_adb_app",
       "start_rizin_debug_session",
+      "start_corpus_comparison",
       "stop_adb_app",
       "uninstall_adb_package",
+      "upload_corpus_firmware",
     ]);
     for (const contract of destructive)
       expect(contract.annotations, contract.name).toMatchObject({

@@ -96,6 +96,12 @@ explicit path or endpoint and do not need it.
   `inspect_android_package`, then focused Android tools when advertised.
   Archive member inventory still uses the archive route above.
 - Managed PE/CLI assembly: `inspect_managed_artifact`.
+- Existing FACT corpus: use `inspect_firmware_corpus` and the named corpus tools
+  with an explicitly selected literal-loopback connection/profile, or
+  `export_corpus_firmware`/`import_corpus_firmware` with an independently selected
+  native interpreter/checkout/default config. Preserve null subject, exact UIDs,
+  selected plugins, job acknowledgements, consuming YARA observations and
+  partial native writes. Read the [FACT guide](https://github.com/morluto/rea/blob/main/docs/fact-core.md).
 - Firmware image: `inspect_firmware_regions` when advertised. Use
   `extract_firmware` when extraction is requested, with a caller-selected new
   absolute output directory. These tools use caller-supplied Binwalk/Unblob on

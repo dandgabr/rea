@@ -9,29 +9,30 @@ const absoluteLocalPathSchema = localPathStringSchema.refine(
 
 /** Explicit caller declaration; status endpoints cannot attest this source identity. */
 export const corpusConnectionSchema = z.strictObject({
-  endpoint: z.string().superRefine((value, ctx) => {
-    try {
-      if (!/^https?:\/\/(?:127\.0\.0\.1|\[::1\])(?::[0-9]+)?\/?$/u.test(value))
-        throw Error();
-      const url = new URL(value);
-      if (
-        !["http:", "https:"].includes(url.protocol) ||
-        !["127.0.0.1", "[::1]"].includes(url.hostname) ||
-        url.username ||
-        url.password ||
-        url.pathname !== "/" ||
-        url.search ||
-        url.hash
-      )
-        throw Error();
-    } catch {
-      ctx.addIssue({
-        code: "custom",
-        message:
-          "Use a literal loopback HTTP(S) origin without credentials, path, query or fragment",
-      });
-    }
-  }),
+  endpoint: z
+    .string()
+    .regex(/^https?:\/\/(?:127\.0\.0\.1|\[::1\])(?::[0-9]+)?\/?$/u)
+    .superRefine((value, ctx) => {
+      try {
+        const url = new URL(value);
+        if (
+          !["http:", "https:"].includes(url.protocol) ||
+          !["127.0.0.1", "[::1]"].includes(url.hostname) ||
+          url.username ||
+          url.password ||
+          url.pathname !== "/" ||
+          url.search ||
+          url.hash
+        )
+          throw Error();
+      } catch {
+        ctx.addIssue({
+          code: "custom",
+          message:
+            "Use a literal loopback HTTP(S) origin without credentials, path, query or fragment",
+        });
+      }
+    }),
   profile: z.enum(["release-4.4.1", "source-54aed90b"]),
   authorization: z
     .string()
@@ -169,7 +170,10 @@ export const firmwareCorpusInputs = {
   inspect_corpus_comparison: z.strictObject(comparison),
   start_corpus_yara: z.strictObject({
     ...connection,
-    rule_file: z.string().min(1),
+    rule_file: z
+      .string()
+      .min(1)
+      .describe("Raw YARA source text forwarded unchanged to FACT"),
     uid: corpusUidSchema.optional(),
   }),
   collect_corpus_yara: z.strictObject({

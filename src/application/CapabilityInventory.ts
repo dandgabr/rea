@@ -448,6 +448,9 @@ const workflowAvailabilityFor = ({
           remediation:
             "On Linux x64, set absolute REA_PWNTOOLS_PYTHON to caller-supplied Python with pwntools 4.15.0. No active binary target is required.",
         };
+  // Corpus prerequisites are selected per request; availability is not service readiness.
+  if (kind === "corpus-provider")
+    return { reason: "available", remediation: null };
   if (kind === "firmware-provider") {
     const enabled =
       name === "inspect_firmware_regions"

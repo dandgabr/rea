@@ -87,6 +87,10 @@ import { ArtifactResourceScope } from "../artifacts/ArtifactResourceScope.js";
 import { registerEnhancedTools } from "./registerEnhancedTools.js";
 import { registerJavaScriptRuntimeObservationTools } from "./registerJavaScriptRuntimeObservationTools.js";
 import { registerManagedTools } from "./registerManagedTools.js";
+import { registerFirmwareCorpusTools } from "./registerFirmwareCorpusTools.js";
+import { FirmwareCorpusService } from "../application/corpus/FirmwareCorpusService.js";
+import type { FirmwareCorpusPort } from "../application/corpus/FirmwareCorpusPort.js";
+import { createFirmwareCorpusProvider } from "../composition/firmwareCorpus.js";
 import { registerFirmwareTools } from "./registerFirmwareTools.js";
 import { FirmwareAnalysisService } from "../application/firmware/FirmwareAnalysisService.js";
 import type { FirmwareAnalysisPort } from "../application/firmware/FirmwareAnalysisPort.js";
@@ -162,6 +166,7 @@ export interface CreateServerOptions {
   readonly electronFuses?: ElectronFuseService;
   readonly recordedCrash?: RecordedCrashService;
   readonly firmwareAnalysis?: FirmwareAnalysisPort;
+  readonly firmwareCorpus?: FirmwareCorpusPort;
   readonly javascriptRecovery?: JavaScriptRecoveryPort;
   readonly webModuleTrace?: WebModuleTraceService;
   readonly webSourceLocation?: WebSourceLocationService;
@@ -318,6 +323,9 @@ export const createServer = (
   const artifactResources = new ArtifactResourceScope();
   const reverseEngineering =
     createReverseEngineeringService(providerEnvironment);
+  const firmwareCorpus = new FirmwareCorpusService(
+    options.firmwareCorpus ?? createFirmwareCorpusProvider(),
+  );
   const firmwareAnalysis = new FirmwareAnalysisService(
     options.firmwareAnalysis ?? createFirmwareAnalysisProvider(environment),
   );
@@ -403,6 +411,7 @@ export const createServer = (
       firmwareAnalysis.close(),
       gdbSessions.closeAll(),
       rizinDebugSessions.closeAll(),
+      firmwareCorpus.close(),
     ])
       .then((results) => {
         const failures = results.flatMap((result) =>
@@ -547,6 +556,7 @@ export const createServer = (
     jeb,
     firmwareAnalysis,
     webRuntime,
+    firmwareCorpus,
   );
   registerAdbTools(
     server,
@@ -651,6 +661,7 @@ const registerConfiguredAnalysisTools = (
   jeb: JebAnalysisPort,
   firmwareAnalysis: FirmwareAnalysisService,
   webRuntime: WebRuntimeService,
+  firmwareCorpus: FirmwareCorpusService,
 ): void => {
   registerAndroidTools(
     server,
@@ -729,6 +740,13 @@ const registerConfiguredAnalysisTools = (
   registerRecordedCrashTools(
     server,
     options.recordedCrash ?? createRecordedCrashService(environment),
+    toolLogger,
+    recordEvidence,
+    withAdmittedAnalysis,
+  );
+  registerFirmwareCorpusTools(
+    server,
+    firmwareCorpus,
     toolLogger,
     recordEvidence,
     withAdmittedAnalysis,

@@ -73,6 +73,8 @@ const SOURCE_PATHS = {
   rustProvider: "dist/rust/RustBinaryProvider.js",
   artifactContracts: "dist/contracts/artifactToolContracts.js",
   managedContracts: "dist/contracts/managed/managedToolContracts.js",
+  corpusContracts: "dist/contracts/corpus/firmwareCorpusToolContracts.js",
+  corpusProvider: "dist/firmware/fact/FactRelease.js",
   firmwareContracts: "dist/contracts/firmware/firmwareToolContracts.js",
   firmwareProvider: "dist/firmware/FirmwareRelease.js",
   androidContracts: "dist/contracts/android/androidToolContracts.js",

@@ -49,6 +49,11 @@ export const toolFamilyCatalog = (sources) => {
       ],
     },
     {
+      id: "firmware-corpus",
+      surface: "corpus-provider",
+      contracts: sources.corpusContracts.FIRMWARE_CORPUS_TOOL_CONTRACTS,
+    },
+    {
       id: "firmware",
       surface: "firmware-provider",
       contracts: sources.firmwareContracts.FIRMWARE_TOOL_CONTRACTS,
@@ -289,6 +294,22 @@ export const providerCatalog = (sources) => {
       identity: sources.artifactProviders.MANAGED_WORKFLOW_PROVIDER,
       contracts:
         sources.managedWorkflowContracts.MANAGED_WORKFLOW_TOOL_CONTRACTS,
+    },
+    {
+      identity: sources.corpusProvider.FACT_REST_PROVIDER_IDENTITY,
+      contracts: sources.corpusContracts.FIRMWARE_CORPUS_TOOL_CONTRACTS.filter(
+        ({ name }) =>
+          name !== "export_corpus_firmware" &&
+          name !== "import_corpus_firmware",
+      ),
+    },
+    {
+      identity: sources.corpusProvider.FACT_NATIVE_PROVIDER_IDENTITY,
+      contracts: sources.corpusContracts.FIRMWARE_CORPUS_TOOL_CONTRACTS.filter(
+        ({ name }) =>
+          name === "export_corpus_firmware" ||
+          name === "import_corpus_firmware",
+      ),
     },
     {
       identity: sources.firmwareProvider.BINWALK_PROVIDER_IDENTITY,

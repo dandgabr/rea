@@ -51,6 +51,21 @@ const browserEvidence = effects({
 });
 const sessionEvidence = effects({ mutatesSession: true });
 
+const corpusRead = effects({ mutatesSession: true, accessesNetwork: true });
+const corpusJob = effects({
+  mutatesSession: true,
+  mutatesTarget: true,
+  accessesNetwork: true,
+  executesForeignCode: true,
+  idempotent: false,
+});
+const corpusNative = effects({
+  mutatesSession: true,
+  accessesNetwork: true,
+  writesFilesystem: true,
+  launchesProcess: true,
+  idempotent: false,
+});
 /** Explicit effect audit for every public tool. */
 export const TOOL_EFFECTS: Readonly<Record<string, ToolEffects>> = {
   list_cutter_sessions: effects({ accessesNetwork: true }),
@@ -125,6 +140,49 @@ export const TOOL_EFFECTS: Readonly<Record<string, ToolEffects>> = {
     executesForeignCode: true,
     idempotent: false,
   }),
+  inspect_firmware_corpus: corpusRead,
+  search_corpus_objects: corpusRead,
+  inspect_corpus_object: corpusRead,
+  inspect_corpus_analysis: corpusRead,
+  inspect_corpus_parent_analysis: corpusRead,
+  upload_corpus_firmware: { ...corpusJob, writesFilesystem: true },
+  reanalyze_corpus_firmware: { ...corpusJob, mayDiscardData: true },
+  enqueue_corpus_analysis: { ...corpusJob, mayDiscardData: true },
+  start_corpus_comparison: { ...corpusJob, mayDiscardData: true },
+  inspect_corpus_comparison: corpusRead,
+  start_corpus_yara: effects({
+    mutatesSession: true,
+    mutatesTarget: true,
+    accessesNetwork: true,
+    idempotent: false,
+  }),
+  collect_corpus_yara: effects({
+    mutatesSession: true,
+    mutatesTarget: true,
+    accessesNetwork: true,
+    mayDiscardData: true,
+    idempotent: false,
+  }),
+  inspect_corpus_statistics: corpusRead,
+  inspect_corpus_gaps: corpusRead,
+  download_corpus_binary: {
+    ...corpusRead,
+    writesFilesystem: true,
+    idempotent: false,
+  },
+  delete_corpus_firmware: effects({
+    mutatesSession: true,
+    mutatesTarget: true,
+    accessesNetwork: true,
+    mayDiscardData: true,
+    idempotent: false,
+  }),
+  export_corpus_firmware: corpusNative,
+  import_corpus_firmware: {
+    ...corpusNative,
+    mutatesTarget: true,
+    mayDiscardData: true,
+  },
   inspect_go_binary: evidence,
   inspect_rust_binary: evidence,
   inspect_sqlite_database: effects({

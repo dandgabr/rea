@@ -200,3 +200,38 @@ full plugin inventory and public CLI/MCP/container-native composition remain
 unverified until their later integration gates. No existing human corpus,
 configuration rewrite, DB-role installation, push or publication is part of this
 checkpoint.
+
+## Public native and REST acceptance
+
+The shared corpus service is registered through 18 exact named contracts on MCP
+and dedicated hyphenated CLI commands. Both use the same strict inputs and
+Evidence output schemas. The CLI accepts JSON or a JSON file, preserves all
+selected options, and returns exit 1 for failed, unknown or undelivered outcomes
+without replacing their Evidence. One-shot cleanup failures retain completed
+Evidence as a typed partial observation. Service availability means the contract
+can be called with selected prerequisites, not that a service or native DB is
+ready. REST and native producers have separate resource and authority owners.
+
+Real public source and independently installed npm-package CLI/stdio MCP lanes
+used the pinned source profile. REST ran in an owned disposable container;
+interchange Python ran on the HOST against separate owned PostgreSQL socket,
+database and storage selections. Each fresh lane performed one ordered import
+campaign: gzip producer-reported import, plain shared-child failure with possible
+partial writes, then a third archive not_started, with exactly two native calls.
+Later explicit existing-target skips and strict revision refusals preserve the
+producer's exit-zero semantics. CLI reports revision refusal as failed/exit1.
+Plain exports and original downloads were independently SHA/size/CRC checked.
+Raw YARA source starts, explicit result collection and retained same-session
+reads were exercised without automatic polling or retry. Raw source is the
+native rule_file format; a base64 source-text input produced a retained HTTP400
+syntax error and did not establish a successful search.
+
+Public tests also validate the installed SDK-converted draft2020 schemas, all
+18 named handlers and examples, malformed literal-loopback selections with
+zero provider delivery, raw Authorization redaction, accepted/failed/unknown
+states, release enqueue refusal and cleanup partial facts. Boundary fixtures
+establish those semantics, not real optional plugin readiness. Full optional
+plugin/release live coverage, every fault/race/resource extreme and product
+container-native interchange execution remain unverified. The existing-service
+container runtime has a separate proposed design/review gate; no service
+lifecycle ownership is implied by the current native provider.

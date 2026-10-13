@@ -1,3 +1,4 @@
+import { FACT_REST_PROVIDER_IDENTITY } from "./FactRelease.js";
 import type { FirmwareCorpusPort } from "../../application/corpus/FirmwareCorpusPort.js";
 import type {
   FirmwareCorpusOperation,
@@ -198,7 +199,7 @@ export class FactRestProvider implements FirmwareCorpusPort {
               diagnostics: diagnostics.map(redact.text),
             }),
           ),
-          { id: "fact-core", name: "FACT Core", version: null },
+          FACT_REST_PROVIDER_IDENTITY,
           { limitations },
         ),
         collectionDisposition:

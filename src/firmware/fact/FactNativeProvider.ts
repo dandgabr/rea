@@ -1,3 +1,4 @@
+import { FACT_NATIVE_PROVIDER_IDENTITY } from "./FactRelease.js";
 import { createReadStream } from "node:fs";
 import { mkdir, readdir } from "node:fs/promises";
 import { join } from "node:path";
@@ -673,11 +674,7 @@ export class FactNativeProvider implements FirmwareCorpusPort {
             diagnostics: diagnostics.map(redactText),
           }),
         ),
-        {
-          id: "fact-core-native",
-          name: "FACT Core native interchange",
-          version: null,
-        },
+        FACT_NATIVE_PROVIDER_IDENTITY,
         {
           limitations: [
             "Native authority is independently declared; default configuration identity is not proof of HTTP binding.",

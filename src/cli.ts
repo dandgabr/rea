@@ -22,6 +22,7 @@ import { registerCoreAnalysisCommands } from "./cli/coreAnalysisCommands.js";
 import { registerUtilityCommands } from "./cli/utilityCommands.js";
 import { registerArtifactCommands } from "./cli/artifactCommands.js";
 import { registerManagedCommands } from "./cli/managedCommands.js";
+import { registerFirmwareCorpusCommands } from "./cli/firmwareCorpusCommands.js";
 import { registerFirmwareCommands } from "./cli/firmwareCommands.js";
 import { registerAndroidCommands } from "./cli/androidCommands.js";
 import { registerApktoolCommands } from "./cli/apktoolCommands.js";
@@ -117,6 +118,7 @@ export const createCli = (
   registerJebCommands(cli, logger, environment);
   registerAdbCommands(cli, logger, environment);
   registerFirmwareCommands(cli, logger, environment);
+  registerFirmwareCorpusCommands(cli, logger);
   registerBinaryDiagnosticsCommands(cli, logger, environment);
   registerAnalysisViewCommands(cli, logger);
   registerFridaCommands(cli, logger, fridaInstrumentation);
