@@ -39,13 +39,19 @@ export const firmwareExtractionFields = {
     .default(256 * 1024 * 1024),
   max_output_files: z.number().int().min(1).max(100_000).default(10_000),
 };
-const suffix = z
+const optionText = z
   .string()
-  .min(1)
-  .refine((value) => !/[\\/\0]/.test(value), {
+  .refine((value) => !value.includes("\0"), {
     message:
-      "Suffix must be a nonempty filename suffix without path separators",
+      "Option text cannot contain NUL, which cannot be represented in a native argument",
+  })
+  .refine((value) => !/[\ud800-\udfff]/u.test(value), {
+    message:
+      "Option text must contain well-formed Unicode, which can be preserved in native UTF-8 arguments",
   });
+const suffix = optionText.min(1).refine((value) => !/[\\/\0]/.test(value), {
+  message: "Suffix must be a nonempty filename suffix without path separators",
+});
 const deletion = z.discriminatedUnion("mode", [
   z.strictObject({ mode: z.literal("none") }),
   z.strictObject({ mode: z.literal("all") }),
@@ -53,8 +59,7 @@ const deletion = z.discriminatedUnion("mode", [
     mode: z.literal("selected"),
     handlers: z
       .array(
-        z
-          .string()
+        optionText
           .min(1)
           .refine((value) => value.trim() === value && !value.includes(",")),
       )
@@ -68,10 +73,10 @@ export const unblobOptionsSchema = z.strictObject({
   skip_magic: z
     .strictObject({
       mode: z.enum(["append", "replace"]).default("append"),
-      values: z.array(z.string()),
+      values: z.array(optionText),
     })
     .optional(),
-  skip_extensions: z.array(z.string()).min(1).optional(),
+  skip_extensions: z.array(optionText).min(1).optional(),
   plugins_path: localPathStringSchema
     .refine(isAbsolute)
     .optional()
@@ -133,6 +138,12 @@ export const firmwareEngineSchema = z.strictObject({
   name: z.string(),
   version: z.string(),
   executable_path: z.string(),
+  resolved_executable_path: z
+    .string()
+    .optional()
+    .describe(
+      "Resolved fingerprinted executable when distinct from the selected invocation path",
+    ),
   executable_sha256: digestSchema,
   source_revision: z.null(),
   worker_count: z.number().int().positive(),
@@ -185,29 +196,61 @@ export interface FirmwarePartialObservation {
 }
 
 /** Portable results retain reported boundaries, unknowns and extraction lineage. */
+export const binwalkRegionResultSchema = z.strictObject({
+  engine: firmwareEngineSchema,
+  input_size: bytes,
+  selection: firmwareSelectionSchema.optional(),
+  regions: z.array(
+    z.strictObject({
+      provider_id: z.string(),
+      offset: bytes.describe(
+        "Original-file byte offset, adjusted once from the selection",
+      ),
+      local_offset: bytes
+        .describe("Native byte offset within the immutable selected input")
+        .optional(),
+      reported_size: bytes,
+      signature: z.string(),
+      description: z.string(),
+      reported_confidence: z.number().int().min(0).max(255),
+      size_basis: z.literal("provider_reported_validation_unknown"),
+    }),
+  ),
+  coverage: z.literal("signature_scan"),
+});
+const unblobObservationFields = {
+  chunks: z.array(chunk),
+  derivations: z.array(
+    z.strictObject({
+      parent_path: z.string(),
+      child_path: z.string(),
+      provider_blob_id: z.string(),
+      handler: z.string().nullable(),
+      parent_file_range: range.nullable(),
+    }),
+  ),
+  depth_limited_paths: z.array(z.string()),
+  diagnostics: z.array(jsonValueSchema),
+  tasks: z.array(firmwareTaskSchema),
+  randomness: z.array(firmwareRandomnessSchema),
+  multifiles: z.array(firmwareMultiFileSchema),
+  deleted_files: z.array(firmwareDeletedFileSchema),
+};
+/** Unblob inspection has native task/chunk semantics, without published artifacts. */
+export const unblobRegionResultSchema = z.strictObject({
+  provider_id: z.literal("unblob"),
+  mode: z.literal("inspection"),
+  engine: firmwareEngineSchema.extend({ name: z.literal("unblob") }),
+  input_size: bytes,
+  selection: firmwareSelectionSchema,
+  coverage: z.enum(["complete", "partial"]),
+  ...unblobObservationFields,
+});
 export const firmwareResultSchemas = {
-  inspect_firmware_regions: z.strictObject({
-    engine: firmwareEngineSchema,
-    input_size: bytes,
-    selection: firmwareSelectionSchema.optional(),
-    regions: z.array(
-      z.strictObject({
-        provider_id: z.string(),
-        offset: bytes.describe(
-          "Original-file byte offset, adjusted once from the selection",
-        ),
-        local_offset: bytes
-          .describe("Native byte offset within the immutable selected input")
-          .optional(),
-        reported_size: bytes,
-        signature: z.string(),
-        description: z.string(),
-        reported_confidence: z.number().int().min(0).max(255),
-        size_basis: z.literal("provider_reported_validation_unknown"),
-      }),
-    ),
-    coverage: z.literal("signature_scan"),
-  }),
+  inspect_firmware_regions: z.union([
+    binwalkRegionResultSchema,
+    unblobRegionResultSchema,
+  ]),
   extract_firmware: z.strictObject({
     engine: firmwareEngineSchema,
     selection: firmwareSelectionSchema,

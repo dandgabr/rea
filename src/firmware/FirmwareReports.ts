@@ -264,6 +264,7 @@ export const normalizeBinwalkReport = (
 export const normalizeUnblobReport = (
   raw: unknown,
   context: {
+    operation?: "inspect_firmware_regions" | "extract_firmware";
     inputPath: string;
     outputRoot: string;
     sha256: string;
@@ -283,7 +284,7 @@ export const normalizeUnblobReport = (
   );
   if (roots.length !== 1)
     throw new AnalysisOutputError(
-      "extract_firmware",
+      context.operation ?? "extract_firmware",
       "Expected exactly one selected input task",
     );
   const rootHash = roots[0]?.reports.find(
@@ -294,7 +295,7 @@ export const normalizeUnblobReport = (
     hashes.parse(rootHash).sha256 !== context.sha256
   )
     throw new AnalysisOutputError(
-      "extract_firmware",
+      context.operation ?? "extract_firmware",
       "Unblob input hash disagrees with selected snapshot",
     );
   const files = new Map<
@@ -385,7 +386,7 @@ export const normalizeUnblobReport = (
     const key = JSON.stringify([parentPath, id]);
     if (blobOrigins.has(key))
       throw new AnalysisOutputError(
-        "extract_firmware",
+        context.operation ?? "extract_firmware",
         `Duplicate blob identity in parent task: ${parentPath} (${id})`,
       );
     blobOrigins.set(key, origin);
@@ -469,7 +470,7 @@ export const normalizeUnblobReport = (
     const path = logical(record.task.path);
     if (seen.has(path))
       throw new AnalysisOutputError(
-        "extract_firmware",
+        context.operation ?? "extract_firmware",
         `Duplicate analysis task: ${path}`,
       );
     seen.add(path);
@@ -479,18 +480,18 @@ export const normalizeUnblobReport = (
     );
     if (metadata === undefined)
       throw new AnalysisOutputError(
-        "extract_firmware",
+        context.operation ?? "extract_firmware",
         `Missing StatReport: ${path}`,
       );
     const parsedStat = stat.parse(metadata);
     if (parsedStat.path !== record.task.path)
       throw new AnalysisOutputError(
-        "extract_firmware",
+        context.operation ?? "extract_firmware",
         `StatReport is bound to another task: ${path}`,
       );
     if (path === "$input" && parsedStat.size !== context.length)
       throw new AnalysisOutputError(
-        "extract_firmware",
+        context.operation ?? "extract_firmware",
         "Unblob input size disagrees with selected snapshot",
       );
     if (
@@ -498,7 +499,7 @@ export const normalizeUnblobReport = (
       (!parsedStat.is_file || parsedStat.is_link || parsedStat.is_dir)
     )
       throw new AnalysisOutputError(
-        "extract_firmware",
+        context.operation ?? "extract_firmware",
         "Selected input was not reported as a regular file",
       );
     sizes.set(path, parsedStat.size);
@@ -593,12 +594,12 @@ export const normalizeUnblobReport = (
           parsedStat.is_link
         )
           throw new AnalysisOutputError(
-            "extract_firmware",
+            context.operation ?? "extract_firmware",
             "Deletion report is bound to another task or a non-deletable input",
           );
         if (deletedFiles.some((entry) => entry.path === path))
           throw new AnalysisOutputError(
-            "extract_firmware",
+            context.operation ?? "extract_firmware",
             `Duplicate deletion report: ${path}`,
           );
         deletedFiles.push({
@@ -636,7 +637,7 @@ export const normalizeUnblobReport = (
           parsed.size !== parsed.end_offset - parsed.start_offset
         )
           throw new AnalysisOutputError(
-            "extract_firmware",
+            context.operation ?? "extract_firmware",
             `Invalid chunk bounds for ${path}`,
           );
         const detail =
@@ -745,7 +746,7 @@ export const normalizeUnblobReport = (
       const childPath = logical(child.path);
       if (!seen.has(childPath))
         throw new AnalysisOutputError(
-          "extract_firmware",
+          context.operation ?? "extract_firmware",
           `Missing child task: ${childPath}`,
         );
       const reportedChild = recordsByPath.get(child.path);
@@ -755,7 +756,7 @@ export const normalizeUnblobReport = (
         reportedChild.is_multi_file !== child.is_multi_file
       )
         throw new AnalysisOutputError(
-          "extract_firmware",
+          context.operation ?? "extract_firmware",
           `Child task identity disagrees with its analysis: ${childPath}`,
         );
       const origin = blobOrigins.get(
@@ -788,7 +789,7 @@ export const normalizeUnblobReport = (
   }
   if (reachable.size !== seen.size)
     throw new AnalysisOutputError(
-      "extract_firmware",
+      context.operation ?? "extract_firmware",
       "Report contains tasks disconnected from the selected input",
     );
   const tasksByPath = new Map(tasks.map((item) => [item.path, item]));

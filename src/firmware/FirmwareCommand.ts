@@ -97,7 +97,7 @@ export const resolveFirmwareCommand = async (
       `Resource limiter is not an executable regular file: ${limiter}: ${cause instanceof Error ? cause.message : String(cause)}; provide util-linux prlimit`,
     );
   }
-  return { command, limiter, sha256 };
+  return { command: configured, resolvedCommand: command, limiter, sha256 };
 };
 
 /** Execute one bounded provider command and verify its owned descendants have stopped. */

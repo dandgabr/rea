@@ -5,7 +5,10 @@ import { expect, it } from "vitest";
 import { STDIO_DEFAULT_MAX_BUFFER_SIZE } from "@modelcontextprotocol/server";
 
 import { toolContract } from "../../../src/contracts/toolContracts.js";
-import { firmwareResultSchemas } from "../../../src/domain/firmware/firmwareAnalysis.js";
+import {
+  firmwareResultSchemas,
+  binwalkRegionResultSchema,
+} from "../../../src/domain/firmware/firmwareAnalysis.js";
 import { projectAnalysisError } from "../../../src/domain/analysisErrorProjection.js";
 import { ToolResultDelivery } from "../../../src/server/toolResult.js";
 import {
@@ -98,9 +101,8 @@ it.skipIf(process.platform !== "linux" || process.getuid?.() === 0)(
         if (!inspected.ok) throw inspected.error;
         expect(inspected.value.subject?.local_path).toBe(fixture.path);
         expect(
-          firmwareResultSchemas.inspect_firmware_regions.parse(
-            inspected.value.normalized_result,
-          ).regions[0]?.signature,
+          binwalkRegionResultSchema.parse(inspected.value.normalized_result)
+            .regions[0]?.signature,
         ).toBe("gzip");
       }
       await expect(fixture.close()).rejects.toMatchObject({

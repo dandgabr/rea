@@ -7,7 +7,7 @@ import {
   type ExecutionOptions,
 } from "../application/AnalysisProvider.js";
 import {
-  firmwareResultSchemas,
+  binwalkRegionResultSchema,
   type FirmwareRequest,
   type FirmwarePartialObservation,
 } from "../domain/firmware/firmwareAnalysis.js";
@@ -18,16 +18,24 @@ import {
   AnalysisInputError,
   AnalysisOutputError,
   AnalysisTimeoutError,
+  AnalysisResourceConstraintError,
 } from "../domain/analysisErrorCore.js";
 import { ProviderAdapterError } from "../domain/providerAdapterError.js";
 import { ProviderCleanupError } from "../domain/providerCleanupError.js";
 import { jsonValueSchema } from "../domain/jsonValue.js";
 import { err, ok } from "../domain/result.js";
 import { PrivateRuntimeRoot } from "../process/PrivateRuntimeRoot.js";
+import { ArtifactAnalysisResources } from "../process/ArtifactAnalysisResources.js";
+import { readStableArtifact } from "../artifacts/readStableArtifact.js";
+import { readLinuxResourceLimits } from "../process/LinuxResourceLimits.js";
 import type { ProviderProcessSupervisor } from "../process/ProviderProcess.js";
 import type { SafeOutputTree } from "../artifacts/SafeOutputTree.js";
 import { publishFirmwareExtraction } from "./FirmwarePublication.js";
-import { createFirmwareExtractionObservation } from "./FirmwareExtractionObservation.js";
+import {
+  createFirmwareExtractionObservation,
+  createFirmwareInspectionObservation,
+} from "./FirmwareExtractionObservation.js";
+import { unblobExecutionOptions } from "./UnblobOptions.js";
 import {
   FIRMWARE_LIMITS,
   BINWALK_PROVIDER_IDENTITY,
@@ -80,32 +88,27 @@ const combineCleanupFailures = (
     { operation: "close_firmware", cause: new AggregateError(failures) },
   );
 };
-const waitForPredecessor = (
-  predecessor: Promise<void>,
-  operation: string,
-  signal?: AbortSignal,
-): Promise<void> =>
-  new Promise((resolve, reject) => {
-    const abort = () => reject(new AnalysisCancelledError(operation));
-    signal?.addEventListener("abort", abort, { once: true });
-    if (signal?.aborted === true) abort();
-    void predecessor.then(() => {
-      signal?.removeEventListener("abort", abort);
-      resolve();
-    });
-  });
 const limitations = [
   "Signature matches and reported sizes do not establish partition validity, encryption or runtime mappings. Binwalk may infer unknown lengths before emitting its report.",
-  "Only Linux is supported by this integration. One worker, inherited per-process address-space/file-size/CPU limits and a deadline constrain execution; staging byte and entry budgets are polled and may transiently overshoot. Limits are not aggregate process-memory or filesystem quotas.",
-  "Unblob's default sandbox and skip rules remain enabled. Missing external extractors, unknown chunks, encrypted chunks and depth limits yield partial coverage. Extracted code is never executed; only regular files are published, without executable permission bits.",
+  "Only Linux is supported by this integration. Configured workers, inherited per-process address-space/file-size/CPU limits and a deadline constrain execution; staging byte and entry budgets are polled and may transiently overshoot. Limits are not aggregate process-memory or filesystem quotas.",
+  "Unblob's default sandbox setup is requested, but Landlock can silently fall back; isolation is not attested. Caller-selected skip rules and missing external extractors, unknown chunks, encrypted chunks or depth limits constrain coverage. Trusted installed plugin entrypoints can execute code and access the network before sandbox setup with unknown inventory. Extracted code is never automatically executed; only regular files are published, without executable permission bits.",
   "extraction_gaps lists regions that were carved or left unextracted and names extractor dependencies the producer reported as missing. A listed gap does not mean the target is corrupt or that a retained region is empty.",
   "The actual launcher executable is hashed. Interpreter, shared libraries and installed Python package dependencies are not independently attested; source revision remains unknown for caller-supplied builds.",
 ] as const;
 
-/** Queued bring-your-own firmware adapters with private snapshots and owned cleanup. */
+/** Bring-your-own firmware adapters with one outstanding admission and owned cleanup. */
 export class FirmwareProvider implements FirmwareAnalysisPort {
-  #tail: Promise<void> = Promise.resolve();
-  #closed = false;
+  readonly #resources = new ArtifactAnalysisResources(
+    "firmware",
+    "firmware_analysis",
+    readStableArtifact,
+    readLinuxResourceLimits,
+    {
+      message:
+        "A firmware operation is already outstanding; retry after it completes.",
+      details: { max_outstanding_operations: 1 },
+    },
+  );
   readonly #pendingCleanup = new Map<string, PendingFirmwareCleanup>();
   constructor(
     readonly environment: Readonly<
@@ -119,39 +122,43 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
     request: FirmwareRequest,
     options?: ExecutionOptions,
   ): Promise<Outcome> {
-    if (this.#closed) return err(new AnalysisCancelledError(request.operation));
-    const predecessor = this.#tail;
-    let release = () => {};
-    this.#tail = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    // Cancel the caller promptly without letting a later request bypass its predecessor.
-    try {
-      await waitForPredecessor(predecessor, request.operation, options?.signal);
-    } catch (cause: unknown) {
-      void predecessor.then(release);
-      return err(
-        cause instanceof AnalysisError
-          ? cause
-          : new AnalysisCancelledError(request.operation),
-      );
-    }
-    try {
-      if (this.#closed)
-        return err(new AnalysisCancelledError(request.operation));
+    const admitted = await this.#resources.run(async () => {
       const cleanup = await this.#retryCleanup();
       if (cleanup.processUnverified && cleanup.failure !== undefined)
         return err(cleanup.failure);
       return await this.#execute(request, options);
-    } finally {
-      release();
+    }, options?.signal);
+    // Resource admission is generic; the adapter binds refusals to this named request.
+    if (!admitted.ok) {
+      if (
+        admitted.error instanceof AnalysisResourceConstraintError &&
+        admitted.error.operation === "firmware_analysis"
+      )
+        return err(
+          new AnalysisResourceConstraintError(
+            request.operation,
+            admitted.error.resource,
+            admitted.error.reason,
+            admitted.error.reportedLimits,
+            { cause: admitted.error },
+          ),
+        );
+      if (
+        admitted.error instanceof AnalysisCancelledError &&
+        admitted.error.operation === "firmware_analysis"
+      )
+        return err(
+          new AnalysisCancelledError(request.operation, {
+            cause: admitted.error,
+          }),
+        );
     }
+    return admitted;
   }
 
   /** Retry every retained owner, reporting failures without discarding other roots. */
   async close(): Promise<void> {
-    this.#closed = true;
-    await this.#tail;
+    await this.#resources.close();
     const cleanup = await this.#retryCleanup();
     if (cleanup.failure !== undefined) throw cleanup.failure;
   }
@@ -237,13 +244,13 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
     try {
       if (signal.aborted) throw new AnalysisCancelledError(request.operation);
       if (
-        request.operation === "inspect_firmware_regions" &&
-        engineName === "unblob"
+        request.input.provider_id === "unblob" &&
+        request.input.options.plugins_path !== undefined
       )
         throw firmwareToolUnavailable(
           engineName,
           request.operation,
-          "Unblob inspection is not implemented by this firmware adapter",
+          "Explicit trusted plugin identity is not yet implemented by this firmware adapter",
         );
       const command = await resolveFirmwareCommand(
         this.environment,
@@ -297,14 +304,23 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
         name: engineName,
         version: admitted.version,
         executable_path: command.command,
+        ...(command.resolvedCommand === command.command
+          ? {}
+          : { resolved_executable_path: command.resolvedCommand }),
         executable_sha256: command.sha256,
         source_revision: null,
-        worker_count: 1 as const,
+        worker_count:
+          request.input.provider_id === "unblob"
+            ? request.input.options.workers
+            : 1,
       };
       const reportPath = join(root.path, "report.json");
       let result: unknown;
       let raw: unknown;
-      if (request.operation === "inspect_firmware_regions") {
+      if (
+        request.operation === "inspect_firmware_regions" &&
+        request.input.provider_id === "binwalk"
+      ) {
         const processRun = await run([
           "--quiet",
           "--search-all",
@@ -320,7 +336,7 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
           operation: request.operation,
           execution: processRun,
         });
-        result = firmwareResultSchemas.inspect_firmware_regions.parse({
+        result = binwalkRegionResultSchema.parse({
           engine,
           input_size: target.size,
           ...(request.input.range === undefined
@@ -336,7 +352,10 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
         });
         raw = { report, execution: processRun, version_execution: versionRun };
       } else {
-        if (!isAbsolute(request.input.output_directory))
+        if (
+          request.operation === "extract_firmware" &&
+          !isAbsolute(request.input.output_directory)
+        )
           throw new AnalysisInputError(request.operation, undefined, [
             {
               path: ["output_directory"],
@@ -345,14 +364,22 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
             },
           ]);
         const outputRoot = join(root.path, "extracted");
+        const nativeOptions = unblobExecutionOptions(request);
+        const maxDepth =
+          request.operation === "extract_firmware"
+            ? request.input.max_depth
+            : 1;
+        const outputBytes =
+          request.operation === "extract_firmware"
+            ? request.input.max_output_bytes
+            : 256 * 1024 * 1024;
+        const outputFiles =
+          request.operation === "extract_firmware"
+            ? request.input.max_output_files
+            : 10_000;
         const processRun = await run(
           [
-            "--process-num",
-            "1",
-            "--depth",
-            String(request.input.max_depth),
-            "--randomness-depth",
-            "0",
+            ...nativeOptions.args,
             "--report",
             reportPath,
             "--log",
@@ -363,8 +390,8 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
           ],
           {
             root: outputRoot,
-            bytes: request.input.max_output_bytes,
-            entries: request.input.max_output_files,
+            bytes: outputBytes,
+            entries: outputFiles,
           },
         );
         const report = await readFirmwareCommandReport({
@@ -374,18 +401,29 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
           execution: processRun,
         });
         const normalized = normalizeUnblobReport(report, {
+          operation: request.operation,
           inputPath: target.inputPath,
           outputRoot,
           ...target.selection,
-          maxDepth: request.input.max_depth,
+          maxDepth,
+          skipMagic: nativeOptions.skipMagic,
+          skipExtensions: nativeOptions.skipExtensions,
         });
         raw = { report, execution: processRun, version_execution: versionRun };
-        const observation = createFirmwareExtractionObservation({
-          outputDirectory: request.input.output_directory,
-          normalized,
-          selection: target.selection,
-          engine,
-        });
+        const observation =
+          request.operation === "extract_firmware"
+            ? createFirmwareExtractionObservation({
+                outputDirectory: request.input.output_directory,
+                normalized,
+                selection: target.selection,
+                engine,
+              })
+            : createFirmwareInspectionObservation({
+                engine,
+                inputSize: target.size,
+                selection: target.selection,
+                normalized,
+              });
         prepublicationObservation = {
           ...observation,
           provenance: jsonValueSchema.parse({
@@ -415,34 +453,38 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
             request.operation,
             "Unblob failed without a reported extraction diagnostic",
           );
-        const entries = await inventoryFirmwareOutput(
-          outputRoot,
-          request.input.max_output_bytes,
-          request.input.max_output_files,
-          request.operation,
-          signal,
-        );
-        result = await publishFirmwareExtraction({
-          outputDirectory: request.input.output_directory,
-          entries,
-          normalized,
-          observation: prepublicationObservation,
-          selection: target.selection,
-          maxDepth: request.input.max_depth,
-          engine,
-          signal,
-          retainCleanup: (tree) => {
-            const pending: PendingFirmwareCleanup = this.#pendingCleanup.get(
-              ownedRoot.path,
-            ) ?? {
-              root: ownedRoot,
-              engine: engineName,
-              operation: request.operation,
-            };
-            pending.tree = tree;
-            this.#pendingCleanup.set(ownedRoot.path, pending);
-          },
-        });
+        if (request.operation === "inspect_firmware_regions") {
+          result = observation.result;
+        } else {
+          const entries = await inventoryFirmwareOutput(
+            outputRoot,
+            request.input.max_output_bytes,
+            request.input.max_output_files,
+            request.operation,
+            signal,
+          );
+          result = await publishFirmwareExtraction({
+            outputDirectory: request.input.output_directory,
+            entries,
+            normalized,
+            observation: prepublicationObservation,
+            selection: target.selection,
+            maxDepth,
+            engine,
+            signal,
+            retainCleanup: (tree) => {
+              const pending: PendingFirmwareCleanup = this.#pendingCleanup.get(
+                ownedRoot.path,
+              ) ?? {
+                root: ownedRoot,
+                engine: engineName,
+                operation: request.operation,
+              };
+              pending.tree = tree;
+              this.#pendingCleanup.set(ownedRoot.path, pending);
+            },
+          });
+        }
       }
       const catalog =
         engineName === "binwalk"

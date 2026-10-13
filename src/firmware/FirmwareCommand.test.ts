@@ -1,4 +1,4 @@
-import { chmod, mkdir, writeFile } from "node:fs/promises";
+import { chmod, mkdir, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { expect, it as test } from "vitest";
@@ -9,6 +9,23 @@ import { projectAnalysisError } from "../domain/analysisErrorProjection.js";
 import { resolveFirmwareCommand } from "./FirmwareCommand.js";
 
 const it = test.skipIf(process.platform !== "linux");
+
+it("preserves a caller-selected executable invocation path separately from resolved identity", async () => {
+  const root = await createTestTempDirectory("rea-firmware-invocation-");
+  const actual = await executableFixture(root, "actual-tool");
+  const selected = join(root, "selected-entrypoint");
+  await symlink("actual-tool", selected);
+  const admitted = await resolveFirmwareCommand(
+    { REA_UNBLOB_COMMAND: selected },
+    "unblob",
+    "inspect_firmware_regions",
+  );
+  expect(admitted.command).toBe(selected);
+  expect(admitted).toMatchObject({
+    resolvedCommand: actual,
+    sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+  });
+});
 
 test("names the host and tool requirement of an unconfigured engine", async () => {
   const refusal: unknown = await resolveFirmwareCommand(

@@ -253,11 +253,15 @@ export const TOOL_EFFECTS: Readonly<Record<string, ToolEffects>> = {
     mutatesSession: true,
     launchesProcess: true,
     writesFilesystem: true,
+    executesForeignCode: true,
+    accessesNetwork: true,
   }),
   extract_firmware: effects({
     mutatesSession: true,
     launchesProcess: true,
     writesFilesystem: true,
+    executesForeignCode: true,
+    accessesNetwork: true,
     idempotent: false,
   }),
   inspect_android_package: effects({

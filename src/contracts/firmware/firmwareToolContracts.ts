@@ -13,7 +13,7 @@ export const FIRMWARE_TOOL_CONTRACTS = [
     ...toolContractMetadata("inspect_firmware_regions"),
     kind: "firmware-provider",
     description:
-      "Inspect signature candidates in a local firmware file with Binwalk 3.1.x (verified with 3.1.0). Returns offsets, reported lengths, descriptions and raw confidence values. Length validation and runtime addresses remain unknown. No extraction or target execution. Linux, caller-supplied tool and util-linux prlimit required; 128 MiB input limit, one worker and 120-second deadline.",
+      "Inspect caller-selected firmware bytes with default Binwalk 3.1.x or explicit Unblob 26.6.x (verified with 3.1.0 and 26.6.4). Binwalk returns signature candidates and reported confidence; Unblob skip-extraction returns chunks, stat/hash/magic, scoped native randomness when measured, and processing diagnostics. No published extraction or automatic target execution. Linux, caller-supplied tool and util-linux prlimit required; 128 MiB input, one outstanding operation per provider and 120-second deadline. Unblob installed trusted plugin entrypoints may execute code and access the network before sandbox setup; native Landlock fallback means isolation is not attested.",
     inputSchema: firmwareInputSchemas.inspect_firmware_regions,
     outputSchema: evidenceResultOf(
       firmwareResultSchemas.inspect_firmware_regions,
@@ -30,7 +30,7 @@ export const FIRMWARE_TOOL_CONTRACTS = [
     ...toolContractMetadata("extract_firmware"),
     kind: "firmware-provider",
     description:
-      "Extract caller-selected firmware bytes with Unblob 26.6.x (verified with 26.6.4) into an absent output directory. Returns verified child paths/digests, task derivations, unknown chunks, extraction diagnostics and explicit extraction_gaps rows naming unextracted regions, missing extractor dependencies and a continuation_id referencing shared extraction_continuations recovery instructions. Preserves the default sandbox; publishes regular files only. Linux, caller-supplied tool, format-specific extractors and util-linux prlimit required. No mounts or extracted-code execution. Select a returned native file with open_binary for Ghidra analysis; decompressed offsets are not original-file addresses.",
+      "Extract caller-selected firmware bytes with Unblob 26.6.x (verified with 26.6.4) into an absent output directory. Named options preserve workers, skip policies, randomness, native carvings, intermediate deletion and suffix layout. Returns verified regular-file paths/digests, native task facts, derivations, unknown chunks, extraction diagnostics, explicit extraction_gaps and a continuation_id referencing shared extraction_continuations recovery instructions. Linux, caller-supplied tool, format-specific extractors and util-linux prlimit required. One outstanding operation per provider; extracted code is never automatically executed. Installed trusted plugin entrypoints may execute code and access the network before sandbox setup; native Landlock fallback means isolation is not attested. Select a returned native file with open_binary for Ghidra analysis; decompressed offsets remain unknown and are not original-file addresses.",
     inputSchema: firmwareInputSchemas.extract_firmware,
     outputSchema: evidenceResultOf(firmwareResultSchemas.extract_firmware),
     examples: [

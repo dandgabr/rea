@@ -6,7 +6,10 @@ import {
   firmwareFixture,
   assertFirmwareCleanup,
 } from "../../fixtures/firmware/provider.js";
-import { firmwareResultSchemas } from "../../../src/domain/firmware/firmwareAnalysis.js";
+import {
+  firmwareResultSchemas,
+  binwalkRegionResultSchema,
+} from "../../../src/domain/firmware/firmwareAnalysis.js";
 import { FirmwareAnalysisService } from "../../../src/application/firmware/FirmwareAnalysisService.js";
 import { FirmwareProvider } from "../../../src/firmware/FirmwareProvider.js";
 import { projectAnalysisError } from "../../../src/domain/analysisErrorProjection.js";
@@ -235,7 +238,7 @@ it("binds region observations to exact bytes and preserves provider-reported unc
     path: fixture.path,
   });
   if (!result.ok) throw result.error;
-  const normalized = firmwareResultSchemas.inspect_firmware_regions.parse(
+  const normalized = binwalkRegionResultSchema.parse(
     result.value.normalized_result,
   );
   expect(normalized.regions[0]).toMatchObject({
@@ -934,7 +937,7 @@ it("distinguishes a successful process with missing output from startup failure"
   await assertFirmwareCleanup(fixture.launches);
 });
 
-it("cancels an owned active process and permits the next queued operation", async () => {
+it("cancels an owned active process and refuses already-cancelled admission", async () => {
   const fixture = await firmwareFixture("stall");
   const controller = new AbortController();
   const pending = fixture.service.execute(
@@ -961,31 +964,50 @@ it("cancels an owned active process and permits the next queued operation", asyn
   await assertFirmwareCleanup(fixture.launches);
 });
 
-it("cancels a waiting request promptly while keeping later launches behind the active operation", async () => {
-  const fixture = await firmwareFixture("stall");
-  const activeController = new AbortController();
-  const active = fixture.service.execute(
-    "inspect_firmware_regions",
-    { path: fixture.path },
-    { signal: activeController.signal },
-  );
-  await expect.poll(() => fixture.launches.length).toBe(2);
-  const queuedController = new AbortController();
-  const queued = fixture.service.execute(
-    "inspect_firmware_regions",
-    { path: fixture.path },
-    { signal: queuedController.signal },
-  );
-  queuedController.abort();
-  expect(await queued).toMatchObject({
-    ok: false,
-    error: { _tag: "AnalysisCancelledError" },
-  });
-  expect(fixture.launches).toHaveLength(2);
-  activeController.abort();
-  expect((await active).ok).toBe(false);
-  await assertFirmwareCleanup(fixture.launches);
-});
+it.each(["admitted", "running"])(
+  "rejects busy capacity without admitting a waiter: %s",
+  async (stage) => {
+    const fixture = await firmwareFixture("stall");
+    const activeController = new AbortController();
+    const active = fixture.service.execute(
+      "inspect_firmware_regions",
+      { path: fixture.path },
+      { signal: activeController.signal },
+    );
+    try {
+      if (stage === "running")
+        await expect.poll(() => fixture.launches.length).toBe(2);
+      const otherController = new AbortController();
+      const refusal = fixture.service.execute(
+        "inspect_firmware_regions",
+        { path: fixture.path },
+        { signal: otherController.signal },
+      );
+      const observed = await Promise.race([
+        refusal,
+        new Promise((resolve) => {
+          const timer = setTimeout(() => {
+            otherController.abort();
+            resolve("admitted waiter");
+          }, 200);
+          void refusal.finally(() => clearTimeout(timer));
+        }),
+      ]);
+      expect(observed).toMatchObject({
+        ok: false,
+        error: {
+          _tag: "AnalysisResourceConstraintError",
+          resource: "capacity",
+        },
+      });
+      if (stage === "running") expect(fixture.launches).toHaveLength(2);
+    } finally {
+      activeController.abort();
+      expect((await active).ok).toBe(false);
+    }
+    await assertFirmwareCleanup(fixture.launches);
+  },
+);
 
 it("retains an uncertain worker's workspace and blocks later launches", async () => {
   const fixture = await firmwareFixture("cleanup-failure");
@@ -1107,7 +1129,7 @@ it("rejects native inspection hits outside the selected bytes even when inside t
   await assertFirmwareCleanup(fixture.launches);
 });
 
-it("fails closed for Unblob inspection rather than invoking the registered Binwalk adapter", async () => {
+it("selects real Unblob skip-extraction inspection without invoking Binwalk", async () => {
   const fixture = await firmwareFixture();
   const unsupported = await fixture.service.execute(
     "inspect_firmware_regions",
@@ -1118,14 +1140,18 @@ it("fails closed for Unblob inspection rather than invoking the registered Binwa
     },
   );
   expect(unsupported).toMatchObject({
-    ok: false,
-    error: {
-      _tag: "AnalysisCapabilityUnavailableError",
-      providerId: "unblob",
-      operation: "inspect_firmware_regions",
+    ok: true,
+    value: {
+      provider: { id: "unblob" },
+      normalized_result: {
+        provider_id: "unblob",
+        mode: "inspection",
+        engine: { worker_count: 3 },
+        chunks: [{ handler: "gzip" }],
+      },
     },
   });
-  expect(fixture.launches).toEqual([]);
+  expect(fixture.launches[1]?.args).toContain("--skip-extraction");
   const supported = await fixture.service.execute("inspect_firmware_regions", {
     path: fixture.path,
     provider_id: "binwalk",

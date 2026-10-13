@@ -63,8 +63,6 @@ const EXECUTION_WORDING_EXCEPTIONS: Readonly<Record<string, string>> = {
   inspect_adb_client:
     "inspects the operator-selected adb client; never starts its server",
   list_adb_devices: "may start the local adb server, which REA does not own",
-  inspect_firmware_regions: "states there is no target execution",
-  extract_firmware: "states that extracted code is never executed",
   analyze_javascript_application: "reconstructs the graph without executing",
   reconcile_javascript_runtime: "never invents execution claims",
   observe_javascript_runtime: "never evaluates or resumes the target",
@@ -99,6 +97,14 @@ const declaresForeignAuthority = (name: string): boolean => {
 };
 
 describe("tool effects", () => {
+  it("declares native Unblob plugin import authority for inspection and extraction", () => {
+    for (const name of ["inspect_firmware_regions", "extract_firmware"]) {
+      expect(TOOL_EFFECTS[name]).toMatchObject({
+        executesForeignCode: true,
+        accessesNetwork: true,
+      });
+    }
+  });
   it("audits every public tool exactly once", () => {
     expect(Object.keys(TOOL_EFFECTS).sort()).toEqual(
       TOOL_CONTRACTS.map(({ name }) => name).sort(),
@@ -142,6 +148,8 @@ describe("tool effects", () => {
       "cutter_command",
       "execute_rizin_command",
       "gdb_console",
+      "extract_firmware",
+      "inspect_firmware_regions",
       "install_adb_package",
       "instrument_with_frida",
       "load_frida_script",

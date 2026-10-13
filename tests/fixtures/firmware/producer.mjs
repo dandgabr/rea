@@ -60,6 +60,56 @@ if (args.includes("--version")) {
         },
       ]),
     );
+  } else if (args.includes("--skip-extraction")) {
+    const recognized = mode !== "unrecognized";
+    await mkdir(args[args.indexOf("--extract-dir") + 1], { recursive: true });
+    const reports = [
+      {
+        __typename__: "StatReport",
+        path: input,
+        size: bytes.length,
+        is_file: true,
+        is_dir: false,
+        is_link: false,
+        link_target: null,
+      },
+      {
+        __typename__: "FileMagicReport",
+        magic: "data",
+        mime_type: "application/octet-stream",
+      },
+      {
+        __typename__: "HashReport",
+        sha256: mode === "wrong-hash" ? "a".repeat(64) : sha256,
+      },
+    ];
+    if (recognized)
+      reports.push({
+        __typename__: "ChunkReport",
+        id: "gzip-id",
+        start_offset: 0,
+        end_offset: bytes.length,
+        size: bytes.length,
+        handler_name: "gzip",
+        is_encrypted: false,
+        extraction_reports: [],
+      });
+    if (!recognized && Number(args[args.indexOf("--randomness-depth") + 1]) > 0)
+      reports.push({
+        __typename__: "RandomnessReport",
+        shannon: { block_size: 1024, percentages: [0], mean: 0 },
+        chi_square: { block_size: 1024, percentages: [0], mean: 0 },
+      });
+    await writeFile(
+      reportPath,
+      JSON.stringify([
+        {
+          task: { path: input, depth: 0, blob_id: "", is_multi_file: false },
+          reports,
+          subtasks: [],
+        },
+      ]),
+    );
   } else {
     const deleted = mode === "deleted" || mode === "deleted-and-missing";
     const observationFacts = mode?.startsWith("observation-facts") === true;

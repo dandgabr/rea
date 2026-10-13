@@ -1,10 +1,23 @@
 import {
   firmwareExtractionObservationSchema,
+  unblobRegionResultSchema,
   type FirmwarePartialObservation,
 } from "../domain/firmware/firmwareAnalysis.js";
 import type { z } from "zod";
 import type { normalizeUnblobReport } from "./FirmwareReports.js";
 import { jsonValueSchema } from "../domain/jsonValue.js";
+
+const facts = (normalized: ReturnType<typeof normalizeUnblobReport>) => ({
+  coverage: normalized.coverage,
+  chunks: normalized.chunks,
+  derivations: normalized.derivations,
+  depth_limited_paths: normalized.depth_limited_paths,
+  diagnostics: normalized.diagnostics,
+  tasks: normalized.tasks,
+  randomness: normalized.randomness,
+  multifiles: normalized.multifiles,
+  deleted_files: normalized.deleted_files,
+});
 
 /** Own normalized producer facts before acquiring a caller publication tree. */
 export const createFirmwareExtractionObservation = (context: {
@@ -20,15 +33,27 @@ export const createFirmwareExtractionObservation = (context: {
       selection: context.selection,
       publication_state: "not_committed",
       requested_output_directory: context.outputDirectory,
-      coverage: context.normalized.coverage,
-      chunks: context.normalized.chunks,
-      derivations: context.normalized.derivations,
-      depth_limited_paths: context.normalized.depth_limited_paths,
-      diagnostics: context.normalized.diagnostics,
-      tasks: context.normalized.tasks,
-      randomness: context.normalized.randomness,
-      multifiles: context.normalized.multifiles,
-      deleted_files: context.normalized.deleted_files,
+      ...facts(context.normalized),
+    }),
+  ),
+});
+
+/** Inspection producer facts never acquire artifact publication paths. */
+export const createFirmwareInspectionObservation = (context: {
+  engine: z.infer<typeof firmwareExtractionObservationSchema>["engine"];
+  inputSize: number;
+  selection: z.infer<typeof unblobRegionResultSchema>["selection"];
+  normalized: ReturnType<typeof normalizeUnblobReport>;
+}): FirmwarePartialObservation => ({
+  kind: "firmware",
+  result: jsonValueSchema.parse(
+    unblobRegionResultSchema.parse({
+      provider_id: "unblob",
+      mode: "inspection",
+      engine: context.engine,
+      input_size: context.inputSize,
+      selection: context.selection,
+      ...facts(context.normalized),
     }),
   ),
 });
