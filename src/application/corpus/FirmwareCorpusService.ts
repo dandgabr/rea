@@ -50,6 +50,7 @@ export class FirmwareCorpusService {
       "connection" in parsed.data
         ? parsed.data.connection.authorization
         : undefined,
+      "latin1",
     ).value(parameters);
     const collectionState: { disposition: "retain" | "explicit-reattempt" } = {
       disposition: "retain",

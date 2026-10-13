@@ -1,4 +1,5 @@
 import { expect, it } from "vitest";
+import { knownSensitiveValueRedactor } from "../../domain/knownSensitiveValueRedaction.js";
 import { parseFactNativeConfiguration } from "./FactNativeConfiguration.js";
 
 const config = (server: string, storage = "/tmp/owned-fact-storage") =>
@@ -97,4 +98,31 @@ it("runs seeded local-config properties without leaking malformed private source
     }
     expect(rejected).toBe(true);
   }
+});
+
+it("keeps native scalar credentials independent of the HTTP header byte constraint", () => {
+  const secret = "秘密🗝️";
+  const bytes = Buffer.from(
+    config("localhost")
+      .toString()
+      .replace('"private-password"', JSON.stringify(secret)),
+  );
+  const parsed = parseFactNativeConfiguration(bytes);
+  expect(parsed.credentials).toContain(secret);
+  expect(
+    knownSensitiveValueRedactor(secret).value({
+      diagnostic: secret,
+      path: "/firmware/漢字😀.bin",
+    }),
+  ).toEqual({ diagnostic: "[REDACTED]", path: "/firmware/漢字😀.bin" });
+  for (const escaped of ["\\uD800", "\\uDFFF"])
+    expect(() =>
+      parseFactNativeConfiguration(
+        Buffer.from(
+          config("localhost")
+            .toString()
+            .replace('"private-password"', `"${escaped}"`),
+        ),
+      ),
+    ).toThrow(/TOML|UTF/iu);
 });

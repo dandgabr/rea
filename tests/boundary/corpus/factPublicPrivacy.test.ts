@@ -81,7 +81,7 @@ cliTest(
 cliTest(
   "redacts repeated actual authentication in CLI and retained MCP Evidence while delivering original queries",
   async ({ cli }) => {
-    const secret = 'synthetic-review-key+a/b"';
+    const secret = 'synthetic-review-key+a/bé"';
     const variants = [
       secret,
       encodeURIComponent(secret),
@@ -89,6 +89,13 @@ cliTest(
       Buffer.from(secret).toString("hex"),
       Buffer.from(secret).toString("hex").toUpperCase(),
       JSON.stringify(secret).slice(1, -1),
+      Buffer.from(secret, "latin1").toString("base64"),
+      Buffer.from(secret, "latin1").toString("hex"),
+      Buffer.from(secret, "latin1").toString("hex").toUpperCase(),
+      [...Buffer.from(secret, "latin1")]
+        .map((byte) => `%${byte.toString(16).padStart(2, "0")}`)
+        .join(""),
+      secret.replace("é", "%e9"),
       [...Buffer.from(secret)]
         .map((byte) => `%${byte.toString(16).padStart(2, "0")}`)
         .join(""),

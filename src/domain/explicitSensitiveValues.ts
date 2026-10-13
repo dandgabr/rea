@@ -1,3 +1,11 @@
+/** Select the existing marker convention without including a declared literal. */
+export const selectExplicitRedactionReplacement = (
+  literals: readonly string[],
+): string =>
+  ["[REDACTED]", "…", ""].find((candidate) =>
+    literals.every((literal) => literal === "" || !candidate.includes(literal)),
+  ) ?? "";
+
 /** Replace caller-declared literal text values without guessing sensitivity from names. */
 export const redactExplicitText = (
   value: string,
@@ -6,10 +14,7 @@ export const redactExplicitText = (
   const literals = [...new Set(sensitiveValues)].filter(
     (literal) => literal !== "",
   );
-  const replacement =
-    ["[REDACTED]", "…", ""].find((candidate) =>
-      literals.every((literal) => !candidate.includes(literal)),
-    ) ?? "";
+  const replacement = selectExplicitRedactionReplacement(literals);
   let result = value;
   for (const literal of literals.sort(
     (left, right) => right.length - left.length,

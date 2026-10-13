@@ -11,7 +11,15 @@ hyphens. The CLI takes one exact JSON object or a path to a JSON file, and
 archive and output paths must be absolute. A malformed document beginning with
 JSON container grammar is rejected before file access, even when its text ends
 with `.json`. Select an ambiguous real filename with `./` or an absolute path.
-JSON files can hold private transport credentials; protect those files yourself. REA does not consult credential stores.
+JSON files can hold private transport credentials; protect those files yourself.
+`connection.authorization` is the exact HTTP header value: visible/obs-text
+Latin-1 bytes with interior spaces or tabs are allowed; control bytes, DEL,
+characters above U+00FF and leading or
+trailing whitespace are rejected before delivery. Query values, findings and
+paths retain their ordinary Unicode meaning. Known authentication values and
+their supported UTF-8 and actual Latin-1 wire-byte encodings are redacted from
+public Evidence; native configuration text retains UTF-8 semantics. REA does
+not consult credential stores.
 
 ```sh
 rea inspect-firmware-corpus '{"connection":{"endpoint":"http://127.0.0.1:5000","profile":"source-54aed90b"}}' --json

@@ -115,7 +115,10 @@ export class FactRestProvider implements FirmwareCorpusPort {
       options?.signal ?? new AbortController().signal,
       AbortSignal.timeout(FACT_LIMITS.deadlineMs),
     ]);
-    const redact = knownSensitiveValueRedactor(connection.authorization);
+    const redact = knownSensitiveValueRedactor(
+      connection.authorization,
+      "latin1",
+    );
     let path = "",
       method = "GET",
       payload: JsonValue | undefined;

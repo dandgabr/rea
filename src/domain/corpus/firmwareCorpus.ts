@@ -37,7 +37,14 @@ export const corpusConnectionSchema = z.strictObject({
   authorization: z
     .string()
     .min(1)
-    .regex(/^[^\r\n]+$/u)
+    // ByteString transport and RFC 9110 field-value grammar retain the chosen
+    // value: no unsupported code units or normalization of edge whitespace.
+    .regex(
+      /^[\x21-\x7e\x80-\xff](?:[\t\x20-\x7e\x80-\xff]*[\x21-\x7e\x80-\xff])?$/u,
+    )
+    .describe(
+      "Exact nonempty HTTP Authorization field value: Latin-1 visible/obs-text bytes, interior spaces/tabs allowed; no controls, DEL or edge whitespace.",
+    )
     .optional(),
 });
 export const corpusUidSchema = z
