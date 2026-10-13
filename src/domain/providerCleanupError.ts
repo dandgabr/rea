@@ -1,6 +1,9 @@
 import type { JsonValue } from "./jsonValue.js";
 import { ProviderAdapterError } from "./providerAdapterError.js";
-import type { AnalysisPartialObservation } from "./analysisErrorBase.js";
+import type {
+  AnalysisCapturedOutput,
+  AnalysisPartialObservation,
+} from "./analysisErrorBase.js";
 
 /** Provider resources could not be proven closed after bounded cleanup. */
 export class ProviderCleanupError extends ProviderAdapterError {
@@ -16,6 +19,7 @@ export class ProviderCleanupError extends ProviderAdapterError {
     /** Identify the operation owning these resources; binary callers retain their default. */
     options?: ErrorOptions & {
       readonly operation?: string;
+      readonly capturedOutput?: AnalysisCapturedOutput;
       readonly partialObservation?: AnalysisPartialObservation;
       readonly remediationAction?: string;
     },

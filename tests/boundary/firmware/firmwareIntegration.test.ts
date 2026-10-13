@@ -14,6 +14,9 @@ import { FirmwareAnalysisService } from "../../../src/application/firmware/Firmw
 import { FirmwareProvider } from "../../../src/firmware/FirmwareProvider.js";
 import { projectAnalysisError } from "../../../src/domain/analysisErrorProjection.js";
 import { ProviderCleanupError } from "../../../src/domain/providerCleanupError.js";
+import { AnalysisOutputError } from "../../../src/domain/analysisErrorCore.js";
+import { FirmwareFileCleanupError } from "../../../src/firmware/FirmwareFiles.js";
+import { FIRMWARE_LIMITS } from "../../../src/firmware/FirmwareRelease.js";
 import { toolContract } from "../../../src/contracts/toolContracts.js";
 import { ToolResultDelivery } from "../../../src/server/toolResult.js";
 import { SafeOutputTree } from "../../../src/artifacts/SafeOutputTree.js";
@@ -40,6 +43,8 @@ const gapsWithContinuations = (
 };
 const fileCloseFailure = vi.hoisted(() => ({
   enabled: false,
+  rejectClose: false,
+  acquisitions: 0,
   handles: [] as import("node:fs/promises").FileHandle[],
 }));
 
@@ -54,15 +59,18 @@ vi.mock("node:fs/promises", async (importOriginal) => {
     ...filesystem,
     open: async (...args: Parameters<typeof filesystem.open>) => {
       const handle = await filesystem.open(...args);
+      if (fileCloseFailure.enabled) fileCloseFailure.acquisitions += 1;
       if (
         fileCloseFailure.enabled &&
         String(args[0]).endsWith("/extracted/rootfs/config")
       ) {
         const close = handle.close.bind(handle);
-        fileCloseFailure.handles.push(handle);
         handle.close = async () => {
-          if (fileCloseFailure.enabled)
+          if (fileCloseFailure.enabled && fileCloseFailure.rejectClose) {
+            if (!fileCloseFailure.handles.includes(handle))
+              fileCloseFailure.handles.push(handle);
             throw Error("injected extracted descriptor close failure");
+          }
           await close();
         };
       }
@@ -1176,47 +1184,144 @@ it("selects real Unblob skip-extraction inspection without invoking Binwalk", as
   await assertFirmwareCleanup(fixture.launches);
 });
 
-it("retains the descriptor owner when publication rollback also fails", async () => {
-  const fixture = await firmwareFixture();
-  fileCloseFailure.handles.length = 0;
-  fileCloseFailure.enabled = true;
-  const rollback = vi
-    .spyOn(SafeOutputTree.prototype, "rollback")
-    .mockRejectedValue(new Error("injected publication rollback failure"));
-  try {
-    const outcome = await fixture.service.execute("extract_firmware", {
-      path: fixture.path,
-      output_directory: fixture.output,
-    });
-    expect(outcome).toMatchObject({
-      ok: false,
-      error: {
-        cleanupIncomplete: true,
-        partialObservation: {
-          result: {
-            publication_state: "not_committed",
-            tasks: expect.any(Array),
+it.each(["none", "caller", "deadline"] as const)(
+  "retains the descriptor owner when publication rollback also fails: %s",
+  async (lateAbort) => {
+    const fixture = await firmwareFixture();
+    const caller = new AbortController();
+    const deadline = new AbortController();
+    const timeout =
+      lateAbort === "deadline"
+        ? vi
+            .spyOn(AbortSignal, "timeout")
+            .mockImplementationOnce((milliseconds) => {
+              expect(milliseconds).toBe(FIRMWARE_LIMITS.timeoutMs);
+              return deadline.signal;
+            })
+        : undefined;
+    const bytes = "firmware=true\n";
+    const primary = new AnalysisOutputError(
+      "extract_firmware",
+      "Injected failure after independently verified staged bytes",
+      {
+        capturedOutput: { stdout: bytes, stderr: "", truncated: false },
+      },
+    );
+    const originalWrite = SafeOutputTree.prototype.write;
+    const write = vi
+      .spyOn(SafeOutputTree.prototype, "write")
+      .mockImplementationOnce(async function (this: SafeOutputTree, ...args) {
+        await originalWrite.apply(this, args);
+        expect(await readFile(`${this.outputRoot}/${args[0]}`, "utf8")).toBe(
+          bytes,
+        );
+        fileCloseFailure.rejectClose = true;
+        throw primary;
+      });
+    fileCloseFailure.handles.length = 0;
+    fileCloseFailure.acquisitions = 0;
+    fileCloseFailure.rejectClose = false;
+    // Admit the publication handle before its write fails; hash cleanup remains healthy.
+    fileCloseFailure.enabled = true;
+    const rollback = vi
+      .spyOn(SafeOutputTree.prototype, "rollback")
+      .mockImplementation(async () => {
+        if (lateAbort === "caller") caller.abort();
+        if (lateAbort === "deadline") deadline.abort();
+        throw new Error("injected publication rollback failure");
+      });
+    try {
+      const outcome = await fixture.service.execute(
+        "extract_firmware",
+        { path: fixture.path, output_directory: fixture.output },
+        { signal: caller.signal },
+      );
+      expect(outcome).toMatchObject({
+        ok: false,
+        error: {
+          cleanupIncomplete: true,
+          capturedOutput: primary.capturedOutput,
+          partialObservation: {
+            result: {
+              publication_state: "not_committed",
+              tasks: expect.any(Array),
+            },
           },
         },
-      },
-    });
-    expect(fileCloseFailure.handles.length).toBeGreaterThan(0);
-    expect(fileCloseFailure.handles.every((handle) => handle.fd >= 0)).toBe(
-      true,
-    );
-    fileCloseFailure.enabled = false;
-    rollback.mockRestore();
-    await fixture.close();
-    expect(fileCloseFailure.handles.every((handle) => handle.fd === -1)).toBe(
-      true,
-    );
-    await expect(access(fixture.output)).rejects.toMatchObject({
-      code: "ENOENT",
-    });
-  } finally {
-    fileCloseFailure.enabled = false;
-    rollback.mockRestore();
-    for (const handle of fileCloseFailure.handles)
-      if (handle.fd >= 0) await handle.close();
-  }
-});
+      });
+      if (outcome.ok) throw Error("Expected compound cleanup failure");
+      const causeChain: unknown[] = [];
+      let cause: unknown = outcome.error;
+      while (cause instanceof Error && !causeChain.includes(cause)) {
+        causeChain.push(cause);
+        cause = cause.cause;
+      }
+      const descriptorError = causeChain.find(
+        (error): error is FirmwareFileCleanupError =>
+          error instanceof FirmwareFileCleanupError,
+      );
+      expect(descriptorError).toBeDefined();
+      expect(causeChain).toContain(primary);
+      expect(descriptorError?.diagnostics?.primary_error).toMatchObject({
+        code: "unreadable_output",
+        details: { reason: primary.reason },
+      });
+      const scope = descriptorError?.resourceScope;
+      expect(scope).toBeDefined();
+      const staging = fixture.launches[0]?.cwd;
+      expect(staging).toBeDefined();
+      expect(outcome.error.cleanupResources).toEqual(
+        expect.arrayContaining([
+          fixture.output,
+          staging,
+          ...fileCloseFailure.handles.map(
+            () => `${staging}/extracted/rootfs/config`,
+          ),
+        ]),
+      );
+      await expect(access(staging!)).resolves.toBeUndefined();
+      expect(fileCloseFailure.handles.length).toBeGreaterThan(0);
+      expect(fileCloseFailure.handles.every((handle) => handle.fd >= 0)).toBe(
+        true,
+      );
+      const launches = fixture.launches.length;
+      const acquisitions = fileCloseFailure.acquisitions;
+      const blocked = await fixture.service.execute("extract_firmware", {
+        path: fixture.path,
+        output_directory: fixture.output,
+      });
+      expect(blocked).toMatchObject({
+        ok: false,
+        error: { cleanupIncomplete: true },
+      });
+      expect(fixture.launches).toHaveLength(launches);
+      expect(fileCloseFailure.acquisitions).toBe(acquisitions);
+      await expect(fixture.close()).rejects.toMatchObject({
+        cleanupIncomplete: true,
+      });
+      await expect(scope!.retryCleanup()).rejects.toBeDefined();
+      fileCloseFailure.enabled = false;
+      write.mockRestore();
+      rollback.mockRestore();
+      timeout?.mockRestore();
+      await fixture.close();
+      expect(fixture.launches).toHaveLength(launches);
+      expect(fileCloseFailure.handles.every((handle) => handle.fd === -1)).toBe(
+        true,
+      );
+      for (const handle of fileCloseFailure.handles)
+        await expect(handle.stat()).rejects.toMatchObject({ code: "EBADF" });
+      await expect(access(fixture.output)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+      await expect(access(staging!)).rejects.toMatchObject({ code: "ENOENT" });
+      expect(await readFile(fixture.path, "utf8")).toBe("fixture-input-data");
+    } finally {
+      fileCloseFailure.enabled = false;
+      write.mockRestore();
+      rollback.mockRestore();
+      timeout?.mockRestore();
+      await fixture.close();
+    }
+  },
+);

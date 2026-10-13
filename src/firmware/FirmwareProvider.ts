@@ -561,7 +561,7 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
         nested = nested.cause;
       }
       outcome = err(
-        cause instanceof ProviderCleanupError
+        cause instanceof AnalysisError && cause.cleanupIncomplete
           ? cause
           : options?.signal?.aborted === true
             ? new AnalysisCancelledError(request.operation)
@@ -635,6 +635,9 @@ export const finishFirmwareWorkspace = async (
         {
           cause: outcome.error,
           operation: request.operation,
+          ...(outcome.error.capturedOutput === undefined
+            ? {}
+            : { capturedOutput: outcome.error.capturedOutput }),
           ...(outcome.error.partialObservation === undefined
             ? {}
             : { partialObservation: outcome.error.partialObservation }),
