@@ -195,9 +195,9 @@ then a real shared-UID exception retained partial uncertainty and stopped the
 third selection. Explicit later calls confirmed native existing-target skip and
 strict revision refusal, both exit0. Another real host export omitted an effective
 object for a binary and was rejected; present verified facts remain partial.
-These checks concern supplied disposable resources only. Release native runtime,
-full plugin inventory and public CLI/MCP/container-native composition remain
-unverified until their later integration gates. No existing human corpus,
+These checks concern supplied disposable resources only. Release native runtime, full optional-plugin inventory and native-container
+composition remain unverified. Public host-native and REST CLI/MCP acceptance
+is recorded below and remains subject to independent phase review. No existing human corpus,
 configuration rewrite, DB-role installation, push or publication is part of this
 checkpoint.
 

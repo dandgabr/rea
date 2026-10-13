@@ -1,3 +1,4 @@
+import { knownSensitiveValueRedactor } from "../../domain/knownSensitiveValueRedaction.js";
 import type { FirmwareCorpusPort } from "./FirmwareCorpusPort.js";
 import type { ExecutionOptions } from "../AnalysisProvider.js";
 import {
@@ -43,6 +44,13 @@ export class FirmwareCorpusService {
         parameters.connection;
       parameters.connection = publicConnection;
     }
+    // The public graph is a separate JSON snapshot; delivery and consuming identity
+    // retain the original private transport context and selected values.
+    knownSensitiveValueRedactor(
+      "connection" in parsed.data
+        ? parsed.data.connection.authorization
+        : undefined,
+    ).value(parameters);
     const collectionState: { disposition: "retain" | "explicit-reattempt" } = {
       disposition: "retain",
     };

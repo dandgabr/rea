@@ -8,8 +8,10 @@ UIDs or timestamps does not prove they address the same corpus.
 All 18 MCP tools below have a CLI command formed by replacing underscores with
 hyphens. The CLI takes one exact JSON object or a path to a JSON file, and
 `--json` returns the same inline Evidence. Local artifact, checkout, interpreter,
-archive and output paths must be absolute. JSON files can hold private transport
-credentials; protect those files yourself. REA does not consult credential stores.
+archive and output paths must be absolute. A malformed document beginning with
+JSON container grammar is rejected before file access, even when its text ends
+with `.json`. Select an ambiguous real filename with `./` or an absolute path.
+JSON files can hold private transport credentials; protect those files yourself. REA does not consult credential stores.
 
 ```sh
 rea inspect-firmware-corpus '{"connection":{"endpoint":"http://127.0.0.1:5000","profile":"source-54aed90b"}}' --json

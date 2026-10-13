@@ -1,3 +1,4 @@
+import { knownSensitiveValueRedactor } from "../../domain/knownSensitiveValueRedaction.js";
 import { FACT_NATIVE_PROVIDER_IDENTITY } from "./FactRelease.js";
 import { createReadStream } from "node:fs";
 import { mkdir, readdir } from "node:fs/promises";
@@ -45,12 +46,7 @@ import {
 } from "./FactNativeIdentity.js";
 import { preflightFactArchive, FactArchiveFailure } from "./FactArchive.js";
 import { interpretFactImport } from "./FactNativeInterpretation.js";
-import {
-  FACT_LIMITS,
-  factHash,
-  factResult,
-  factRedactor,
-} from "./FactProtocol.js";
+import { FACT_LIMITS, factHash, factResult } from "./FactProtocol.js";
 
 type Runtime = Awaited<ReturnType<FactFileResources["runtime"]>>;
 type NativeInput =
@@ -650,9 +646,11 @@ export class FactNativeProvider implements FirmwareCorpusPort {
       ? factHash(executions.map((item) => JSON.stringify(item)).join("\n"))
       : null;
     // Redact actual private transport secrets once at their owning output boundary.
-    for (const secret of secrets) factRedactor(secret).value(data);
+    for (const secret of secrets)
+      knownSensitiveValueRedactor(secret).value(data);
     const redactText = (value: string) => {
-      for (const secret of secrets) value = factRedactor(secret).text(value);
+      for (const secret of secrets)
+        value = knownSensitiveValueRedactor(secret).text(value);
       return value;
     };
     for (const step of freezeOwnedJsonSnapshotSteps(data)) {

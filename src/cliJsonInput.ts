@@ -20,6 +20,11 @@ export const parseCliJsonInput = async (
 > => {
   const inline = safeParseJson(value);
   if (inline.ok) return { ok: true, value: inline.value };
+  // Document selection precedes filesystem effects and diagnostics. A .json
+  // suffix inside a truncated document does not select a file. Ambiguous real
+  // filenames can be selected explicitly with ./ or an absolute path.
+  if (hasJsonDocumentPrefix(value))
+    return { ok: false, error: inputError(operation) };
   try {
     const parsed = await readJsonInputFile(value, operation);
     return parsed.ok
@@ -55,6 +60,12 @@ export const parseCliJsonInput = async (
     return jsonFileError(value, operation, "read-failed", cause);
   }
 };
+
+/** Container grammar tokens distinguish documents from [input].json/{capture}.json. */
+const hasJsonDocumentPrefix = (value: string): boolean =>
+  /^(?:\{[\t\n\r ]*(?:"|\}|$)|\[[\t\n\r ]*(?:["{[\]0-9-]|true\b|false\b|null\b|$))/u.test(
+    value.trimStart(),
+  );
 
 const accessDeniedSystemCode = (
   cause: unknown,

@@ -1,3 +1,4 @@
+import { knownSensitiveValueRedactor } from "../../domain/knownSensitiveValueRedaction.js";
 import { FACT_REST_PROVIDER_IDENTITY } from "./FactRelease.js";
 import type { FirmwareCorpusPort } from "../../application/corpus/FirmwareCorpusPort.js";
 import type {
@@ -16,7 +17,6 @@ import {
   FACT_LIMITS,
   factHash,
   factUid,
-  factRedactor,
   readFactResponse,
   FactResponseResources,
   factResult,
@@ -115,7 +115,7 @@ export class FactRestProvider implements FirmwareCorpusPort {
       options?.signal ?? new AbortController().signal,
       AbortSignal.timeout(FACT_LIMITS.deadlineMs),
     ]);
-    const redact = factRedactor(connection.authorization);
+    const redact = knownSensitiveValueRedactor(connection.authorization);
     let path = "",
       method = "GET",
       payload: JsonValue | undefined;
