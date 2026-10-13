@@ -46,7 +46,7 @@ if (args.includes("--version")) {
             file_map: [
               {
                 id: "hit",
-                offset: 2,
+                offset: mode === "outside-selection" ? 25 : 2,
                 size: mode === "bounds" ? bytes.length : 4,
                 name: "gzip",
                 confidence: 250,

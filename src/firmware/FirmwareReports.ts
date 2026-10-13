@@ -134,7 +134,7 @@ const extractionDiagnostic = (
 export const normalizeBinwalkReport = (
   raw: unknown,
   inputPath: string,
-  size: number,
+  selection: { readonly offset: number; readonly length: number },
 ) => {
   const records = scan.parse(raw);
   const analysis = records[0]?.Analysis;
@@ -148,14 +148,18 @@ export const normalizeBinwalkReport = (
       "Expected one inspection-only report for the selected immutable input",
     );
   return analysis.file_map.map((hit) => {
-    if (hit.offset >= size || hit.size > size - hit.offset)
+    if (
+      hit.offset >= selection.length ||
+      hit.size > selection.length - hit.offset
+    )
       throw new AnalysisOutputError(
         "inspect_firmware_regions",
         "Reported region lies outside the selected file",
       );
     return {
       provider_id: hit.id,
-      offset: hit.offset,
+      offset: selection.offset + hit.offset,
+      local_offset: hit.offset,
       reported_size: hit.size,
       signature: hit.name,
       description: hit.description,

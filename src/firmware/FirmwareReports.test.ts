@@ -920,7 +920,12 @@ describe("firmware producer boundaries", () => {
     const record = {
       Analysis: { file_path: context.inputPath, file_map: [], extractions: {} },
     };
-    expect(normalizeBinwalkReport([record], context.inputPath, 20)).toEqual([]);
+    expect(
+      normalizeBinwalkReport([record], context.inputPath, {
+        offset: 0,
+        length: 20,
+      }),
+    ).toEqual([]);
     for (const report of [
       [],
       [record, record],
@@ -934,7 +939,10 @@ describe("firmware producer boundaries", () => {
       ],
     ])
       expect(() =>
-        normalizeBinwalkReport(report, context.inputPath, 20),
+        normalizeBinwalkReport(report, context.inputPath, {
+          offset: 0,
+          length: 20,
+        }),
       ).toThrow();
   });
 });

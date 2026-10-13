@@ -67,12 +67,12 @@ export const snapshotFirmware = async (
 ) => {
   const sourcePath = absoluteCallerPath(request.input.path);
   const source = await realpath(sourcePath);
-  const handle = await open(source, constants.O_RDONLY | constants.O_NOFOLLOW);
-  await mkdir(join(root, "source"), { mode: 0o700 });
   const fullPath = join(root, "source", basename(sourcePath));
   const hash = createHash("sha256");
   let size = 0;
+  const handle = await open(source, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
+    await mkdir(join(root, "source"), { mode: 0o700 });
     const stat = await handle.stat();
     if (
       !stat.isFile() ||

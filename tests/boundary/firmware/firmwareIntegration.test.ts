@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { STDIO_DEFAULT_MAX_BUFFER_SIZE } from "@modelcontextprotocol/server";
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { expect, it as test, vi } from "vitest";
@@ -882,5 +883,73 @@ it("rejects absent or unsupported engines without installing anything", async ()
     ok: false,
     error: { _tag: "AnalysisCapabilityUnavailableError" },
   });
+  await assertFirmwareCleanup(fixture.launches);
+});
+
+it("normalizes selected inspection offsets once and retains the selected snapshot identity", async () => {
+  const fixture = await firmwareFixture();
+  await writeFile(fixture.path, Buffer.alloc(100, 0x61));
+  const outcome = await fixture.service.execute("inspect_firmware_regions", {
+    path: fixture.path,
+    range: { offset: 64, length: 20 },
+  });
+  if (!outcome.ok) throw outcome.error;
+  expect(outcome.value.normalized_result).toMatchObject({
+    input_size: 100,
+    selection: {
+      offset: 64,
+      length: 20,
+      sha256: createHash("sha256").update(Buffer.alloc(20, 0x61)).digest("hex"),
+    },
+    regions: [{ offset: 66, local_offset: 2, reported_size: 4 }],
+  });
+  expect(outcome.value.locations).toEqual([
+    { kind: "file-offset-range", start: 64, end: 84 },
+  ]);
+  expect(await readFile(fixture.path)).toEqual(Buffer.alloc(100, 0x61));
+  await assertFirmwareCleanup(fixture.launches);
+});
+
+it("rejects native inspection hits outside the selected bytes even when inside the original file", async () => {
+  const fixture = await firmwareFixture("outside-selection");
+  await writeFile(fixture.path, Buffer.alloc(100, 0x61));
+  const outcome = await fixture.service.execute("inspect_firmware_regions", {
+    path: fixture.path,
+    range: { offset: 64, length: 20 },
+  });
+  expect(outcome).toMatchObject({
+    ok: false,
+    error: {
+      _tag: "AnalysisOutputError",
+      reason: "Reported region lies outside the selected file",
+    },
+  });
+  await assertFirmwareCleanup(fixture.launches);
+});
+
+it("fails closed for Unblob inspection rather than invoking the registered Binwalk adapter", async () => {
+  const fixture = await firmwareFixture();
+  const unsupported = await fixture.service.execute(
+    "inspect_firmware_regions",
+    {
+      path: fixture.path,
+      provider_id: "unblob",
+      options: { randomness_depth: 2, workers: 3 },
+    },
+  );
+  expect(unsupported).toMatchObject({
+    ok: false,
+    error: {
+      _tag: "AnalysisCapabilityUnavailableError",
+      providerId: "unblob",
+      operation: "inspect_firmware_regions",
+    },
+  });
+  expect(fixture.launches).toEqual([]);
+  const supported = await fixture.service.execute("inspect_firmware_regions", {
+    path: fixture.path,
+    provider_id: "binwalk",
+  });
+  expect(supported.ok && supported.value.provider.id).toBe("binwalk");
   await assertFirmwareCleanup(fixture.launches);
 });

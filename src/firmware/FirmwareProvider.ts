@@ -225,8 +225,7 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
     options?: ExecutionOptions,
   ): Promise<Outcome> {
     let root: PrivateRuntimeRoot | undefined;
-    const engineName =
-      request.operation === "inspect_firmware_regions" ? "binwalk" : "unblob";
+    const engineName = request.input.provider_id;
     const deadline = AbortSignal.timeout(FIRMWARE_LIMITS.timeoutMs);
     const signal =
       options?.signal === undefined
@@ -235,6 +234,15 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
     let outcome: Outcome;
     try {
       if (signal.aborted) throw new AnalysisCancelledError(request.operation);
+      if (
+        request.operation === "inspect_firmware_regions" &&
+        engineName === "unblob"
+      )
+        throw firmwareToolUnavailable(
+          engineName,
+          request.operation,
+          "Unblob inspection is not implemented by this firmware adapter",
+        );
       const command = await resolveFirmwareCommand(
         this.environment,
         engineName,
@@ -313,10 +321,11 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
         result = firmwareResultSchemas.inspect_firmware_regions.parse({
           engine,
           input_size: target.size,
+          selection: target.selection,
           regions: normalizeBinwalkReport(
             report,
             target.inputPath,
-            target.size,
+            target.selection,
           ),
           coverage: "signature_scan",
         });
