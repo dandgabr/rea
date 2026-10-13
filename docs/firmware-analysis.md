@@ -132,10 +132,12 @@ whole-file recognized chunk can skip carving in the producer.
 
 `extraction_gaps` ties named missing dependencies and extraction failures to the
 actual task, chunk or multifile stage. Root correspondence is provided only
-where bytes match the selected source. Unknown chunks, encrypted chunks,
-unpublished entries and depth limits have explicit continuation text. At depth
-10, starting a new extraction requires an independently verified, committed,
-nonempty child within the input limit. A failed publication retains raw reports,
+where bytes match the selected source. Repeated dependency names aggregate only
+within the same producing stage; every native report occurrence remains in raw
+diagnostics. Unknown chunks, encrypted chunks, unpublished entries and depth
+limits have explicit continuation text. Reentering a nested child or restarting
+the depth budget at depth 10 requires that exact independently verified,
+committed, nonempty regular child within the input limit. A failed publication retains raw reports,
 stat/hash/magic/randomness/multifile/deletion and gap observations in the typed
 error without describing uncommitted paths as published. REA installs nothing,
 chooses no alternate extractor and never automatically retries analysis.
@@ -155,7 +157,10 @@ Fingerprinting does not establish isolation.
 
 Custom reports remain inline raw diagnostics, including caller evidence that
 looks like a password. An informational custom report alone does not establish
-an extractor failure. Uninterpreted plugin processing remains explicitly
+an extractor failure. An explicit `ERROR` inside a chunk or multifile extraction
+report identifies a problem at that producing stage even when its report type
+is unfamiliar; REA retains the original report and invents no dependency names.
+Uninterpreted plugin processing remains explicitly
 unknown. Identity drift fails with retained producer observations and unknown
 plugin attribution; cleanup ownership remains available for retry.
 

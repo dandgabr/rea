@@ -48,9 +48,20 @@ export const firmwareExtractionGaps = (
           : "Review the producer's extraction diagnostics before rerunning the same input and selection; no automatic replay or alternative extractor is selected.",
     });
   }
-  const committed = new Set(
-    published.map((file) => `$output/${file.relative_path}`),
-  );
+  const usableCommitted = new Set<string>();
+  const depthReentry = new Set<string>();
+  for (const file of published) {
+    if (file.size <= 0 || file.size > FIRMWARE_LIMITS.inputBytes) continue;
+    const path = `$output/${file.relative_path}`;
+    usableCommitted.add(path);
+    if (maxDepth >= 10 && normalized.depth_limited_paths.length > 0) {
+      const segments = path.split("/");
+      while (segments.length > 1) {
+        depthReentry.add(segments.join("/"));
+        segments.pop();
+      }
+    }
+  }
   for (const chunk of normalized.chunks) {
     const original = chunk.input_path === "$input";
     if (chunk.handler === null)
@@ -64,9 +75,9 @@ export const firmwareExtractionGaps = (
         kind: "unknown-chunk-handler",
         continuation: original
           ? "Use inspect_firmware_regions on the same original input for signature hypotheses, or select this original-file range with extract_firmware. A signature is not decoded content."
-          : committed.has(chunk.input_path)
+          : usableCommitted.has(chunk.input_path)
             ? "Use the verified published child as a fresh inspect_firmware_regions or extract_firmware input; this chunk's range is child-local and has no known original-file byte correspondence."
-            : "No verified committed child path is available for this nested region. Preserve its task-local identity and diagnostics; its original-file byte correspondence is unknown.",
+            : "There is no verified committed child within the firmware input limit for this nested region. Preserve its task-local identity and diagnostics; its original-file byte correspondence is unknown.",
       });
     if (chunk.encrypted === true)
       rows.push({
@@ -82,14 +93,6 @@ export const firmwareExtractionGaps = (
       });
   }
   for (const input_path of normalized.depth_limited_paths) {
-    const usable = published.some((file) => {
-      const path = `$output/${file.relative_path}`;
-      return (
-        (path === input_path || path.startsWith(`${input_path}/`)) &&
-        file.size > 0 &&
-        file.size <= FIRMWARE_LIMITS.inputBytes
-      );
-    });
     rows.push({
       ...empty,
       input_path,
@@ -97,7 +100,7 @@ export const firmwareExtractionGaps = (
       continuation:
         maxDepth < 10
           ? "Rerun extract_firmware with a higher max_depth, up to 10, to examine below this task."
-          : usable
+          : depthReentry.has(input_path)
             ? "The maximum depth 10 is already selected. Continue with a verified nonempty published child within the firmware input limit as a new input; that new extraction restarts its depth budget."
             : "The maximum depth 10 is already selected, and no verified committed child within the firmware input limit is available to restart the depth budget. The task remains unexamined.",
     });

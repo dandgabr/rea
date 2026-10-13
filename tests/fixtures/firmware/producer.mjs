@@ -603,6 +603,48 @@ if (args.includes("--version")) {
         },
       );
     }
+    if (mode === "recovery-stage-errors") {
+      const dependency = (dependencies) => ({
+        __typename__: "ExtractorDependencyNotFoundReport",
+        severity: "ERROR",
+        dependencies,
+      });
+      records[1].reports[2].extraction_reports = [
+        {
+          __typename__: "TrustedExtractionError",
+          severity: "ERROR",
+          note: "chunk failure",
+        },
+      ];
+      records[1].reports.push(
+        dependency(["sasquatch", "sasquatch"]),
+        dependency(["jefferson", "sasquatch"]),
+      );
+      const directory = task(join(output, "rootfs"), 1, "gzip-id");
+      childTask.is_multi_file = true;
+      records[1].subtasks = [directory];
+      records.push({
+        task: directory,
+        reports: [
+          { ...stat(directory.path, 4096), is_file: false, is_dir: true },
+          {
+            __typename__: "MultiFileReport",
+            id: "parts-stage",
+            handler_name: "multipart",
+            name: "volume",
+            paths: [child],
+            extraction_reports: [
+              {
+                __typename__: "TrustedExtractionError",
+                severity: "ERROR",
+                note: "multifile failure without output child",
+              },
+            ],
+          },
+        ],
+        subtasks: [childTask],
+      });
+    }
     if (mode === "deleted-and-missing") {
       const ghost = join(output, "unreported-deletion");
       const ghostTask = task(ghost, 1, "gzip-id");
