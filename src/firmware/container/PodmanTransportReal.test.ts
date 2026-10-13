@@ -31,6 +31,7 @@ it.skipIf(profile === undefined || image === undefined)(
           [
             "inspect",
             "--format=json",
+            "--",
             process.env.REA_CONTAINER_TEST_UNRELATED_CID,
           ],
           signal,

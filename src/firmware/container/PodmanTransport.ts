@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { stringify as stringifyToml } from "smol-toml";
 import { z } from "zod";
 import type { ArtifactResourceScope } from "../../artifacts/ArtifactResourceScope.js";
+import { AnalysisCancelledError } from "../../domain/analysisErrorCore.js";
 import { AnalysisError } from "../../domain/analysisErrorBase.js";
 import { ProviderAdapterError } from "../../domain/providerAdapterError.js";
 import { projectAnalysisError } from "../../domain/analysisErrorProjection.js";
@@ -27,11 +28,41 @@ import { launchPodmanDirectClient } from "./PodmanClientCleanup.js";
 import type { PodmanDescriptorIdentity } from "./PodmanStoreProfile.js";
 import { observePodmanSharedHelper } from "./PodmanSharedHelper.js";
 
+// Podman c593b672 vendor/go.podman.io/image/v5/docker/reference grammar:
+// names <=255 ASCII bytes, optional native tag <=128, immutable lowercase SHA256.
+const domainComponent = "(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])";
+const imageComponent = "[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*";
+const namedImage = new RegExp(
+  `^((?:${domainComponent}(?:\\.${domainComponent})*(?::[0-9]+)?/)?${imageComponent}(?:/${imageComponent})*)(?::[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127})?@sha256:[a-f0-9]{64}$`,
+  "u",
+);
 export const podmanImmutableImageSchema = z
   .string()
-  .regex(
-    /^(?:sha256:[a-f0-9]{64}|[^\s\u0000\uD800-\uDFFF]+@sha256:[a-f0-9]{64})$/u,
-  );
+  .max(456)
+  .refine((value) => {
+    if (/^sha256:[a-f0-9]{64}$/u.test(value)) return true;
+    const parsed = namedImage.exec(value);
+    return parsed !== null && parsed[1]!.length <= 255;
+  });
+
+/** Only fixed currently supported protocols are admitted; operands always follow '--'. */
+const podmanCommandSchema = z.union([
+  z.tuple([z.literal("info"), z.literal("--format=json")]),
+  z.tuple([z.literal("--version")]),
+  z.tuple([
+    z.literal("image"),
+    z.literal("inspect"),
+    z.literal("--format=json"),
+    z.literal("--"),
+    podmanImmutableImageSchema,
+  ]),
+  z.tuple([
+    z.literal("inspect"),
+    z.literal("--format=json"),
+    z.literal("--"),
+    z.string().regex(/^[a-f0-9]{64}$/u),
+  ]),
+]);
 const infoSchema = z.object({
   host: z.object({ security: z.object({ rootless: z.literal(true) }) }),
   store: z.object({
@@ -72,9 +103,11 @@ export const admitPodmanInvocationSelectors = (
   argv: readonly string[],
   store: AdmittedPodmanStore,
   hooks: string,
+  expectedCommand?: readonly string[],
 ): void => {
   const seen = new Map<string, string>();
-  for (let index = 0; index < argv.length; index++) {
+  let index = 0;
+  for (; index < argv.length; index++) {
     const value = argv[index]!;
     let key: string;
     let setting: string;
@@ -100,6 +133,18 @@ export const admitPodmanInvocationSelectors = (
       );
     seen.set(key, setting);
   }
+  const command = podmanCommandSchema.safeParse(argv.slice(index));
+  if (!command.success)
+    throw podmanProfileUnavailable(
+      "Actual prepared command has unsupported flags, missing operand delimiter or invalid positional identity before spawn",
+    );
+  if (
+    expectedCommand !== undefined &&
+    JSON.stringify(command.data) !== JSON.stringify(expectedCommand)
+  )
+    throw podmanProfileUnavailable(
+      "Actual prepared command changed the selected operation or positional identity before spawn",
+    );
   const p = store.selection;
   if (
     seen.get("--remote") !== "false" ||
@@ -204,25 +249,33 @@ export class PreparedPodmanTransport {
       await transport.#initialize(context.signal);
       return transport;
     } catch (cause: unknown) {
+      const primary = preparationFailure(cause, context.signal);
       const released = await context.scope.release({
         kind: "private-runtime-root",
         resource: root.path,
         root,
       });
-      if (released.kind === "failed")
-        throw new ProviderCleanupError(
+      if (released.kind === "failed") {
+        const failure = new ProviderCleanupError(
           "podman",
           [root.path],
           {
             reason:
               "Private container transport setup failed and its owner remains pending",
+            primary_error: projectAnalysisError(primary),
           },
           {
             operation: "firmware_container_runtime",
-            cause: new AggregateError([cause, released.cause]),
+            cause: new AggregateError([primary, released.cause]),
           },
         );
-      throw cause;
+        if (primary.capturedOutput !== undefined)
+          failure.retainCapturedOutput(primary.capturedOutput);
+        if (primary.partialObservation !== undefined)
+          failure.retainPartialObservation(primary.partialObservation);
+        throw failure;
+      }
+      throw primary;
     }
   }
 
@@ -301,8 +354,13 @@ export class PreparedPodmanTransport {
   async run(args: readonly string[], signal: AbortSignal) {
     if (this.#closed)
       throw podmanProfileUnavailable("Prepared container transport is closed");
-    const metadata =
-      args.length === 2 && args[0] === "info" && args[1] === "--format=json";
+    const parsedCommand = podmanCommandSchema.safeParse(args);
+    if (!parsedCommand.success)
+      throw podmanProfileUnavailable(
+        "Prepared command has unsupported flags, missing operand delimiter or invalid positional identity",
+      );
+    const command = Object.freeze(parsedCommand.data);
+    const metadata = command[0] === "info";
     if (!this.#metadataVerified && !metadata)
       throw podmanProfileUnavailable(
         "The first prepared transport must verify the selected existing-store metadata before any version/image/container command",
@@ -334,7 +392,7 @@ export class PreparedPodmanTransport {
         operation: "firmware_container_runtime",
         command: this.#store.selection.podman.resolved_command,
         limiter: this.#limiter.path,
-        args: [...this.#arguments, ...args],
+        args: [...this.#arguments, ...command],
         cwd: this.#root.path,
         environment: this.#environment,
         signal,
@@ -354,6 +412,7 @@ export class PreparedPodmanTransport {
             options.arguments.slice(4),
             this.#store,
             join(this.#root.path, "hooks"),
+            command,
           );
           return this.#launcher(options);
         },
@@ -475,7 +534,7 @@ export class PreparedPodmanTransport {
     let result: Awaited<ReturnType<PreparedPodmanTransport["run"]>>;
     try {
       result = await this.run(
-        ["image", "inspect", "--format=json", reference],
+        ["image", "inspect", "--format=json", "--", reference],
         signal,
       );
     } catch (cause: unknown) {
@@ -576,3 +635,28 @@ export class PreparedPodmanTransport {
       );
   }
 }
+
+/** Normalize the producing setup boundary once; arbitrary causes are not public Evidence. */
+const preparationFailure = (
+  cause: unknown,
+  signal: AbortSignal,
+): AnalysisError => {
+  if (cause instanceof AnalysisError) return cause;
+  if (signal.aborted && cause === signal.reason)
+    return new AnalysisCancelledError("firmware_container_runtime", { cause });
+  const systemField = (key: "code" | "path" | "syscall") =>
+    cause instanceof Error &&
+    key in cause &&
+    typeof Reflect.get(cause, key) === "string"
+      ? (Reflect.get(cause, key) as string)
+      : null;
+  return new ProviderAdapterError("podman", "firmware_container_runtime", {
+    cause,
+    diagnostics: {
+      reason: `Private container transport preparation failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+      system_code: systemField("code"),
+      path: systemField("path"),
+      syscall: systemField("syscall"),
+    },
+  });
+};

@@ -16,6 +16,9 @@ import { afterEach, expect, it, vi } from "vitest";
 import { EventEmitter } from "node:events";
 import { DatabaseSync } from "node:sqlite";
 import { PassThrough } from "node:stream";
+import { AnalysisOutputError } from "../../domain/analysisErrorCore.js";
+import { PrivateRuntimeRoot } from "../../process/PrivateRuntimeRoot.js";
+import { projectAnalysisError } from "../../domain/analysisErrorProjection.js";
 import { ArtifactResourceScope } from "../../artifacts/ArtifactResourceScope.js";
 import { parseLinuxProcessStartTime } from "../../process/ProcessOwnershipObservation.js";
 import {
@@ -33,6 +36,7 @@ import { admitPodmanStore } from "./PodmanStoreAdmission.js";
 import {
   admitPodmanInvocationSelectors,
   PreparedPodmanTransport,
+  podmanImmutableImageSchema,
 } from "./PodmanTransport.js";
 import type { FirmwareLauncher } from "../FirmwareCommand.js";
 import * as firmwareCommand from "../FirmwareCommand.js";
@@ -808,3 +812,429 @@ it("fuzzes actual SQLite DBConfig admission with seed 0x44424331, 16 bounded cas
     await f.scope.close();
   }
 }, 10000);
+
+it("refuses option-like image selectors and admits native immutable reference controls without rewriting values", () => {
+  const suffix = "@sha256:" + "a".repeat(64);
+  for (const value of [
+    "--root=/unselected/store",
+    "--runroot=/unselected/run",
+    "--storage-driver=overlay",
+    "--hooks-dir=/unselected/hooks",
+    "--remote=true",
+    "/absolute/image",
+    "https://registry.test/image",
+    "name/UPPER",
+    "name/😀",
+    "a".repeat(256),
+  ]) {
+    expect(
+      podmanImmutableImageSchema.safeParse(value + suffix).success,
+      value,
+    ).toBe(false);
+  }
+  for (const value of [
+    "sha256:" + "a".repeat(64),
+    ...[
+      "name",
+      "ghcr.io/user/image",
+      "registry.test:5000/team/my__image:Tag_1",
+      "LOCALHOST/image",
+      "a".repeat(255),
+      "a".repeat(255) + ":" + "t".repeat(128),
+    ].map((value) => value + suffix),
+  ]) {
+    expect(podmanImmutableImageSchema.parse(value)).toBe(value);
+  }
+});
+
+it("validates complete supported command authority with seed0x434d4431,256 bounded suffix mutations after independently valid selected prefixes", async () => {
+  const f = await fixture();
+  const admitted = await admitPodmanStore(
+    f.profilePath,
+    f.profile.podman.command,
+    f.signal,
+    f.scope,
+  );
+  const hooks = join(f.root, "hooks");
+  const prefix = [
+    "--remote=false",
+    "--root",
+    f.profile.graph_root,
+    "--runroot",
+    f.profile.run_root,
+    "--storage-driver=overlay",
+    "--storage-opt=overlay.mountopt=nodev",
+    "--hooks-dir",
+    hooks,
+  ];
+  const image = "sha256:" + "a".repeat(64);
+  const cid = "b".repeat(64);
+  for (const control of [
+    ["info", "--format=json"],
+    ["--version"],
+    ["image", "inspect", "--format=json", "--", image],
+    ["inspect", "--format=json", "--", cid],
+  ])
+    expect(() =>
+      admitPodmanInvocationSelectors([...prefix, ...control], admitted, hooks),
+    ).not.toThrow();
+  let seed = 0x434d4431;
+  for (let index = 0; index < 256; index++) {
+    seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+    const currentImage = "sha256:" + seed.toString(16).padStart(64, "0");
+    const option = [
+      `--root=/unselected/store-${seed}`,
+      `--runroot=/unselected/run-${seed}`,
+      "--storage-opt=overlay.mountopt=nosuid",
+      `--hooks-dir=/unselected/hooks-${seed}`,
+      "--remote=true",
+    ][seed % 5]!;
+    const variants = [
+      [
+        "image",
+        "inspect",
+        "--format=json",
+        option + "@sha256:" + seed.toString(16).padStart(64, "0"),
+      ],
+      ["image", "inspect", "--format=json", currentImage],
+      ["image", "inspect", "--format=json", "--", currentImage, option],
+      ["info", "--format=json", option],
+      ["--version", option],
+      ["inspect", "--format=json", "--", cid, option],
+      ["image", "inspect", option, "--format=json", "--", image],
+      ["create", "--pull=never", currentImage],
+    ];
+    expect(
+      () =>
+        admitPodmanInvocationSelectors(
+          [...prefix, ...variants[index % 8]!],
+          admitted,
+          hooks,
+        ),
+      `case${index}`,
+    ).toThrow();
+    const identityCommand = [
+      "image",
+      "inspect",
+      "--format=json",
+      "--",
+      currentImage,
+    ];
+    expect(() =>
+      admitPodmanInvocationSelectors(
+        [...prefix, ...identityCommand],
+        admitted,
+        hooks,
+        identityCommand,
+      ),
+    ).not.toThrow();
+    expect(() =>
+      admitPodmanInvocationSelectors(
+        [...prefix, ...identityCommand],
+        admitted,
+        hooks,
+        ["image", "inspect", "--format=json", "--", image],
+      ),
+    ).toThrow();
+  }
+  await f.scope.close();
+});
+
+it("retains actionable EEXIST and explicit cancellation through failed setup cleanup with exact cleanup-only retry and zero Podman launches", async () => {
+  for (const kind of ["filesystem", "cancellation"] as const) {
+    const f = await fixture();
+    const controller = new AbortController();
+    const original = PrivateRuntimeRoot.create;
+    let owned: PrivateRuntimeRoot | undefined;
+    let close: (() => Promise<void>) | undefined;
+    let closeCalls = 0;
+    let failed = true;
+    let setupCalls = 0;
+    const spy = vi
+      .spyOn(PrivateRuntimeRoot, "create")
+      .mockImplementation(async (options) => {
+        const root = await original.call(PrivateRuntimeRoot, options);
+        if (options?.prefix === "rea-firmware-container-") {
+          setupCalls++;
+          owned = root;
+          close = root.close.bind(root);
+          if (kind === "filesystem") await mkdir(join(root.path, "hooks"));
+          else controller.abort(new Error("explicit setup cancellation"));
+          root.close = async () => {
+            closeCalls++;
+            if (failed) throw Error("injected exact-root close failure");
+            await close!();
+          };
+        }
+        return root;
+      });
+    const launcher = vi.fn<FirmwareLauncher>();
+    try {
+      const failure = await PreparedPodmanTransport.prepare({
+        profile: f.profilePath,
+        command: f.profile.podman.command,
+        limiter: "/usr/bin/prlimit",
+        signal: controller.signal,
+        scope: f.scope,
+        launcher,
+      }).catch((cause: unknown) => cause);
+      const projection = projectAnalysisError(
+        failure as Parameters<typeof projectAnalysisError>[0],
+      );
+      expect(projection).toMatchObject({
+        code: "cleanup_incomplete",
+        details: {
+          diagnostics: {
+            primary_error:
+              kind === "filesystem"
+                ? {
+                    code: "execution_failure",
+                    details: {
+                      diagnostics: {
+                        system_code: "EEXIST",
+                        path: join(owned!.path, "hooks"),
+                      },
+                    },
+                  }
+                : { code: "cancelled" },
+          },
+        },
+      });
+      expect(launcher).not.toHaveBeenCalled();
+      expect(closeCalls).toBe(1);
+      expect(setupCalls).toBe(1);
+      failed = false;
+      await f.scope.close();
+      expect(closeCalls).toBe(2);
+      expect(setupCalls).toBe(1);
+      await expect(stat(owned!.path)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      spy.mockRestore();
+      failed = false;
+      await f.scope.close();
+    }
+  }
+});
+
+const imageLauncher = (f: Awaited<ReturnType<typeof fixture>>) =>
+  vi.fn<FirmwareLauncher>(async (options) => {
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    const child = Object.assign(new EventEmitter(), {
+      stdout,
+      stderr,
+      exitCode: null as number | null,
+      signalCode: null,
+      kill: () => false,
+    });
+    setImmediate(() => {
+      stdout.end(
+        JSON.stringify(
+          options.arguments.includes("info")
+            ? {
+                host: { security: { rootless: true } },
+                store: {
+                  graphDriverName: "overlay",
+                  graphRoot: f.profile.graph_root,
+                  runRoot: f.profile.run_root,
+                  volumePath: f.profile.volume_path,
+                  configFile: options.hostEnvironment!.CONTAINERS_STORAGE_CONF,
+                  graphOptions: { "overlay.mountopt": "nodev" },
+                  graphStatus: { "Native Overlay Diff": "true" },
+                },
+                version: { Version: "5.8.7" },
+              }
+            : [
+                {
+                  Id: "a".repeat(64),
+                  Digest: "sha256:" + "a".repeat(64),
+                  RepoDigests: [],
+                  Os: "linux",
+                  Architecture: "amd64",
+                },
+              ],
+        ),
+      );
+      stderr.end();
+      child.exitCode = 0;
+      child.emit("exit", 0, null);
+      child.emit("close", 0, null);
+    });
+    return {
+      process: child,
+      ownership: {
+        runId: options.runId,
+        leaderPid: 987654,
+        processGroupId: 987654,
+      },
+      cleanup: async () => ({ cleaned: true, signaled: false }),
+    };
+  });
+
+it("admits exact delimited image argv but refuses option/data confusion and mutated actual operands before any extra launch", async () => {
+  const f = await fixture();
+  const launcher = imageLauncher(f);
+  const transport = await PreparedPodmanTransport.prepare({
+    profile: f.profilePath,
+    command: f.profile.podman.command,
+    limiter: "/usr/bin/prlimit",
+    signal: f.signal,
+    scope: f.scope,
+    launcher,
+  });
+  try {
+    await transport.run(["info", "--format=json"], f.signal);
+    expect(launcher).toHaveBeenCalledTimes(1);
+    await expect(
+      transport.image(
+        "--root=/unselected/store@sha256:" + "a".repeat(64),
+        f.signal,
+      ),
+    ).rejects.toThrow(/immutable/);
+    await expect(
+      transport.run(
+        ["image", "inspect", "--format=json", "sha256:" + "a".repeat(64)],
+        f.signal,
+      ),
+    ).rejects.toThrow(/command/);
+    expect(launcher).toHaveBeenCalledTimes(1);
+    const selected = "sha256:" + "a".repeat(64);
+    const image = await transport.image(selected, f.signal);
+    expect(image.image_id).toBe("a".repeat(64));
+    expect(launcher.mock.calls[1]![0].arguments.slice(-5)).toEqual([
+      "image",
+      "inspect",
+      "--format=json",
+      "--",
+      selected,
+    ]);
+    const original = firmwareCommand.runFirmwareCommand;
+    const mutation = vi
+      .spyOn(firmwareCommand, "runFirmwareCommand")
+      .mockImplementation((context) =>
+        original(
+          context.command === f.profile.podman.command
+            ? { ...context, args: context.args.filter((arg) => arg !== "--") }
+            : context,
+        ),
+      );
+    try {
+      await expect(transport.image(selected, f.signal)).rejects.toThrow(
+        /command/,
+      );
+      expect(launcher).toHaveBeenCalledTimes(2);
+    } finally {
+      mutation.mockRestore();
+    }
+    for (const kind of ["operation", "identity"] as const) {
+      const changed = vi
+        .spyOn(firmwareCommand, "runFirmwareCommand")
+        .mockImplementation((context) =>
+          original(
+            context.command === f.profile.podman.command
+              ? {
+                  ...context,
+                  args:
+                    kind === "operation"
+                      ? [...context.args.slice(0, -2), "--version"]
+                      : context.args.map((value) =>
+                          value === selected
+                            ? "sha256:" + "b".repeat(64)
+                            : value,
+                        ),
+                }
+              : context,
+          ),
+        );
+      try {
+        await expect(
+          kind === "operation"
+            ? transport.run(["info", "--format=json"], f.signal)
+            : transport.image(selected, f.signal),
+        ).rejects.toThrow(/command/);
+        expect(launcher).toHaveBeenCalledTimes(2);
+      } finally {
+        changed.mockRestore();
+      }
+    }
+  } finally {
+    await transport.close();
+    await f.scope.close();
+  }
+});
+
+it("preserves typed primary setup diagnostics and captured bytes after a failed exact-root close", async () => {
+  const f = await fixture();
+  const originalCreate = PrivateRuntimeRoot.create;
+  const controller = new AbortController();
+  let owned: PrivateRuntimeRoot | undefined;
+  let originalClose: (() => Promise<void>) | undefined;
+  let failed = true;
+  let closes = 0;
+  let setups = 0;
+  const capture = {
+    stdout: "selected observation",
+    stderr: "",
+    truncated: false,
+    stdout_bytes: 20,
+    stdout_sha256: digest("selected observation"),
+  };
+  const primary = new AnalysisOutputError(
+    "firmware_container_runtime",
+    "selected setup failure",
+    {
+      capturedOutput: capture,
+      diagnostics: { marker: "typed setup fact" },
+      partialObservation: {
+        kind: "firmware",
+        result: { selected_store: f.profile.graph_root },
+        provenance: { authority: "injected test observation" },
+      },
+    },
+  );
+  const create = vi
+    .spyOn(PrivateRuntimeRoot, "create")
+    .mockImplementation(async (options) => {
+      const root = await originalCreate.call(PrivateRuntimeRoot, options);
+      if (options?.prefix === "rea-firmware-container-") {
+        owned = root;
+        setups++;
+        controller.abort(primary);
+        originalClose = root.close.bind(root);
+        root.close = async () => {
+          closes++;
+          if (failed) throw Error("exact close failure");
+          await originalClose!();
+        };
+      }
+      return root;
+    });
+  const launcher = vi.fn<FirmwareLauncher>();
+  try {
+    const failure = await PreparedPodmanTransport.prepare({
+      profile: f.profilePath,
+      command: f.profile.podman.command,
+      limiter: "/usr/bin/prlimit",
+      signal: controller.signal,
+      scope: f.scope,
+      launcher,
+    }).catch((cause: unknown) => cause);
+    expect(failure).toMatchObject({
+      cleanupIncomplete: true,
+      capturedOutput: capture,
+      partialObservation: primary.partialObservation,
+      diagnostics: { primary_error: projectAnalysisError(primary) },
+    });
+    expect(launcher).not.toHaveBeenCalled();
+    expect(setups).toBe(1);
+    expect(closes).toBe(1);
+    failed = false;
+    await f.scope.close();
+    expect(closes).toBe(2);
+    expect(setups).toBe(1);
+  } finally {
+    create.mockRestore();
+    failed = false;
+    await f.scope.close();
+  }
+});

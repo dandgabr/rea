@@ -51,7 +51,12 @@ authentication, hooks directory and fixed storage/container configuration. Its
 environment is explicit and excludes ambient credentials, proxy and container
 configuration overrides. Every command uses the same exact root/runroot/driver
 and complete option selection, validated against the actual invocation before
-spawn. Already-local `repository@sha256:…` and full `sha256:…` image IDs are
+spawn. The complete supported command is validated independently of its builder;
+its operation and positional identity must match the immutable request. Image and
+full-container-ID operands follow an explicit `--` delimiter. Image references
+use the pinned native name/domain/path/tag grammar with the 255-byte repository
+name and 128-byte tag bounds, preserving exact selected text. Unknown subcommands
+and extra flags or operands are refused before launch. Already-local `repository@sha256:…` and full `sha256:…` image IDs are
 distinct immutable selections; archive loading may preserve an image ID while
 leaving `RepoDigests` empty. Image inspection does not fetch absent images.
 
@@ -66,7 +71,9 @@ command identity, including failures.
 Client cleanup validates the captured direct PID's start, run token and parent
 before PID-only termination. It never sweeps a process group or run token to
 claim helpers or containers. Failed descriptor/client cleanup retains the same
-owner for retry. Exact container IDs, prepared OCI/mount observations and
+owner for retry. Preparation failures retain their typed primary projection,
+meaningful filesystem code/path/reason, cancellation and captured or partial facts
+when cleanup also fails; retry does not repeat setup. Exact container IDs, prepared OCI/mount observations and
 container settlement need their separate lifecycle owner; host-client exit does
 not prove container or producer exit. A bootstrap or image-inspection pass is
 not provider conformance.
