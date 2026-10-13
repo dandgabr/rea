@@ -115,7 +115,8 @@ an upstream effect. Configuration, critical source, interpreter and limiter
 identity checks detect pre/post drift; they do not prevent races or attest every
 installed imported dependency.
 
-Archive preflight uses the locked zip.js reader with CRC32 and overlap checks,
+Archive preflight uses the locked zip.js reader with CRC32, overlap and explicit
+local-header/central-directory identity checks,
 actual streamed expansion accounting and the bounded owned JSON parser. It never
 extracts archive paths. Duplicate member paths, traversal, links/special members,
 encryption, missing/undeclared binaries, mismatched UID/SHA/size and unsafe
@@ -131,7 +132,9 @@ producer metadata as partial source evidence.
 All selected import archives are preflighted first, then official single-archive
 calls run in caller order under one shared 120s deadline/admission. Exact native
 import counts, existing-target skips and revision refusals are distinct
-observations. A skip/refusal continues; an ambiguous exception/cancel stops the
+observations. Cancellation before the next invocation preserves its
+`not_started` state and prior reported effect bounds. A skip/refusal continues;
+an ambiguous exception/cancel during an issued invocation stops the
 remaining archives as `not_started`. Exit0 never establishes import. DB object
 writes precede native file writes and can partially fail or collide with a shared
 UID; no retry, rollback or compensating delete is attempted. Reported counts do
@@ -139,12 +142,18 @@ not independently verify DB/storage commits. Rich diagnostics are interpreted
 only as exact whole acknowledgement rows; wrapped/unrecognized or invalid UTF-8
 output remains unknown. Original diagnostics, retained/observed byte counts,
 retained-byte digests and UTF-8 validity remain explicit after provider redaction.
+The diagnostic-limit error captures rich provenance when first raised; later
+capture cannot replace its authoritative text or byte identity.
 
 Exports run official multi-UID selection into private staging, monitor actual
 output growth, verify each selected ZIP and publish verified archives only into
 a fresh absent caller directory. Uncommitted publication is rolled back by the
 owned tree; failed cleanup retains that exact owner for explicit close. Verified
-archive facts survive publication or cleanup failure. Native export uses BytesIO;
+archive facts survive publication or cleanup failure. Actual durable tree
+publication establishes matching global and per-archive committed facts before
+cleanup retries; later close failure preserves published bytes and records
+cleanup uncertainty. Prepared metadata alone cannot establish publication.
+Native export uses BytesIO;
 the existing producer limiter applies AS1GiB, CPU120s, file size and zero core
 before launch. Compressed staging and actual expanded bytes have separate
 budgets. Metadata and aggregate retained native diagnostics each have an 8MiB

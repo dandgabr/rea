@@ -167,6 +167,8 @@ export async function preflightFactArchive(
     useWebWorkers: false,
     checkCrc32: true,
     checkOverlappingEntry: true,
+    checkLocalDirectory: true,
+    checkLocalFilename: true,
     filenameValidation: "tolerant",
   });
   let expanded = 0;

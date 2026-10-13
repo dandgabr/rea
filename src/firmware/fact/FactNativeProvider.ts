@@ -209,10 +209,13 @@ export class FactNativeProvider implements FirmwareCorpusPort {
       runtime: Runtime,
       args: string[],
       exportRoot?: string,
+      importIndex?: number,
     ) => {
       signal.throwIfAborted();
       if (identity === undefined)
         throw Error("FACT native identity is unavailable");
+      // Only this admitted invocation may establish possible delivery for its selection.
+      activeImport = importIndex;
       launched = true;
       data.native_invocations = Number(data.native_invocations) + 1;
       const result = await (this.dependencies.command ?? runFirmwareCommand)({
@@ -287,6 +290,48 @@ export class FactNativeProvider implements FirmwareCorpusPort {
     };
     let outputTree: SafeOutputTree | undefined;
     let outputOwner: { path: string; close(): Promise<void> } | undefined;
+    const verified: {
+      path: string;
+      name: string;
+      sha256: string;
+      size: number;
+    }[] = [];
+    let durablePublication:
+      | {
+          output_directory: string;
+          files: { path: string; sha256: string; size: number }[];
+        }
+      | undefined;
+    const observePublished = (cleanupUncertain: boolean) => {
+      if (outputTree === undefined || !outputTree.published) return;
+      // Durability is observed from the actual fsynced tree, never prepared metadata.
+      durablePublication ??= {
+        output_directory: outputTree.outputRoot,
+        files: verified.map((file) => ({
+          path: join(outputTree!.outputRoot, file.name),
+          sha256: file.sha256,
+          size: file.size,
+        })),
+      };
+      data.publication = {
+        ...durablePublication,
+        state: cleanupUncertain ? "committed-cleanup-uncertain" : "committed",
+      };
+      for (const item of archives) {
+        if (item === null || typeof item !== "object" || Array.isArray(item))
+          continue;
+        if (
+          durablePublication.files.some(
+            (file) =>
+              file.path === item.output_path &&
+              file.sha256 === item.archive_sha256 &&
+              file.size === item.archive_bytes,
+          )
+        )
+          item.publication = "committed";
+      }
+    };
+
     try {
       signal.throwIfAborted();
       if (process.platform !== "linux")
@@ -357,12 +402,12 @@ export class FactNativeProvider implements FirmwareCorpusPort {
         await assertIdentity();
         state = "completed";
         for (const { snapshot, index, archive } of prepared) {
-          activeImport = index;
-          const result = await invoke(runtime, [
-            identity.script,
-            "import",
-            snapshot.path,
-          ]);
+          const result = await invoke(
+            runtime,
+            [identity.script, "import", snapshot.path],
+            undefined,
+            index,
+          );
           const disposition = interpretFactImport(
             {
               ...archive,
@@ -388,8 +433,8 @@ export class FactNativeProvider implements FirmwareCorpusPort {
             break;
           }
           if (disposition.disposition === "revision-refused") state = "failed";
-          await assertIdentity();
           activeImport = undefined;
+          await assertIdentity();
         }
       } else {
         const exportRoot = join(runtime.path, "export");
@@ -431,12 +476,7 @@ export class FactNativeProvider implements FirmwareCorpusPort {
         let expanded = 0,
           entries = 0,
           metadata = 0;
-        const verified: {
-          path: string;
-          name: string;
-          sha256: string;
-          size: number;
-        }[] = [];
+
         for (const name of names) {
           const path = join(exportRoot, name);
           const file = await readFactNativeFile(
@@ -525,30 +565,13 @@ export class FactNativeProvider implements FirmwareCorpusPort {
             );
           signal.throwIfAborted();
           await outputTree.commit();
+          observePublished(false);
           this.files.forget(outputOwner);
           outputOwner = undefined;
-          data.publication = {
-            output_directory: outputTree.outputRoot,
-            state: "committed",
-            files: verified.map((file) => ({
-              path: join(outputTree!.outputRoot, file.name),
-              sha256: file.sha256,
-              size: file.size,
-            })),
-          };
-          for (const item of archives)
-            if (
-              item !== null &&
-              typeof item === "object" &&
-              !Array.isArray(item)
-            )
-              item.publication = "committed";
         }
       }
     } catch (cause) {
       state = launched ? "unknown" : "not-delivered";
-      if (launched && operation === "import_corpus_firmware")
-        data.database_effects = "possibly-partial";
       if (launched && activeImport !== undefined) {
         const active = archives[activeImport];
         if (
@@ -556,11 +579,13 @@ export class FactNativeProvider implements FirmwareCorpusPort {
           typeof active === "object" &&
           !Array.isArray(active) &&
           active.disposition === "not_started"
-        )
+        ) {
           Object.assign(active, {
             disposition: "unknown",
             database_effects: "possibly-partial",
           });
+          data.database_effects = "possibly-partial";
+        }
       }
       diagnostics.push(cause instanceof Error ? cause.message : String(cause));
       if (cause instanceof FactArchiveFailure)
@@ -586,12 +611,7 @@ export class FactNativeProvider implements FirmwareCorpusPort {
               : { ...cause.capturedOutput },
         };
       if (outputTree !== undefined) {
-        if (outputTree.published) {
-          data.publication = {
-            output_directory: outputTree.outputRoot,
-            state: "committed-cleanup-uncertain",
-          };
-        }
+        observePublished(true);
         if (outputOwner === undefined) {
           outputOwner = {
             path: outputTree.outputRoot,

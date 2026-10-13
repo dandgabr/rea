@@ -332,3 +332,64 @@ it("runs bounded seeded metadata/graph/UTF8/duplicate-key fuzz with independent 
     await parser.close();
   }
 }, 10000);
+
+it("rejects local-header names that contradict central member identity while retaining prior verified facts", async () => {
+  const positive = await archive(data());
+  expect((await inspect(positive)).members).toHaveLength(2);
+  const forged = Buffer.from(positive);
+  const localName = forged.indexOf(Buffer.from(`files/${child}`));
+  expect(forged.readUInt32LE(localName - 30)).toBe(0x04034b50);
+  forged[localName + 6] = forged[localName + 6] === 48 ? 49 : 48;
+  const cause: unknown = await inspect(forged).catch(
+    (failure: unknown) => failure,
+  );
+  expect(cause).toBeInstanceOf(FactArchiveFailure);
+  if (!(cause instanceof FactArchiveFailure))
+    throw Error("Missing archive failure");
+  expect(cause.partial.producer_metadata).toEqual(data());
+  expect(cause.partial.members).toContainEqual({
+    path: `files/${uid}`,
+    uid,
+    sha256: factHash(rootBytes),
+    size: rootBytes.length,
+  });
+});
+
+it("runs bounded seeded local-header identity contradictions without altering central UID or member bytes", async () => {
+  const positive = await archive(data());
+  let seed = 0xfac70005;
+  const parser = new FactJsonParser();
+  try {
+    for (let index = 0; index < 24; index++) {
+      seed ^= seed << 13;
+      seed ^= seed >>> 17;
+      seed ^= seed << 5;
+      const forged = Buffer.from(positive);
+      const localName = forged.indexOf(Buffer.from(`files/${child}`));
+      const offset = localName + 6 + ((seed >>> 0) % 64);
+      forged[offset] = forged[offset] === 48 ? 49 : 48;
+      expect(forged.lastIndexOf(Buffer.from(`files/${child}`))).toBe(
+        positive.lastIndexOf(Buffer.from(`files/${child}`)),
+      );
+      await expect(
+        preflightFactArchive(forged, parser, new AbortController().signal, {
+          bytes: 4096,
+          entries: 3,
+        }),
+      ).rejects.toThrow();
+      expect(parser.pendingResources).toEqual([]);
+    }
+    expect(
+      (
+        await preflightFactArchive(
+          positive,
+          parser,
+          new AbortController().signal,
+          { bytes: 4096, entries: 3 },
+        )
+      ).members.find((member) => member.uid === child)?.sha256,
+    ).toBe(factHash(childBytes));
+  } finally {
+    await parser.close();
+  }
+});
