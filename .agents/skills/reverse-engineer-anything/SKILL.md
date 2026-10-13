@@ -99,7 +99,14 @@ explicit path or endpoint and do not need it.
 - Firmware image: `inspect_firmware_regions` when advertised. Use
   `extract_firmware` when extraction is requested, with a caller-selected new
   absolute output directory. These tools use caller-supplied Binwalk/Unblob on
-  Linux; see the [firmware guide](https://github.com/morluto/rea/blob/main/docs/firmware-analysis.md).
+  Linux. Explicit `provider_id: "binwalk-ng"` selects the independent ng profile
+  with `carve_firmware`, native `inspect_firmware_entropy` (0–8 bits/byte) and
+  corpus `inspect_firmware_provider` when advertised. Ng requires the selected
+  minimal bubblewrap runtime. Preserve unknown original offsets for decompressed
+  children; neither entropy nor signatures establish encryption or authenticity.
+  Its optional plot directory controls publication of the always-private native
+  PNG; provider inventory has no firmware subject. See the [ng guide](https://github.com/morluto/rea/blob/main/docs/binwalk-ng.md)
+  and the [firmware guide](https://github.com/morluto/rea/blob/main/docs/firmware-analysis.md).
 - .NET NativeAOT PE/ELF: native Ghidra analysis. Native code can yield pseudocode;
   consult the NativeAOT workflow in `references/native-and-artifacts.md` for
   optional metadata recovery and its supported host/layout boundary.

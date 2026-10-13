@@ -5,7 +5,7 @@ import {
   firmwareFixture,
   assertFirmwareCleanup,
 } from "../../fixtures/firmware/provider.js";
-import { firmwareResultSchemas } from "../../../src/domain/firmware/firmwareAnalysis.js";
+import { legacyFirmwareResultSchemas as firmwareResultSchemas } from "../../../src/domain/firmware/firmwareAnalysis.js";
 import { FirmwareAnalysisService } from "../../../src/application/firmware/FirmwareAnalysisService.js";
 import { FirmwareProvider } from "../../../src/firmware/FirmwareProvider.js";
 import { projectAnalysisError } from "../../../src/domain/analysisErrorProjection.js";

@@ -33,3 +33,10 @@ export const FIRMWARE_LIMITS = {
   addressSpaceBytes: 1024 * 1024 * 1024,
   timeoutMs: 120_000,
 } as const;
+
+/** Independent ng source profile; legacy version protocols remain separate. */
+export const BINWALK_NG_RELEASE = {
+  version: "4.0.0",
+  revision: "368c3815cb97976ae7ba6092f356933169f06dae",
+  repository: "https://github.com/binwalk-ng/binwalk-ng",
+} as const;

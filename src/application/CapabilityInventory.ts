@@ -54,6 +54,7 @@ export type AvailabilityPolicy = {
   readonly recordedCrashEnabled?: boolean;
   readonly firmwareInspectionEnabled?: boolean;
   readonly firmwareExtractionEnabled?: boolean;
+  readonly firmwareNgEnabled?: boolean;
   readonly androidAnalysisAvailability?: ProviderAvailability;
   readonly adbAnalysisAvailability?: ProviderAvailability;
   readonly apktoolAnalysisAvailability?: ProviderAvailability;
@@ -452,13 +453,15 @@ const workflowAvailabilityFor = ({
     const enabled =
       name === "inspect_firmware_regions"
         ? policy.firmwareInspectionEnabled
-        : policy.firmwareExtractionEnabled;
+        : name === "extract_firmware"
+          ? policy.firmwareExtractionEnabled
+          : policy.firmwareNgEnabled;
     return enabled === true
       ? { reason: "available", remediation: null }
       : {
           reason: "provider_missing",
           remediation:
-            "On Linux, provide an absolute REA_BINWALK_COMMAND (Binwalk 3.1.x, verified with 3.1.0) or REA_UNBLOB_COMMAND (Unblob 26.6.x, verified with 26.6.4) path and util-linux prlimit. Extraction also requires the selected format’s external extractor.",
+            "On Linux, configure ng with absolute REA_BINWALK_NG_COMMAND, REA_FIRMWARE_BWRAP_COMMAND and REA_BINWALK_NG_RUNTIME_MANIFEST. Legacy operations use an absolute REA_BINWALK_COMMAND (Binwalk 3.1.x, verified with 3.1.0) or REA_UNBLOB_COMMAND (Unblob 26.6.x, verified with 26.6.4) path and util-linux prlimit. Extraction also requires the selected format’s external extractor.",
         };
   }
   if (kind === "android-provider")

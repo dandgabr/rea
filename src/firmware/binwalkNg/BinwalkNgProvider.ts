@@ -1,3 +1,9 @@
+import {
+  isBinwalkNgRequest,
+  type FirmwareRequest,
+} from "../../domain/firmware/firmwareAnalysis.js";
+import { binwalkNgResultSchemas } from "../../domain/firmware/binwalkNgResults.js";
+import { inspectBinwalkNgRuntime } from "./BinwalkNgInventory.js";
 import { ArtifactAnalysisResources } from "../../process/ArtifactAnalysisResources.js";
 import { readStableArtifact } from "../../artifacts/readStableArtifact.js";
 import { readLinuxResourceLimits } from "../../process/LinuxResourceLimits.js";
@@ -27,7 +33,7 @@ import {
   type FirmwareLauncher,
 } from "../FirmwareCommand.js";
 import { snapshotFirmware } from "../FirmwareFiles.js";
-import { FIRMWARE_LIMITS } from "../FirmwareRelease.js";
+import { BINWALK_NG_RELEASE, FIRMWARE_LIMITS } from "../FirmwareRelease.js";
 import { runBinwalkNgWorkflow } from "./BinwalkNgWorkflow.js";
 
 interface OwnedWorkflow {
@@ -69,9 +75,17 @@ export class BinwalkNgProvider {
   ) {}
 
   async execute(
-    request: BinwalkNgRequest,
+    request: FirmwareRequest,
     options?: ExecutionOptions,
   ): Promise<Outcome> {
+    if (!isBinwalkNgRequest(request))
+      return err(
+        firmwareToolUnavailable(
+          "binwalk-ng",
+          request.operation,
+          "This adapter requires explicit binwalk-ng selection",
+        ),
+      );
     const deadline = AbortSignal.timeout(FIRMWARE_LIMITS.timeoutMs);
     const signal =
       options?.signal === undefined
@@ -174,45 +188,61 @@ export class BinwalkNgProvider {
       };
       this.#owned.add(owner);
       const owned = owner;
-      const target = await snapshotFirmware(
-        request,
-        root.path,
-        signal,
-        owner.scope,
-      );
-      const produced = await runBinwalkNgWorkflow({
-        request,
+      const common = {
         root: root.path,
-        target,
         runtime,
         signal,
         scope: owner.scope,
-        retainCleanup: (supervisor) => {
+        retainCleanup: (supervisor: ProviderProcessSupervisor) => {
           owned.supervisor = supervisor;
         },
-        ownTree: (tree) => {
-          owned.tree = tree;
-        },
-        releaseTree: () => {
-          delete owned.tree;
-        },
         ...(this.launcher === undefined ? {} : { launcher: this.launcher }),
-      });
+      };
+      let target: Awaited<ReturnType<typeof snapshotFirmware>> | undefined;
+      const produced =
+        request.operation === "inspect_firmware_provider"
+          ? await inspectBinwalkNgRuntime(common)
+          : await (async () => {
+              target = await snapshotFirmware(
+                request,
+                root.path,
+                signal,
+                owner.scope,
+              );
+              return runBinwalkNgWorkflow({
+                ...common,
+                request,
+                target,
+                ownTree: (tree: SafeOutputTree) => {
+                  owned.tree = tree;
+                },
+                releaseTree: () => {
+                  delete owned.tree;
+                },
+              });
+            })();
       outcome = ok(
         createAnalysisExecution(
-          produced.result,
-          { id: "binwalk-ng", name: "binwalk-ng", version: "4.0.0" },
+          binwalkNgResultSchemas[request.operation].parse(produced.result),
           {
-            subject: target.subject,
+            id: "binwalk-ng",
+            name: "binwalk-ng",
+            version: BINWALK_NG_RELEASE.version,
+          },
+          {
+            ...(target === undefined ? {} : { subject: target.subject }),
             rawResult: produced.raw,
             limitations,
-            locations: [
-              {
-                kind: "file-offset-range",
-                start: target.selection.offset,
-                end: target.selection.offset + target.selection.length,
-              },
-            ],
+            locations:
+              target === undefined
+                ? []
+                : [
+                    {
+                      kind: "file-offset-range",
+                      start: target.selection.offset,
+                      end: target.selection.offset + target.selection.length,
+                    },
+                  ],
           },
         ),
       );

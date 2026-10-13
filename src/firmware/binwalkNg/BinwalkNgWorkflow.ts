@@ -6,7 +6,7 @@ import { AnalysisError } from "../../domain/analysisErrorBase.js";
 import { AnalysisOutputError } from "../../domain/analysisErrorCore.js";
 import { ProviderAdapterError } from "../../domain/providerAdapterError.js";
 import { ProviderCleanupError } from "../../domain/providerCleanupError.js";
-import type { BinwalkNgRequest } from "../../domain/firmware/binwalkNgAnalysis.js";
+import type { BinwalkNgFileRequest } from "../../domain/firmware/binwalkNgAnalysis.js";
 import { jsonValueSchema, type JsonValue } from "../../domain/jsonValue.js";
 import type { ProviderProcessSupervisor } from "../../process/ProviderProcess.js";
 import {
@@ -38,7 +38,7 @@ import {
 import { prepareBinwalkNgSandbox } from "./BinwalkNgSandbox.js";
 
 export interface BinwalkNgWorkflowContext {
-  readonly request: BinwalkNgRequest;
+  readonly request: BinwalkNgFileRequest;
   readonly root: string;
   readonly target: Awaited<ReturnType<typeof snapshotFirmware>>;
   readonly runtime: {

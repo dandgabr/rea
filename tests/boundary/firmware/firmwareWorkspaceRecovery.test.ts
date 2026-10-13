@@ -5,7 +5,7 @@ import { expect, it } from "vitest";
 import { STDIO_DEFAULT_MAX_BUFFER_SIZE } from "@modelcontextprotocol/server";
 
 import { toolContract } from "../../../src/contracts/toolContracts.js";
-import { firmwareResultSchemas } from "../../../src/domain/firmware/firmwareAnalysis.js";
+import { legacyFirmwareResultSchemas as firmwareResultSchemas } from "../../../src/domain/firmware/firmwareAnalysis.js";
 import { projectAnalysisError } from "../../../src/domain/analysisErrorProjection.js";
 import { ToolResultDelivery } from "../../../src/server/toolResult.js";
 import {

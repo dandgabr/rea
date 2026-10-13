@@ -7,7 +7,7 @@ import { SafeOutputTreeCreationFailure } from "../artifacts/SafeOutputTreeCreati
 import { AnalysisOutputError } from "../domain/analysisErrorCore.js";
 import { ProviderCleanupError } from "../domain/providerCleanupError.js";
 import { jsonValueSchema } from "../domain/jsonValue.js";
-import { firmwareResultSchemas } from "../domain/firmware/firmwareAnalysis.js";
+import { legacyFirmwareResultSchemas as firmwareResultSchemas } from "../domain/firmware/firmwareAnalysis.js";
 import { hashFirmwareFile, type FirmwareEntry } from "./FirmwareFiles.js";
 import type { normalizeUnblobReport } from "./FirmwareReports.js";
 import type { extractionGap } from "../domain/firmware/firmwareAnalysis.js";

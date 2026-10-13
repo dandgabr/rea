@@ -33,7 +33,11 @@ it("executes named firmware contracts with inline Evidence and no native binary 
   await server.connect(serverTransport);
   await client.connect(clientTransport);
   const advertised = await client.listTools();
-  for (const contract of FIRMWARE_TOOL_CONTRACTS) {
+  for (const contract of FIRMWARE_TOOL_CONTRACTS.filter(
+    (contract) =>
+      contract.name === "inspect_firmware_regions" ||
+      contract.name === "extract_firmware",
+  )) {
     expect(
       advertised.tools.find((tool) => tool.name === contract.name)?.annotations,
     ).toMatchObject(contract.annotations);

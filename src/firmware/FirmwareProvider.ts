@@ -8,7 +8,9 @@ import {
   type ExecutionOptions,
 } from "../application/AnalysisProvider.js";
 import {
-  firmwareResultSchemas,
+  legacyFirmwareResultSchemas as firmwareResultSchemas,
+  isLegacyFirmwareRequest,
+  type LegacyFirmwareRequest,
   type FirmwareRequest,
   type FirmwarePartialObservation,
 } from "../domain/firmware/firmwareAnalysis.js";
@@ -127,6 +129,14 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
     request: FirmwareRequest,
     options?: ExecutionOptions,
   ): Promise<Outcome> {
+    if (!isLegacyFirmwareRequest(request))
+      return err(
+        firmwareToolUnavailable(
+          "firmware",
+          request.operation,
+          "This legacy adapter does not implement the explicitly selected provider",
+        ),
+      );
     if (this.#closed) return err(new AnalysisCancelledError(request.operation));
     const predecessor = this.#tail;
     let release = () => {};
@@ -246,7 +256,7 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
   }
 
   async #execute(
-    request: FirmwareRequest,
+    request: LegacyFirmwareRequest,
     options?: ExecutionOptions,
   ): Promise<Outcome> {
     let root: PrivateRuntimeRoot | undefined;

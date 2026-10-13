@@ -34,4 +34,22 @@ export const registerFirmwareTools = (
     toolRegistrationOptions(extract),
     handler(extract),
   );
+  const carve = toolContract("carve_firmware");
+  server.registerTool(
+    carve.name,
+    toolRegistrationOptions(carve),
+    handler(carve),
+  );
+  const entropy = toolContract("inspect_firmware_entropy");
+  server.registerTool(
+    entropy.name,
+    toolRegistrationOptions(entropy),
+    handler(entropy),
+  );
+  const inventory = toolContract("inspect_firmware_provider");
+  server.registerTool(
+    inventory.name,
+    toolRegistrationOptions(inventory),
+    handler(inventory),
+  );
 };

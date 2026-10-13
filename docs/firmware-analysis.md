@@ -5,13 +5,19 @@ explicit extraction. The report parsers are verified with Binwalk 3.1.0 and
 Unblob 26.6.4. Another build on those lines is accepted, the observed version
 is reported, and a limitation records that the parser was not verified against
 that build. This first firmware milestone is verified on Linux x64.
-No device, root privilege, mount, emulation or execution of extracted programs
+For the default providers, no device, root privilege, mount, emulation or execution of extracted programs
 is needed. Arbitrary firmware bytes do not pass native executable admission;
 select a returned ELF separately for supported Ghidra analysis.
 
 On Linux, Binwalk and Unblob run as REA-owned processes and require a
 procps-compatible `ps` on REA's `PATH`; see the shared
 [Linux process prerequisite](installation.md#linux-owned-process-prerequisite).
+
+Explicit `provider_id: "binwalk-ng"` adds the independent 4.0.0 profile for
+inspection/extraction, `carve_firmware`, `inspect_firmware_entropy` and corpus
+`inspect_firmware_provider`. It requires its own minimal bubblewrap runtime
+manifest; see [binwalk-ng setup, options and coverage](binwalk-ng.md). The
+legacy defaults and their prerequisites described below remain unchanged.
 
 ## Caller-supplied tools
 

@@ -1,3 +1,9 @@
+import {
+  binwalkNgInputSchemas,
+  binwalkNgProviderInputSchema,
+  type BinwalkNgRequest,
+} from "./binwalkNgAnalysis.js";
+import { binwalkNgResultSchemas } from "./binwalkNgResults.js";
 import { z } from "zod";
 import { isAbsolute } from "node:path";
 import { digestSchema } from "../digests.js";
@@ -18,7 +24,7 @@ const target = {
 };
 
 /** Explicit firmware inspection and extraction intent, independent of engines. */
-export const firmwareInputSchemas = {
+export const legacyFirmwareInputSchemas = {
   inspect_firmware_regions: z.strictObject(target),
   extract_firmware: z.strictObject({
     ...target,
@@ -56,16 +62,41 @@ export const firmwareInputSchemas = {
   }),
 } as const;
 
-/** Supported firmware operations. */
+/** Provider selection is explicit for ng; omitted-provider legacy inputs remain unchanged. */
+export const firmwareInputSchemas = {
+  inspect_firmware_regions: z.union([
+    legacyFirmwareInputSchemas.inspect_firmware_regions,
+    binwalkNgInputSchemas.inspect_firmware_regions,
+  ]),
+  extract_firmware: z.union([
+    legacyFirmwareInputSchemas.extract_firmware,
+    binwalkNgInputSchemas.extract_firmware,
+  ]),
+  carve_firmware: binwalkNgInputSchemas.carve_firmware,
+  inspect_firmware_entropy: binwalkNgInputSchemas.inspect_firmware_entropy,
+  inspect_firmware_provider: binwalkNgProviderInputSchema,
+} as const;
 export type FirmwareOperation = keyof typeof firmwareInputSchemas;
-/** Correlated, validated firmware request. */
+export type LegacyFirmwareRequest = {
+  [Name in keyof typeof legacyFirmwareInputSchemas]: {
+    operation: Name;
+    input: z.infer<(typeof legacyFirmwareInputSchemas)[Name]>;
+  };
+}[keyof typeof legacyFirmwareInputSchemas];
 export type FirmwareRequest = {
   [Name in FirmwareOperation]: {
     operation: Name;
     input: z.infer<(typeof firmwareInputSchemas)[Name]>;
   };
 }[FirmwareOperation];
-/** Validate the operation with its exact input contract. */
+/** Narrow only validated requests; no operation-based provider fallback. */
+export const isLegacyFirmwareRequest = (
+  request: FirmwareRequest,
+): request is LegacyFirmwareRequest => !("provider_id" in request.input);
+export const isBinwalkNgRequest = (
+  request: FirmwareRequest,
+): request is BinwalkNgRequest =>
+  "provider_id" in request.input && request.input.provider_id === "binwalk-ng";
 export const firmwareRequestSchema = z.discriminatedUnion("operation", [
   z.strictObject({
     operation: z.literal("inspect_firmware_regions"),
@@ -74,6 +105,18 @@ export const firmwareRequestSchema = z.discriminatedUnion("operation", [
   z.strictObject({
     operation: z.literal("extract_firmware"),
     input: firmwareInputSchemas.extract_firmware,
+  }),
+  z.strictObject({
+    operation: z.literal("carve_firmware"),
+    input: firmwareInputSchemas.carve_firmware,
+  }),
+  z.strictObject({
+    operation: z.literal("inspect_firmware_entropy"),
+    input: firmwareInputSchemas.inspect_firmware_entropy,
+  }),
+  z.strictObject({
+    operation: z.literal("inspect_firmware_provider"),
+    input: firmwareInputSchemas.inspect_firmware_provider,
   }),
 ]);
 
@@ -130,7 +173,7 @@ export interface FirmwarePartialObservation {
 }
 
 /** Portable results retain reported boundaries, unknowns and extraction lineage. */
-export const firmwareResultSchemas = {
+export const legacyFirmwareResultSchemas = {
   inspect_firmware_regions: z.strictObject({
     engine,
     input_size: bytes,
@@ -191,4 +234,19 @@ export const firmwareResultSchemas = {
     ),
     published_bytes: bytes,
   }),
+} as const;
+
+/** Results discriminate ng by provider_id while preserving legacy result omission. */
+export const firmwareResultSchemas = {
+  inspect_firmware_regions: z.union([
+    legacyFirmwareResultSchemas.inspect_firmware_regions,
+    binwalkNgResultSchemas.inspect_firmware_regions,
+  ]),
+  extract_firmware: z.union([
+    legacyFirmwareResultSchemas.extract_firmware,
+    binwalkNgResultSchemas.extract_firmware,
+  ]),
+  carve_firmware: binwalkNgResultSchemas.carve_firmware,
+  inspect_firmware_entropy: binwalkNgResultSchemas.inspect_firmware_entropy,
+  inspect_firmware_provider: binwalkNgResultSchemas.inspect_firmware_provider,
 } as const;

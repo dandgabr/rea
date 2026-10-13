@@ -58,3 +58,8 @@ extractors or download/install firmware engines during analysis.
 On updates: inspect actual pinned CLI and report producers, preserve licenses,
 update gitlinks/release records, run report regressions and the real firmware
 lane. See [firmware setup and coverage](../docs/firmware-analysis.md).
+
+The independent binwalk-ng 4.0.0 adapter audits upstream source at
+`368c3815cb97976ae7ba6092f356933169f06dae` from
+<https://github.com/binwalk-ng/binwalk-ng> (MIT). That source reference is not a
+vendored submodule or shipped binary. See the [ng capability ledger](../docs/binwalk-ng.md).

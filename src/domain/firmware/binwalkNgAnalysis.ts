@@ -28,7 +28,7 @@ const signatureName = z
   .refine((name) => !name.includes(",") && !name.includes("\0"), {
     message: "Signature names cannot contain native list separators or NUL",
   });
-const scanFields = {
+export const binwalkNgScanFields = {
   search_all: z.boolean().default(false),
   include: z.array(signatureName).default([]),
   exclude: z.array(signatureName).default([]),
@@ -39,12 +39,14 @@ const exclusiveSignatures = (options: {
   include: string[];
   exclude: string[];
 }) => options.include.length === 0 || options.exclude.length === 0;
-const scanOptions = z.strictObject(scanFields).refine(exclusiveSignatures, {
-  message: "include and exclude are mutually exclusive",
-});
+const scanOptions = z
+  .strictObject(binwalkNgScanFields)
+  .refine(exclusiveSignatures, {
+    message: "include and exclude are mutually exclusive",
+  });
 const extractOptions = z
   .strictObject({
-    ...scanFields,
+    ...binwalkNgScanFields,
     carve: z.boolean().default(false),
     recursive: z.boolean().default(true),
   })
@@ -82,9 +84,21 @@ export const binwalkNgInputSchemas = {
 } as const;
 
 /** Validated explicit request; public integration adds these branches to the shared router. */
-export type BinwalkNgRequest = {
+export type BinwalkNgFileRequest = {
   [Name in keyof typeof binwalkNgInputSchemas]: {
     operation: Name;
     input: z.infer<(typeof binwalkNgInputSchemas)[Name]>;
   };
 }[keyof typeof binwalkNgInputSchemas];
+
+/** Native format inventory has no firmware subject or fabricated byte selection. */
+export const binwalkNgProviderInputSchema = z.strictObject({
+  provider_id: z.literal("binwalk-ng"),
+});
+
+export type BinwalkNgRequest =
+  | BinwalkNgFileRequest
+  | {
+      operation: "inspect_firmware_provider";
+      input: z.infer<typeof binwalkNgProviderInputSchema>;
+    };
