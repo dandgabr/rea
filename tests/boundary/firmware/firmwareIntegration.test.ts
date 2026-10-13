@@ -49,6 +49,12 @@ const fileCloseFailure = vi.hoisted(() => ({
   handles: [] as import("node:fs/promises").FileHandle[],
 }));
 
+const commitDurability = vi.hoisted(() => ({
+  active: false,
+  controller: undefined as AbortController | undefined,
+  syncs: 0,
+}));
+
 const directoryCloseFailure = vi.hoisted(() => ({
   mode: "off" as "off" | "transient" | "persistent",
   attempts: 0,
@@ -93,6 +99,15 @@ vi.mock("node:fs/promises", async (importOriginal) => {
           await close();
         };
       }
+      if (commitDurability.active && (await handle.stat()).isDirectory()) {
+        const sync = handle.sync.bind(handle);
+        handle.sync = async () => {
+          await sync();
+          commitDurability.syncs += 1;
+          if (commitDurability.syncs === 2)
+            commitDurability.controller?.abort();
+        };
+      }
       return handle;
     },
   };
@@ -101,6 +116,91 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 const delivery = new ToolResultDelivery(STDIO_DEFAULT_MAX_BUFFER_SIZE);
 
 const it = test.skipIf(process.platform !== "linux");
+
+it.each([false, true])(
+  "binds firmware publication to actual directory durability cancellation: abort=%s",
+  async (abort) => {
+    const fixture = await firmwareFixture("observation-facts");
+    const controller = new AbortController();
+    const commit = SafeOutputTree.prototype.commit;
+    let committedTree: SafeOutputTree | undefined;
+    const committing = vi.spyOn(SafeOutputTree.prototype, "commit");
+    committing.mockImplementationOnce(async function (
+      this: SafeOutputTree,
+      signal,
+    ) {
+      committedTree = this;
+      commitDurability.active = true;
+      commitDurability.syncs = 0;
+      commitDurability.controller = abort ? controller : undefined;
+      try {
+        await commit.call(this, signal);
+      } finally {
+        commitDurability.active = false;
+        commitDurability.controller = undefined;
+      }
+    });
+    try {
+      const result = await fixture.service.execute(
+        "extract_firmware",
+        { path: fixture.path, output_directory: fixture.output },
+        { signal: controller.signal },
+      );
+      expect(commitDurability.syncs).toBe(2);
+      expect(committedTree?.published).toBe(!abort);
+      if (abort) {
+        expect(result).toMatchObject({
+          ok: false,
+          error: { _tag: "AnalysisCancelledError", cleanupIncomplete: false },
+        });
+        if (result.ok) throw Error("Canceled durability must not publish");
+        expect(projectAnalysisError(result.error)).toMatchObject({
+          details: {
+            partial_observation: {
+              kind: "firmware",
+              result: {
+                publication_state: "not_committed",
+                requested_output_directory: fixture.output,
+                tasks: expect.arrayContaining([
+                  expect.objectContaining({ path: "$input" }),
+                ]),
+                randomness: expect.any(Array),
+                multifiles: expect.any(Array),
+                deleted_files: expect.any(Array),
+              },
+              provenance: {
+                subject: { path: fixture.path },
+                raw_result: {
+                  report: expect.any(Array),
+                  execution: { exit_code: 0 },
+                },
+              },
+            },
+          },
+        });
+        const partial = jsonObjectSchema.parse(result.error.partialObservation);
+        const facts = jsonObjectSchema.parse(partial.result);
+        expect(facts).not.toHaveProperty("files");
+        await expect(access(fixture.output)).rejects.toMatchObject({
+          code: "ENOENT",
+        });
+      } else {
+        if (!result.ok) throw result.error;
+        expect(await readFile(`${fixture.output}/rootfs/config`, "utf8")).toBe(
+          "firmware=true\n",
+        );
+      }
+      expect(await readFile(fixture.path, "utf8")).toBe("fixture-input-data");
+      expect(fixture.launches).toHaveLength(2);
+      await assertFirmwareCleanup(fixture.launches);
+    } finally {
+      commitDurability.active = false;
+      commitDurability.controller = undefined;
+      commitDurability.syncs = 0;
+      committing.mockRestore();
+    }
+  },
+);
 
 it.each([
   "existing-output",
