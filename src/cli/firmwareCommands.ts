@@ -9,6 +9,9 @@ import {
   unblobExtractionOptionsSchema,
 } from "../domain/firmware/firmwareAnalysis.js";
 import { localPathStringSchema } from "../domain/localPath.js";
+import { AnalysisInputError } from "../domain/analysisErrorCore.js";
+import { safeParseJson } from "../domain/safeJson.js";
+import { projectAnalysisError } from "../domain/analysisErrorProjection.js";
 import type { FirmwareOperation } from "../domain/firmware/firmwareAnalysis.js";
 import type { Logger } from "pino";
 import type { CliInstance } from "./types.js";
@@ -28,6 +31,12 @@ export const registerFirmwareCommands = (
   );
   const extractInput = firmwareInputSchemas.extract_firmware.shape;
   const range = extractInput.range.unwrap().shape;
+  const runtime = z
+    .string()
+    .optional()
+    .describe(
+      'Inline JSON runtime selection, for example {"kind":"native"}; container requires command, image and existing_store_profile',
+    );
   const selectionOptions = {
     offset: range.offset
       .optional()
@@ -98,17 +107,34 @@ export const registerFirmwareCommands = (
   const execute = (
     name: string,
     operation: FirmwareOperation,
-    input: unknown,
+    input: Readonly<Record<string, unknown>>,
   ) =>
     withCommandCancellation((signal) =>
-      logCliCommand(logger, name, () =>
-        finishAnalysisCommand(
-          () => service.execute(operation, input, { signal }),
+      logCliCommand(logger, name, async () => {
+        let selectedInput = input;
+        if (typeof input.runtime === "string") {
+          const parsed = safeParseJson(input.runtime);
+          if (!parsed.ok)
+            return projectAnalysisError(
+              new AnalysisInputError(operation, undefined, [
+                {
+                  path: ["runtime"],
+                  reason: "invalid_format",
+                  expected: "JSON",
+                },
+              ]),
+            );
+          selectedInput = { ...input, runtime: parsed.value };
+        }
+        return finishAnalysisCommand(
+          () => service.execute(operation, selectedInput, { signal }),
           service,
           operation === "inspect_firmware_regions" ? "binwalk" : "unblob",
           operation,
-        ),
-      ),
+          undefined,
+          signal,
+        );
+      }),
     );
   const path = localPathStringSchema.describe(
     "Local firmware path; never executed",
@@ -119,6 +145,7 @@ export const registerFirmwareCommands = (
     options: z.object({
       providerId: z.literal("unblob"),
       pluginsPath: unblobOptions.pluginsPath,
+      runtime,
     }),
     run: ({ options }) =>
       execute(
@@ -126,6 +153,9 @@ export const registerFirmwareCommands = (
         "inspect_firmware_provider",
         {
           provider_id: options.providerId,
+          ...(options.runtime === undefined
+            ? {}
+            : { runtime: options.runtime }),
           ...(options.pluginsPath === undefined
             ? {}
             : { options: { plugins_path: resolve(options.pluginsPath) } }),
@@ -138,6 +168,7 @@ export const registerFirmwareCommands = (
     args: z.object({ path }),
     options: z.object({
       providerId: z.enum(["binwalk", "unblob"]).default("binwalk"),
+      runtime,
       ...selectionOptions,
       ...unblobOptions,
     }),
@@ -149,6 +180,9 @@ export const registerFirmwareCommands = (
         {
           path: absoluteCallerPath(args.path),
           provider_id: options.providerId,
+          ...(options.runtime === undefined
+            ? {}
+            : { runtime: options.runtime }),
           ...selection(options),
           ...(Object.keys(nativeOptions(options)).length === 0
             ? {}
@@ -167,6 +201,7 @@ export const registerFirmwareCommands = (
     }),
     options: z.object({
       providerId: z.literal("unblob").default("unblob"),
+      runtime,
       ...selectionOptions,
       ...unblobOptions,
       keepExtractedChunks:
@@ -193,6 +228,7 @@ export const registerFirmwareCommands = (
         path: absoluteCallerPath(args.path),
         output_directory: absoluteCallerPath(args.outputDirectory),
         provider_id: options.providerId,
+        ...(options.runtime === undefined ? {} : { runtime: options.runtime }),
         ...selection(options),
         options: {
           ...nativeOptions(options),

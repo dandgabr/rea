@@ -29,7 +29,10 @@ export const UNBLOB_DEFAULT_SKIP_MAGIC = [
 ] as const;
 
 /** Preserve native option values as single argv tokens, including flag-like prefixes. */
-export const unblobExecutionOptions = (request: FirmwareRequest) => {
+export const unblobExecutionOptions = (
+  request: FirmwareRequest,
+  namespace?: { readonly pluginsPath: string },
+) => {
   if (
     request.input.provider_id !== "unblob" ||
     request.operation === "inspect_firmware_provider"
@@ -45,7 +48,9 @@ export const unblobExecutionOptions = (request: FirmwareRequest) => {
     String(options.randomness_depth),
   ];
   if (options.plugins_path !== undefined)
-    args.push(`--plugins-path=${options.plugins_path}`);
+    args.push(
+      `--plugins-path=${namespace?.pluginsPath ?? options.plugins_path}`,
+    );
   if (options.skip_magic?.mode === "replace") args.push("--clear-skip-magics");
   for (const magic of options.skip_magic?.values ?? [])
     args.push(`--skip-magic=${magic}`);

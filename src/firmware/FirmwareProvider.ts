@@ -288,6 +288,15 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
     let outcome: Outcome;
     try {
       if (signal.aborted) throw new AnalysisCancelledError(request.operation);
+      if (
+        request.input.provider_id === "unblob" &&
+        request.input.runtime?.kind === "container"
+      )
+        throw firmwareToolUnavailable(
+          engineName,
+          request.operation,
+          "Selected container runtime is unavailable until its store, lifecycle and generated OCI policy have been admitted; native fallback is refused",
+        );
       const pluginPath =
         request.input.provider_id === "unblob"
           ? request.input.options?.plugins_path

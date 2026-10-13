@@ -3,6 +3,7 @@ import { isAbsolute } from "node:path";
 import { digestSchema } from "../digests.js";
 import { jsonValueSchema, type JsonValue } from "../jsonValue.js";
 import { localPathStringSchema } from "../localPath.js";
+import { firmwareRuntimeSchema } from "./firmwareRuntime.js";
 import {
   firmwareTaskSchema,
   firmwareRandomnessSchema,
@@ -98,11 +99,13 @@ export const unblobRegionInputSchema = z.strictObject({
   ...firmwareSelectionFields,
   provider_id: z.literal("unblob"),
   options: unblobOptionsSchema.prefault({}),
+  runtime: firmwareRuntimeSchema.optional(),
 });
 export const unblobExtractionInputSchema = z.strictObject({
   ...firmwareExtractionFields,
   provider_id: z.literal("unblob").default("unblob"),
   options: unblobExtractionOptionsSchema.prefault({}),
+  runtime: firmwareRuntimeSchema.optional(),
 });
 /** Provider branches are strict; omission preserves the existing engine defaults. */
 export const firmwareInputSchemas = {
@@ -116,12 +119,28 @@ export const firmwareInputSchemas = {
           properties: { provider_id: { const: "unblob" } },
           required: ["provider_id"],
         },
+        runtime: {
+          properties: { provider_id: { const: "unblob" } },
+          required: ["provider_id"],
+        },
+      },
+      // Draft-07 clients use schema-valued dependencies for the same correlation.
+      dependencies: {
+        options: {
+          properties: { provider_id: { const: "unblob" } },
+          required: ["provider_id"],
+        },
+        runtime: {
+          properties: { provider_id: { const: "unblob" } },
+          required: ["provider_id"],
+        },
       },
     }),
   extract_firmware: unblobExtractionInputSchema,
   inspect_firmware_provider: z.strictObject({
     provider_id: z.literal("unblob"),
     options: unblobOptionsSchema.pick({ plugins_path: true }).optional(),
+    runtime: firmwareRuntimeSchema.optional(),
   }),
 } as const;
 
