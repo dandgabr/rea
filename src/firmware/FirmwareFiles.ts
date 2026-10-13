@@ -2,13 +2,14 @@ import { createHash } from "node:crypto";
 import { constants, createReadStream, createWriteStream } from "node:fs";
 import {
   chmod,
+  mkdir,
   lstat,
   opendir,
   open,
   readlink,
   realpath,
 } from "node:fs/promises";
-import { isAbsolute, join, relative, sep } from "node:path";
+import { basename, isAbsolute, join, relative, sep } from "node:path";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import {
@@ -67,7 +68,8 @@ export const snapshotFirmware = async (
   const sourcePath = absoluteCallerPath(request.input.path);
   const source = await realpath(sourcePath);
   const handle = await open(source, constants.O_RDONLY | constants.O_NOFOLLOW);
-  const fullPath = join(root, "firmware.bin");
+  await mkdir(join(root, "source"), { mode: 0o700 });
+  const fullPath = join(root, "source", basename(sourcePath));
   const hash = createHash("sha256");
   let size = 0;
   try {
@@ -106,8 +108,12 @@ export const snapshotFirmware = async (
   }
   await chmod(fullPath, 0o400);
   const sha256 = hash.digest("hex");
-  const selected =
-    request.operation === "extract_firmware" ? request.input.range : undefined;
+  if ((await hashFirmwareFile(fullPath, signal)) !== sha256)
+    throw new AnalysisOutputError(
+      request.operation,
+      "Immutable snapshot failed digest readback",
+    );
+  const selected = request.input.range;
   const offset = selected?.offset ?? 0;
   const length = selected?.length ?? size;
   if (length === 0 || offset > size || length > size - offset)
@@ -120,7 +126,8 @@ export const snapshotFirmware = async (
     ]);
   let inputPath = fullPath;
   if (selected !== undefined) {
-    inputPath = join(root, "selected.bin");
+    await mkdir(join(root, "selected"), { mode: 0o700 });
+    inputPath = join(root, "selected", basename(sourcePath));
     await pipeline(
       createReadStream(fullPath, { start: offset, end: offset + length - 1 }),
       createWriteStream(inputPath, { flags: "wx", mode: 0o600 }),

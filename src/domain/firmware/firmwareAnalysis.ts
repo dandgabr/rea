@@ -17,43 +17,89 @@ const target = {
     ),
 };
 
-/** Explicit firmware inspection and extraction intent, independent of engines. */
-export const firmwareInputSchemas = {
-  inspect_firmware_regions: z.strictObject(target),
-  extract_firmware: z.strictObject({
-    ...target,
-    output_directory: localPathStringSchema
-      .refine(isAbsolute, {
-        message: "output_directory must be an absolute local filesystem path",
-      })
-      .describe("Absolute, absent output directory; parent must exist"),
-    range: range
-      .optional()
-      .describe("Explicit file-byte interval; omit to extract the whole file"),
-    max_depth: z
-      .number()
-      .int()
-      .min(1)
-      .max(10)
-      .default(3)
-      .describe("Extraction depth; reaching it yields partial analysis"),
-    max_output_bytes: z
-      .number()
-      .int()
-      .min(1)
-      .max(512 * 1024 * 1024)
-      .default(256 * 1024 * 1024)
-      .describe(
-        "Staging file-byte budget, checked during extraction; transient overshoot is possible",
-      ),
-    max_output_files: z
-      .number()
-      .int()
-      .min(1)
-      .max(100_000)
-      .default(10_000)
-      .describe("Staging entry budget, including directories and links"),
+/** Common selection and publication fields; provider adapters own native options. */
+export const firmwareSelectionFields = { ...target, range: range.optional() };
+export const firmwareExtractionFields = {
+  ...firmwareSelectionFields,
+  output_directory: localPathStringSchema
+    .refine(isAbsolute, { message: "output_directory must be absolute" })
+    .describe("Absolute, absent output directory; parent must exist"),
+  max_depth: z.number().int().min(1).max(10).default(3),
+  max_output_bytes: z
+    .number()
+    .int()
+    .min(1)
+    .max(512 * 1024 * 1024)
+    .default(256 * 1024 * 1024),
+  max_output_files: z.number().int().min(1).max(100_000).default(10_000),
+};
+const suffix = z
+  .string()
+  .min(1)
+  .refine((value) => !/[\\/\0]/.test(value), {
+    message:
+      "Suffix must be a nonempty filename suffix without path separators",
+  });
+const deletion = z.discriminatedUnion("mode", [
+  z.strictObject({ mode: z.literal("none") }),
+  z.strictObject({ mode: z.literal("all") }),
+  z.strictObject({
+    mode: z.literal("selected"),
+    handlers: z
+      .array(
+        z
+          .string()
+          .min(1)
+          .refine((value) => value.trim() === value && !value.includes(",")),
+      )
+      .min(1),
   }),
+]);
+/** Explicit plugin paths execute trusted Python code before native sandbox setup. */
+export const unblobOptionsSchema = z.strictObject({
+  workers: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).default(1),
+  randomness_depth: bytes.default(0),
+  skip_magic: z
+    .strictObject({
+      mode: z.enum(["append", "replace"]).default("append"),
+      values: z.array(z.string()),
+    })
+    .optional(),
+  skip_extensions: z.array(z.string()).min(1).optional(),
+  plugins_path: localPathStringSchema
+    .refine(isAbsolute)
+    .optional()
+    .describe(
+      "Trusted Python plugin file/tree; imported before Landlock. Installed entrypoints may also execute with unknown inventory.",
+    ),
+});
+export const unblobExtractionOptionsSchema = unblobOptionsSchema.extend({
+  keep_extracted_chunks: z.boolean().default(false),
+  delete_extracted_files: deletion.default({ mode: "none" }),
+  carve_suffix: suffix.default("_extract"),
+  extract_suffix: suffix.default("_extract"),
+});
+export const binwalkRegionInputSchema = z.strictObject({
+  ...firmwareSelectionFields,
+  provider_id: z.literal("binwalk").default("binwalk"),
+});
+export const unblobRegionInputSchema = z.strictObject({
+  ...firmwareSelectionFields,
+  provider_id: z.literal("unblob"),
+  options: unblobOptionsSchema.prefault({}),
+});
+export const unblobExtractionInputSchema = z.strictObject({
+  ...firmwareExtractionFields,
+  provider_id: z.literal("unblob").default("unblob"),
+  options: unblobExtractionOptionsSchema.prefault({}),
+});
+/** Provider branches are strict; omission preserves the existing engine defaults. */
+export const firmwareInputSchemas = {
+  inspect_firmware_regions: z.union([
+    binwalkRegionInputSchema,
+    unblobRegionInputSchema,
+  ]),
+  extract_firmware: unblobExtractionInputSchema,
 } as const;
 
 /** Supported firmware operations. */
@@ -77,15 +123,18 @@ export const firmwareRequestSchema = z.discriminatedUnion("operation", [
   }),
 ]);
 
-const engine = z.strictObject({
+export const firmwareEngineSchema = z.strictObject({
   name: z.string(),
   version: z.string(),
   executable_path: z.string(),
   executable_sha256: digestSchema,
   source_revision: z.null(),
-  worker_count: z.literal(1),
+  worker_count: z.number().int().positive(),
 });
-const selection = z.strictObject({ ...range.shape, sha256: digestSchema });
+export const firmwareSelectionSchema = z.strictObject({
+  ...range.shape,
+  sha256: digestSchema,
+});
 const chunk = z.strictObject({
   input_path: z.string(),
   provider_id: z.string(),
@@ -132,7 +181,7 @@ export interface FirmwarePartialObservation {
 /** Portable results retain reported boundaries, unknowns and extraction lineage. */
 export const firmwareResultSchemas = {
   inspect_firmware_regions: z.strictObject({
-    engine,
+    engine: firmwareEngineSchema,
     input_size: bytes,
     regions: z.array(
       z.strictObject({
@@ -148,8 +197,8 @@ export const firmwareResultSchemas = {
     coverage: z.literal("signature_scan"),
   }),
   extract_firmware: z.strictObject({
-    engine,
-    selection,
+    engine: firmwareEngineSchema,
+    selection: firmwareSelectionSchema,
     output_directory: z.string(),
     coverage: z.enum(["complete", "partial"]),
     files: z.array(
