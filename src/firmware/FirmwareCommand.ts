@@ -11,6 +11,11 @@ import {
 import { ProviderAdapterError } from "../domain/providerAdapterError.js";
 import { ProviderCleanupError } from "../domain/providerCleanupError.js";
 import {
+  AnalysisError,
+  type AnalysisCapturedOutput,
+} from "../domain/analysisErrorBase.js";
+import { projectAnalysisError } from "../domain/analysisErrorProjection.js";
+import {
   spawnOwnedProviderProcess,
   ProviderProcessSupervisor,
   type OwnedProviderProcessSpawnOptions,
@@ -198,6 +203,33 @@ export const runFirmwareCommand = async (context: {
   }
   const stopped = await supervisor.stop();
   const snapshot = supervisor.snapshot();
+  const captured: AnalysisCapturedOutput = {
+    stdout: snapshot.stdout.text,
+    stderr: snapshot.stderr.text,
+    truncated: snapshot.diagnosticTruncated ?? false,
+    stdout_bytes: snapshot.stdout.bytes,
+    stderr_bytes: snapshot.stderr.bytes,
+    stdout_observed_bytes: snapshot.stdout.observedBytes,
+    stderr_observed_bytes: snapshot.stderr.observedBytes,
+    exit_code: snapshot.exitCode ?? null,
+    signal: snapshot.signal ?? null,
+    ...(snapshot.stdout.sha256 === undefined
+      ? {}
+      : { stdout_sha256: snapshot.stdout.sha256 }),
+    ...(snapshot.stderr.sha256 === undefined
+      ? {}
+      : { stderr_sha256: snapshot.stderr.sha256 }),
+    ...(snapshot.stdout.utf8Valid === undefined
+      ? {}
+      : { stdout_utf8_valid: snapshot.stdout.utf8Valid }),
+    ...(snapshot.stderr.utf8Valid === undefined
+      ? {}
+      : { stderr_utf8_valid: snapshot.stderr.utf8Valid }),
+    command: context.command,
+    arguments: [...context.args],
+    resource_limiter: context.limiter,
+  };
+  if (failure instanceof AnalysisError) failure.retainCapturedOutput(captured);
   if (stopped.status === "incomplete") {
     context.retainCleanup(supervisor);
     throw new ProviderCleanupError(engine, [runId, context.cwd], {
@@ -211,6 +243,9 @@ export const runFirmwareCommand = async (context: {
       stdout_bytes: snapshot.stdout.bytes,
       stderr_bytes: snapshot.stderr.bytes,
       previous_error: failure instanceof Error ? failure.message : null,
+      primary_error:
+        failure instanceof AnalysisError ? projectAnalysisError(failure) : null,
+      captured_output: { ...captured, arguments: [...context.args] },
     });
   }
   if (failure !== undefined) throw failure;

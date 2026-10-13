@@ -2,8 +2,64 @@ import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { expect, it, vi } from "vitest";
 import { ProviderProcessSupervisor } from "./ProviderProcess.js";
+import { createHash } from "node:crypto";
 import { redactCapturedTransportCredential } from "./ProviderDiagnosticRedaction.js";
 
+it("preserves a UTF8 BOM as source text and reports the exact retained byte digest", () => {
+  const producer = Object.assign(new EventEmitter(), {
+    stdout: new PassThrough(),
+    stderr: new PassThrough(),
+    exitCode: null,
+    signalCode: null,
+    kill: () => false,
+  });
+  const supervisor = new ProviderProcessSupervisor({
+    process: producer,
+    ownsProcessLifetime: false,
+  });
+  const bytes = Buffer.from("\ufeffsource-é😀");
+  try {
+    producer.stdout.write(bytes);
+    expect(supervisor.snapshot().stdout).toEqual({
+      text: "\ufeffsource-é😀",
+      bytes: bytes.length,
+      observedBytes: bytes.length,
+      utf8Valid: true,
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+    });
+  } finally {
+    supervisor.dispose();
+  }
+});
+it("distinguishes observed bytes from retained split UTF8 at the actual aggregate capture boundary", () => {
+  const producer = Object.assign(new EventEmitter(), {
+    stdout: new PassThrough(),
+    stderr: new PassThrough(),
+    exitCode: null,
+    signalCode: null,
+    kill: () => false,
+  });
+  const supervisor = new ProviderProcessSupervisor(
+    { process: producer, ownsProcessLifetime: false },
+    { maxDiagnosticBytes: 3 },
+  );
+  const bytes = Buffer.from("é😀");
+  try {
+    producer.stdout.write(bytes);
+    expect(supervisor.snapshot()).toMatchObject({
+      diagnosticTruncated: true,
+      stdout: {
+        text: "é�",
+        bytes: 3,
+        observedBytes: 6,
+        utf8Valid: false,
+        sha256: createHash("sha256").update(bytes.subarray(0, 3)).digest("hex"),
+      },
+    });
+  } finally {
+    supervisor.dispose();
+  }
+});
 it("exit does not establish complete output when a producer closes its streams later", async () => {
   const producer = Object.assign(new EventEmitter(), {
     stdout: new PassThrough(),
