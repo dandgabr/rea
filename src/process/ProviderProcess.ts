@@ -756,16 +756,20 @@ class ProcessOutputCapture {
   ): ProviderProcessSnapshot["stdout"] {
     const text = buffer.toString("utf8");
     let invalidUtf8 = false;
+    let utf8Valid = true;
     try {
-      new TextDecoder("utf-8", { fatal: true }).decode(buffer);
+      new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(buffer);
     } catch {
       invalidUtf8 = true;
+      utf8Valid = false;
     }
     return {
       text,
       bytes: buffer.byteLength,
       observedBytes,
       ...(invalidUtf8 ? { invalidUtf8: true } : {}),
+      sha256: createHash("sha256").update(buffer).digest("hex"),
+      utf8Valid,
     };
   }
 }

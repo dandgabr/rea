@@ -1,7 +1,4 @@
-import {
-  AnalysisError,
-  type AnalysisCapturedOutput,
-} from "../domain/analysisErrorBase.js";
+import { AnalysisError } from "../domain/analysisErrorBase.js";
 import { projectAnalysisError } from "../domain/analysisErrorProjection.js";
 import { jsonValueSchema } from "../domain/jsonValue.js";
 import { createHash } from "node:crypto";
@@ -54,7 +51,6 @@ const throwIfFirmwareInventoryCancelled = (
 
 /** Retains a standalone caller's descriptor scope when cleanup cannot be confirmed. */
 export class FirmwareFileCleanupError extends ProviderCleanupError {
-  override readonly capturedOutput: AnalysisCapturedOutput | undefined;
   constructor(
     readonly resourceScope: ArtifactResourceScope,
     paths: string | readonly string[],
@@ -100,10 +96,11 @@ export class FirmwareFileCleanupError extends ProviderCleanupError {
               ),
       },
     );
-    this.capturedOutput =
-      primary instanceof AnalysisError && primary.capturedOutput !== undefined
-        ? { ...primary.capturedOutput }
-        : undefined;
+    if (
+      primary instanceof AnalysisError &&
+      primary.capturedOutput !== undefined
+    )
+      this.retainCapturedOutput(primary.capturedOutput);
     if (
       primary instanceof AnalysisError &&
       primary.partialObservation !== undefined

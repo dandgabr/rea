@@ -43,6 +43,16 @@ export interface AnalysisCapturedOutput {
   readonly stderr_bytes?: number;
   readonly exit_code?: number | null;
   readonly signal?: string | null;
+  readonly stdout_observed_bytes?: number;
+  readonly stderr_observed_bytes?: number;
+  /** Digests describe retained source bytes, before text decoding. */
+  readonly stdout_sha256?: string;
+  readonly stderr_sha256?: string;
+  readonly stdout_utf8_valid?: boolean;
+  readonly stderr_utf8_valid?: boolean;
+  readonly command?: string;
+  readonly arguments?: string[];
+  readonly resource_limiter?: string;
 }
 
 /** Cleanup uncertainty attached to the original typed analysis failure. */
@@ -63,7 +73,10 @@ export interface AnalysisErrorOptions extends ErrorOptions {
 /** Base class for expected analysis, provider, and session failures. */
 export abstract class AnalysisError extends Error {
   readonly diagnostics: Readonly<Record<string, JsonValue>> | undefined;
-  readonly capturedOutput: AnalysisCapturedOutput | undefined;
+  #capturedOutput: AnalysisCapturedOutput | undefined;
+  get capturedOutput(): AnalysisCapturedOutput | undefined {
+    return this.#capturedOutput;
+  }
   readonly cleanup: AnalysisCleanupObservation | undefined;
   cleanupIncomplete: boolean;
   readonly cleanupResources: readonly string[];
@@ -73,10 +86,16 @@ export abstract class AnalysisError extends Error {
       options?.diagnostics === undefined
         ? undefined
         : structuredClone(options.diagnostics);
-    this.capturedOutput =
+    this.#capturedOutput =
       options?.capturedOutput === undefined
         ? undefined
         : { ...options.capturedOutput };
+    // Preserve the existing own/enumerable error serialization contract while
+    // the tagged failure owns later bounded snapshot attachment.
+    Object.defineProperty(this, "capturedOutput", {
+      enumerable: true,
+      get: () => this.#capturedOutput,
+    });
     this.cleanup = options?.cleanup;
     this.cleanupIncomplete = options?.cleanup !== undefined;
     this.cleanupResources = options?.cleanup?.resources ?? [];
@@ -116,6 +135,17 @@ export abstract class AnalysisError extends Error {
   /** Retain a completed observation when a later step fails. */
   retainPartialObservation(observation: AnalysisPartialObservation): this {
     this.partialObservation ??= observation;
+    return this;
+  }
+
+  /** Attach an owned bounded command snapshot without replacing the primary failure. */
+  retainCapturedOutput(output: AnalysisCapturedOutput): this {
+    this.#capturedOutput ??= Object.freeze({
+      ...output,
+      ...(output.arguments === undefined
+        ? {}
+        : { arguments: [...output.arguments] }),
+    });
     return this;
   }
 }
