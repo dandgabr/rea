@@ -108,7 +108,10 @@ export interface ProcessOwnershipHost {
   ): Promise<ReadonlyMap<number, ProcessIdentityObservation>>;
   /** Snapshot identities before launch, honoring startup cancellation. */
   captureBaseline?(signal?: AbortSignal): Promise<ProcessOwnershipBaseline>;
-  signalGroup(processGroupId: number, signal: NodeJS.Signals): void;
+  signalGroup(
+    processGroupId: number,
+    signal: NodeJS.Signals,
+  ): void | Promise<void>;
 }
 
 /** Whether one live process exposed its ownership token to the host. */
@@ -273,7 +276,7 @@ export const cleanupOwnedProcessGroup = async (
     }
     if (revalidation.empty) continue;
     try {
-      host.signalGroup(processGroupId, "SIGKILL");
+      await host.signalGroup(processGroupId, "SIGKILL");
       signaled = true;
     } catch (cause: unknown) {
       const code =

@@ -8,6 +8,48 @@ import { selectCapturedProcessGroupIds } from "./ProcessOwnershipProcessTree.js"
 import { matchesOwnedProcessCommand } from "./ProcessCommandIdentity.js";
 import { host, ownership } from "./ProcessOwnership.fixture.js";
 describe("owned process-group cleanup discovery", () => {
+  it("does not report cleanup until asynchronous group signaling settles", async () => {
+    const { adapter } = host({ 100: { REA_PROCESS_RUN_ID: "run-token" } });
+    let complete!: () => void;
+    const pendingSignal = new Promise<void>((resolve) => {
+      complete = resolve;
+    });
+    let started!: () => void;
+    const signalStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    adapter.signalGroup = () => {
+      started();
+      return pendingSignal;
+    };
+    let settled = false;
+    const cleanup = cleanupOwnedProcessGroup(ownership, adapter).then(
+      (result) => {
+        settled = true;
+        return result;
+      },
+    );
+    await signalStarted;
+    await Promise.resolve();
+    await Promise.resolve();
+    const premature = settled;
+    complete();
+    expect(await cleanup).toEqual({ cleaned: true, signaled: true });
+    expect(premature).toBe(false);
+  });
+
+  it("retains failed asynchronous signaling as incomplete cleanup", async () => {
+    const { adapter } = host({ 100: { REA_PROCESS_RUN_ID: "run-token" } });
+    const failure = Promise.reject(new Error("namespace signaling refused"));
+    // Own the deliberate rejection even when the old cleanup implementation ignores it.
+    void failure.catch(() => undefined);
+    adapter.signalGroup = () => failure;
+    expect(await cleanupOwnedProcessGroup(ownership, adapter)).toEqual({
+      cleaned: false,
+      reason: "owned process group signal failed: namespace signaling refused",
+    });
+  });
+
   it("excludes sampled groups whose leader was outside the captured tree", () => {
     expect(
       selectCapturedProcessGroupIds(100, [
