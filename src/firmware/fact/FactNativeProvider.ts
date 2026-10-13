@@ -1,5 +1,6 @@
 import { knownSensitiveValueRedactor } from "../../domain/knownSensitiveValueRedaction.js";
 import { FACT_NATIVE_PROVIDER_IDENTITY } from "./FactRelease.js";
+import { createEvidence } from "../../domain/evidence.js";
 import { createReadStream } from "node:fs";
 import { mkdir, readdir } from "node:fs/promises";
 import { join } from "node:path";
@@ -645,14 +646,86 @@ export class FactNativeProvider implements FirmwareCorpusPort {
     data.capture_representation_sha256 = executions.length
       ? factHash(executions.map((item) => JSON.stringify(item)).join("\n"))
       : null;
-    // Redact actual private transport secrets once at their owning output boundary.
-    for (const secret of secrets)
-      knownSensitiveValueRedactor(secret).value(data);
-    const redactText = (value: string) => {
-      for (const secret of secrets)
-        value = knownSensitiveValueRedactor(secret).text(value);
-      return value;
+    const privacyFailure = (error: AnalysisResourceConstraintError) => {
+      const summary: JsonValue = {
+        retained_cleanup_resources: pending.length,
+        native_invocations: data.native_invocations ?? null,
+        database_effects: data.database_effects ?? null,
+        capture_representation_sha256:
+          data.capture_representation_sha256 ?? null,
+        publication: data.publication ?? null,
+        archives: archives.map((item) => {
+          if (item === null || typeof item !== "object" || Array.isArray(item))
+            return null;
+          const selected: Record<string, JsonValue> = {};
+          for (const key of [
+            "uid",
+            "root_uid",
+            "archive_sha256",
+            "archive_bytes",
+            "disposition",
+            "database_effects",
+            "reported_files",
+            "reported_objects",
+            "publication",
+            "output_path",
+          ])
+            if (Object.hasOwn(item, key)) selected[key] = item[key]!;
+          return selected;
+        }),
+      };
+      let safeSummary: JsonValue = summary;
+      for (const secret of secrets) {
+        const projected = knownSensitiveValueRedactor(secret, undefined, {
+          operation,
+        }).value(safeSummary);
+        if (!projected.ok) {
+          safeSummary = null;
+          break;
+        }
+        safeSummary = projected.value;
+      }
+      error.retainPartialObservation(
+        createEvidence(undefined, FACT_NATIVE_PROVIDER_IDENTITY, {
+          operation,
+          parameters: {},
+          result: factResult({
+            state: launched ? "unknown" : "not-delivered",
+            endpoint: null,
+            profile: input.profile,
+            http_status: null,
+            observed_at: new Date().toISOString(),
+            raw_sha256: null,
+            coverage: launched ? "producer-response" : "archive-preflight",
+            data: safeSummary,
+            diagnostics: [
+              "Privacy projection refused; unprojected native command text is not exported",
+            ],
+          }),
+          authority: "external-service",
+          confidence: "observed",
+        }),
+      );
+      return err(error);
     };
+    // Each known secret owns one cumulative projection budget across data/diagnostics.
+    const redactors = [...secrets].map((secret) =>
+      knownSensitiveValueRedactor(secret, undefined, { operation }),
+    );
+    for (const redactor of redactors) {
+      const projected = redactor.value(data);
+      if (!projected.ok) return privacyFailure(projected.error);
+    }
+    const projectedDiagnostics: string[] = [];
+    for (const diagnostic of diagnostics) {
+      let value = diagnostic;
+      for (const redactor of redactors) {
+        const projected = redactor.text(value);
+        if (!projected.ok) return privacyFailure(projected.error);
+        value = projected.value;
+      }
+      projectedDiagnostics.push(value);
+    }
     for (const step of freezeOwnedJsonSnapshotSteps(data)) {
       void step;
       await yieldTurn();
@@ -669,7 +742,7 @@ export class FactNativeProvider implements FirmwareCorpusPort {
             raw_sha256: null,
             coverage: launched ? "producer-response" : "archive-preflight",
             data,
-            diagnostics: diagnostics.map(redactText),
+            diagnostics: projectedDiagnostics,
           }),
         ),
         FACT_NATIVE_PROVIDER_IDENTITY,

@@ -176,6 +176,18 @@ mutations. Operations have a 120-second deadline, 128 MiB input/binary limit,
 account actual base64 expansion and decoded/staging bytes. JSON parsing has
 bounded structural admission and a V8 worker heap limit; Buffer/ArrayBuffer
 budgets are accounted separately. These are not a global OOM guarantee.
+Known-value privacy projection has independent admission before provider delivery:
+64 MiB of accounted UTF-16 strings, byte variants and typed-array representations,
+and eight million explicit graph/matcher work units per redactor. The compact
+scalar table uses eight bytes per scalar; matching uses two Uint32 rows, eight
+bytes per input UTF-16 unit plus sentinel. Arithmetic and replacement expansion
+are checked before allocation. Literal/percent prechecks may scan ordinary text
+without matching matrices, including the 8 MiB plaintext control. These limits
+exclude total V8 object heap, native string-scan CPU and synchronous wall-clock
+interruption. A tagged refusal never exports unprojected text. Refusal after a
+producer response retains sanitized partial effects, digests, publication and
+cleanup counts; consuming observations remain cached without refetching.
+
 Native producer limits require Linux util-linux `prlimit` (default
 `/usr/bin/prlimit`, override absolute `REA_FIRMWARE_PRLIMIT_COMMAND`) with 1 GiB
 address space, CPU 120 seconds, core dumps disabled and bounded output files.

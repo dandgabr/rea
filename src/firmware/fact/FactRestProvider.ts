@@ -1,5 +1,7 @@
 import { knownSensitiveValueRedactor } from "../../domain/knownSensitiveValueRedaction.js";
 import { FACT_REST_PROVIDER_IDENTITY } from "./FactRelease.js";
+import { createEvidence } from "../../domain/evidence.js";
+import type { AnalysisResourceConstraintError } from "../../domain/analysisErrorCore.js";
 import type { FirmwareCorpusPort } from "../../application/corpus/FirmwareCorpusPort.js";
 import type {
   FirmwareCorpusOperation,
@@ -118,6 +120,7 @@ export class FactRestProvider implements FirmwareCorpusPort {
     const redact = knownSensitiveValueRedactor(
       connection.authorization,
       "latin1",
+      { operation },
     );
     let path = "",
       method = "GET",
@@ -179,7 +182,62 @@ export class FactRestProvider implements FirmwareCorpusPort {
         diagnostics.push(
           `Cleanup remains uncertain for owned resources: ${[...this.files.pendingResources, ...this.parser.pendingResources, ...this.responses.pendingResources].join(", ")}`,
         );
-      const ownedData = redact.value(data);
+      const privacyFailure = (error: AnalysisResourceConstraintError) => {
+        const summary =
+          data !== null && typeof data === "object" && !Array.isArray(data)
+            ? {
+                producer_state: state,
+                retained_cleanup_resources:
+                  this.files.pendingResources.length +
+                  this.parser.pendingResources.length +
+                  this.responses.pendingResources.length,
+                artifact: data.artifact ?? null,
+                publication: data.publication ?? null,
+              }
+            : {
+                producer_state: state,
+                retained_cleanup_resources:
+                  this.files.pendingResources.length +
+                  this.parser.pendingResources.length +
+                  this.responses.pendingResources.length,
+              };
+        const projected = knownSensitiveValueRedactor(
+          connection.authorization,
+          "latin1",
+          { operation },
+        ).value(summary);
+        error.retainPartialObservation(
+          createEvidence(undefined, FACT_REST_PROVIDER_IDENTITY, {
+            operation,
+            parameters: {},
+            result: factResult({
+              state: delivered ? "unknown" : "not-delivered",
+              endpoint: connection.endpoint,
+              profile: connection.profile,
+              http_status: httpStatus,
+              observed_at: new Date().toISOString(),
+              raw_sha256: rawDigest,
+              coverage: "producer-response",
+              data: projected.ok ? projected.value : null,
+              diagnostics: [
+                "Privacy projection refused; unprojected producer text is not exported",
+              ],
+            }),
+            authority: "external-service",
+            confidence: "observed",
+          }),
+        );
+        return err(error);
+      };
+      const projectedData = redact.value(data);
+      if (!projectedData.ok) return privacyFailure(projectedData.error);
+      const ownedData = projectedData.value;
+      const projectedDiagnostics: string[] = [];
+      for (const diagnostic of diagnostics) {
+        const projected = redact.text(diagnostic);
+        if (!projected.ok) return privacyFailure(projected.error);
+        projectedDiagnostics.push(projected.value);
+      }
       for (const step of freezeOwnedJsonSnapshotSteps(ownedData)) {
         void step;
         await yieldTurn();
@@ -199,7 +257,7 @@ export class FactRestProvider implements FirmwareCorpusPort {
                   ? "requested-page"
                   : "producer-response",
               data: ownedData,
-              diagnostics: diagnostics.map(redact.text),
+              diagnostics: projectedDiagnostics,
             }),
           ),
           FACT_REST_PROVIDER_IDENTITY,

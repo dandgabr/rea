@@ -1,3 +1,8 @@
+import type { Result } from "../../domain/result.js";
+const unwrap = <T>(result: Result<T, Error>): T => {
+  if (!result.ok) throw result.error;
+  return result.value;
+};
 import { expect, it } from "vitest";
 import { knownSensitiveValueRedactor } from "../../domain/knownSensitiveValueRedaction.js";
 import { parseFactNativeConfiguration } from "./FactNativeConfiguration.js";
@@ -110,10 +115,12 @@ it("keeps native scalar credentials independent of the HTTP header byte constrai
   const parsed = parseFactNativeConfiguration(bytes);
   expect(parsed.credentials).toContain(secret);
   expect(
-    knownSensitiveValueRedactor(secret).value({
-      diagnostic: secret,
-      path: "/firmware/漢字😀.bin",
-    }),
+    unwrap(
+      knownSensitiveValueRedactor(secret).value({
+        diagnostic: secret,
+        path: "/firmware/漢字😀.bin",
+      }),
+    ),
   ).toEqual({ diagnostic: "[REDACTED]", path: "/firmware/漢字😀.bin" });
   for (const escaped of ["\\uD800", "\\uDFFF"])
     expect(() =>

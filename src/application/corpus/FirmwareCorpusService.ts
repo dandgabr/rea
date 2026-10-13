@@ -46,12 +46,14 @@ export class FirmwareCorpusService {
     }
     // The public graph is a separate JSON snapshot; delivery and consuming identity
     // retain the original private transport context and selected values.
-    knownSensitiveValueRedactor(
+    const redactedParameters = knownSensitiveValueRedactor(
       "connection" in parsed.data
         ? parsed.data.connection.authorization
         : undefined,
       "latin1",
+      { operation },
     ).value(parameters);
+    if (!redactedParameters.ok) return redactedParameters;
     const collectionState: { disposition: "retain" | "explicit-reattempt" } = {
       disposition: "retain",
     };

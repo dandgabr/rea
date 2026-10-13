@@ -10,6 +10,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ZipWriter, Uint8ArrayWriter, Uint8ArrayReader } from "@zip.js/zip.js";
 import { readlinkSync } from "node:fs";
+import { FactFileResources } from "./FactFiles.js";
+import { PrivateRuntimeRoot } from "../../process/PrivateRuntimeRoot.js";
 import { OwnedFileHandle } from "../../filesystem/OwnedFileHandle.js";
 import { expect, it, vi } from "vitest";
 import { FactNativeProvider } from "./FactNativeProvider.js";
@@ -833,6 +835,133 @@ it("keeps real precommit fsync refusal unpublished despite prepared verified met
       expect(provider.files.pendingResources).toEqual([]);
     } finally {
       sync.mockRestore();
+      await provider.close();
+    }
+  }));
+
+it("retains observed native write counts and archive identity when output privacy work is refused", async () =>
+  fixture(async (_root, path) => {
+    const secret = "a".repeat(300) + "b";
+    const near = "%61".repeat(9999) + "b";
+    const command = vi
+      .fn<typeof runFirmwareCommand>()
+      .mockImplementation(async (call) =>
+        execution(
+          `[12:34:56] INFO Successfully imported 1 files and 1 DB entries from ${call.args[2]} firmware_import_export.py:149\n${near}`,
+        ),
+      );
+    const provider = new FactNativeProvider({
+      observeIdentity: async () => ({
+        ...structuredClone(identity),
+        credentials: [secret],
+      }),
+      command,
+    });
+    try {
+      const result = await provider.execute(
+        "import_corpus_firmware",
+        firmwareCorpusInputs.import_corpus_firmware.parse({
+          ...native,
+          archives: [path],
+        }),
+      );
+      expect(result).toMatchObject({
+        ok: false,
+        error: { _tag: "AnalysisResourceConstraintError", resource: "cpu" },
+      });
+      expect(command).toHaveBeenCalledTimes(1);
+      if (!result.ok) {
+        expect(result.error.partialObservation).toMatchObject({
+          normalized_result: {
+            state: "unknown",
+            data: {
+              retained_cleanup_resources: 0,
+              native_invocations: 1,
+              database_effects: "producer-reported-write",
+              archives: [
+                {
+                  uid,
+                  disposition: "producer-reported-import",
+                  reported_files: 1,
+                  reported_objects: 1,
+                },
+              ],
+            },
+          },
+        });
+        expect(JSON.stringify(result.error)).not.toContain(secret);
+        expect(JSON.stringify(result.error)).not.toContain(near);
+      }
+    } finally {
+      await provider.close();
+    }
+  }));
+
+it("retains cleanup ownership and blocks another launch after output privacy refusal", async () =>
+  fixture(async (_root, path) => {
+    let refuseClose = true;
+    const secret = "a".repeat(300) + "b";
+    const files = new FactFileResources({
+      createRuntime: async () => {
+        const owned = await PrivateRuntimeRoot.create({
+          prefix: "rea-fact-privacy-",
+        });
+        return {
+          path: owned.path,
+          close: async () => {
+            if (refuseClose) throw Error("owned staging close fault");
+            await owned.close();
+          },
+        };
+      },
+    });
+    const command = vi
+      .fn<typeof runFirmwareCommand>()
+      .mockImplementation(async (call) =>
+        execution(
+          `[12:34:56] INFO Successfully imported 1 files and 1 DB entries from ${call.args[2]} firmware_import_export.py:149\n${"%61".repeat(9999)}b`,
+        ),
+      );
+    const provider = new FactNativeProvider({
+      files,
+      observeIdentity: async () => ({
+        ...structuredClone(identity),
+        credentials: [secret],
+      }),
+      command,
+    });
+    const input = firmwareCorpusInputs.import_corpus_firmware.parse({
+      ...native,
+      archives: [path],
+    });
+    try {
+      const first = await provider.execute("import_corpus_firmware", input);
+      expect(first).toMatchObject({
+        ok: false,
+        error: { _tag: "AnalysisResourceConstraintError", resource: "cpu" },
+      });
+      expect(files.pendingResources.length).toBeGreaterThan(0);
+      if (!first.ok)
+        expect(first.error.partialObservation).toMatchObject({
+          normalized_result: {
+            data: {
+              native_invocations: 1,
+              database_effects: "producer-reported-write",
+              retained_cleanup_resources: files.pendingResources.length,
+            },
+          },
+        });
+      await expect(files.close()).rejects.toThrow("cleanup");
+      expect(
+        await provider.execute("import_corpus_firmware", input),
+      ).toMatchObject({ ok: false, error: { resource: "capacity" } });
+      expect(command).toHaveBeenCalledTimes(1);
+      refuseClose = false;
+      await provider.close();
+      expect(files.pendingResources).toEqual([]);
+      expect(command).toHaveBeenCalledTimes(1);
+    } finally {
+      refuseClose = false;
       await provider.close();
     }
   }));

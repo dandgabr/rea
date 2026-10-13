@@ -1475,3 +1475,50 @@ it("redacts exact Unicode authentication encodings while preserving different-ca
   expect(data.firmware_password).toBe('É-"KEY');
   await service.close();
 });
+
+it("retains a consumed response resource refusal and its exact digest without re-fetching", async () => {
+  const secret = "a".repeat(300) + "b";
+  const near = "%61".repeat(9999) + "b";
+  const body = {
+    status: 0,
+    timestamp: 42,
+    request_resource: "/rest/binary_search",
+    binary_search_results: { [near]: ["a".repeat(64) + "_1"] },
+  };
+  const bytes = Buffer.from(JSON.stringify(body));
+  let calls = 0;
+  const connection = {
+    ...(await fixture(() => {
+      calls++;
+      return { bytes };
+    })),
+    authorization: secret,
+  };
+  const provider = new FactRestProvider();
+  const service = new FirmwareCorpusService(provider);
+  try {
+    const input = { connection, search_id: "privacy-once" };
+    const first = await service.execute("collect_corpus_yara", input);
+    expect(first).toMatchObject({
+      ok: false,
+      error: { _tag: "AnalysisResourceConstraintError", resource: "cpu" },
+    });
+    expect(await service.execute("collect_corpus_yara", input)).toBe(first);
+    expect(calls).toBe(1);
+    if (!first.ok) {
+      expect(first.error.partialObservation).toMatchObject({
+        parameters: {},
+        normalized_result: {
+          state: "unknown",
+          http_status: 200,
+          raw_sha256: factHash(bytes),
+          data: { producer_state: "completed", retained_cleanup_resources: 0 },
+        },
+      });
+      expect(JSON.stringify(first.error)).not.toContain(secret);
+      expect(JSON.stringify(first.error)).not.toContain(near);
+    }
+  } finally {
+    await service.close();
+  }
+});
