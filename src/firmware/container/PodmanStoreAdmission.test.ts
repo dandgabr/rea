@@ -1239,12 +1239,67 @@ it("preserves typed primary setup diagnostics and captured bytes after a failed 
   }
 });
 
+async function assertActualTupleRefusals(
+  transport: PreparedPodmanTransport,
+  signal: AbortSignal,
+  selection: import("./PodmanFixedProgram.js").PodmanExistingProgramSelection,
+  launchCount: () => number,
+) {
+  const boundary = await import("./PodmanFixedProgram.js");
+  const program = selection.program;
+  const builder = boundary.existingPodmanProgramArguments;
+  for (const [before, after] of [
+    [selection.containerId, "d".repeat(64)],
+    [selection.interpreter, "/unselected/python"],
+    [selection.namespaceLimiter, "/unselected/limiter"],
+    [program.source, program.source + "\nraise Exception('substituted')"],
+    [
+      `--env=REA_PROCESS_RUN_ID=${selection.executionToken}`,
+      `--env=REA_PROCESS_RUN_ID=${"e".repeat(32)}`,
+    ],
+    ["--as=1073741824", "--as=2147483648"],
+    ["--fsize=1024", "--fsize=2048"],
+    ["--interactive", "--privileged"],
+  ] as const) {
+    const countBefore = launchCount();
+    const substitution = vi
+      .spyOn(boundary, "existingPodmanProgramArguments")
+      .mockImplementation((selected) =>
+        builder(selected).map((value) => (value === before ? after : value)),
+      );
+    try {
+      const result = await transport
+        .openExistingProgram(selection, signal)
+        .catch((cause: unknown) => cause);
+      // Drain a defective admitted fixture before asserting, so a killed
+      // mutant cannot strand the mock process owner.
+      if (result && typeof result === "object" && "stdin" in result) {
+        const admitted = result as Awaited<
+          ReturnType<PreparedPodmanTransport["openExistingProgram"]>
+        >;
+        admitted.stdin.end();
+        for await (const chunk of admitted.stdout) void chunk;
+        await admitted.supervisor.stop();
+      }
+      expect(result).toMatchObject({
+        _tag: "AnalysisCapabilityUnavailableError",
+      });
+      expect(launchCount()).toBe(countBefore);
+    } finally {
+      substitution.mockRestore();
+    }
+  }
+}
+
 it("binds an isolated fixed stdin program to the exact existing CID without capturing its binary stdout or granting lifecycle argv", async () => {
-  const { FixedPodmanProgram } = await import("./PodmanFixedProgram.js");
+  const boundary = await import("./PodmanFixedProgram.js");
+  const { FixedPodmanProgram } = boundary;
   const f = await fixture();
   const body = Buffer.from([0x00, 0xff, 0x61]);
   let delivered: Buffer | undefined;
+  let launches = 0;
   const launcher: FirmwareLauncher = async (options) => {
+    launches++;
     const stdout = new PassThrough();
     const stderr = new PassThrough();
     const stdin = new PassThrough();
@@ -1350,6 +1405,21 @@ it("binds an isolated fixed stdin program to the exact existing CID without capt
     );
     expect(client.arguments).not.toContain("create");
     expect(client.arguments).not.toContain("start");
+    const selection = {
+      containerId: "a".repeat(64),
+      imageId: "b".repeat(64),
+      interpreter: "/usr/bin/python3",
+      namespaceLimiter: "/usr/bin/prlimit",
+      producerFileBytes: 1024,
+      executionToken: "c".repeat(32),
+      program,
+    };
+    await assertActualTupleRefusals(
+      transport,
+      f.signal,
+      selection,
+      () => launches,
+    );
     await expect(
       transport.openExistingProgram(
         {

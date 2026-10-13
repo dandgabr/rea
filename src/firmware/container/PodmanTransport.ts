@@ -14,6 +14,7 @@ import { ProviderProcessSupervisor } from "../../process/ProviderProcess.js";
 import { randomUUID } from "node:crypto";
 import {
   admitPodmanExistingProgram,
+  admitExistingPodmanProgramArguments,
   existingPodmanProgramArguments,
   type PodmanExistingProgramSelection,
 } from "./PodmanFixedProgram.js";
@@ -129,6 +130,7 @@ export const admitPodmanInvocationSelectors = (
   store: AdmittedPodmanStore,
   hooks: string,
   expectedCommand?: readonly string[],
+  existingProgram?: PodmanExistingProgramSelection,
 ): void => {
   const seen = new Map<string, string>();
   let index = 0;
@@ -158,7 +160,12 @@ export const admitPodmanInvocationSelectors = (
       );
     seen.set(key, setting);
   }
-  const command = podmanCommandSchema.safeParse(argv.slice(index));
+  const command =
+    existingProgram === undefined
+      ? podmanCommandSchema.safeParse(argv.slice(index))
+      : { success: true as const, data: argv.slice(index) };
+  if (existingProgram !== undefined)
+    admitExistingPodmanProgramArguments(command.data ?? [], existingProgram);
   if (!command.success)
     throw podmanProfileUnavailable(
       "Actual prepared command has unsupported flags, missing operand delimiter or invalid positional identity before spawn",
@@ -504,18 +511,15 @@ export class PreparedPodmanTransport {
       stdin: "pipe" as const,
       signal,
     };
-    // Admit immutable prefix through the same format owner; the suffix is the
-    // adapter-owned fixed program tuple and has no caller-supplied raw flags.
+    // Bind the complete actual exec tuple, including namespace source/limiter/
+    // token, independently of the builder. No synthetic metadata suffix stands
+    // in for the operation that will actually be delivered.
     admitPodmanInvocationSelectors(
-      [
-        ...this.#arguments,
-        "inspect",
-        "--format=json",
-        "--",
-        admitted.containerId,
-      ],
+      [...this.#arguments, ...command],
       this.#store,
       join(this.#root.path, "hooks"),
+      undefined,
+      admitted,
     );
     const spawned = await this.#launcher(options);
     const supervisor = new ProviderProcessSupervisor(

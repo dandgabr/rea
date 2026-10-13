@@ -88,3 +88,36 @@ export const existingPodmanProgramArguments = (
     "-c",
     selection.program.source,
   ]);
+
+/** Independently parse the actual closed protocol tuple before spawn. This
+ * deliberately does not call the argv builder: builder drift cannot change
+ * the admitted namespace operands, token, limiter or program source. */
+export const admitExistingPodmanProgramArguments = (
+  argv: readonly string[],
+  selection: PodmanExistingProgramSelection,
+): void => {
+  const expected = admitPodmanExistingProgram(selection);
+  const schema = z.tuple([
+    z.literal("exec"),
+    z.literal("--interactive"),
+    ...(expected.executionToken === undefined
+      ? []
+      : [z.literal(`--env=REA_PROCESS_RUN_ID=${expected.executionToken}`)]),
+    z.literal("--"),
+    z.literal(expected.containerId),
+    z.literal(expected.namespaceLimiter),
+    z.literal("--as=1073741824"),
+    z.literal(`--fsize=${expected.producerFileBytes}`),
+    z.literal("--core=0"),
+    z.literal("--cpu=120"),
+    z.literal("--"),
+    z.literal(expected.interpreter),
+    z.literal("-I"),
+    z.literal("-c"),
+    z.literal(expected.program.source),
+  ]);
+  if (!schema.safeParse(argv).success)
+    throw podmanProfileUnavailable(
+      "Actual fixed protocol tuple changed its selected namespace authority before spawn",
+    );
+};
