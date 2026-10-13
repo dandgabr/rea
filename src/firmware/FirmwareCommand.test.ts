@@ -1,9 +1,12 @@
 import { chmod, mkdir, writeFile, readFile } from "node:fs/promises";
 import { join } from "node:path";
 
-import { expect, it as test } from "vitest";
+import { expect, vi, it as test } from "vitest";
 
 import { createTestTempDirectory } from "../../tests/fixtures/temporaryDirectory.js";
+import { FIRMWARE_LIMITS } from "./FirmwareRelease.js";
+import { ProviderProcessSupervisor } from "../process/ProviderProcess.js";
+import { AnalysisOutputError } from "../domain/analysisErrorCore.js";
 import { AnalysisCapabilityUnavailableError } from "../domain/analysisErrorCore.js";
 import { projectAnalysisError } from "../domain/analysisErrorProjection.js";
 import {
@@ -196,3 +199,132 @@ const executableFixture = async (root: string, name: string) => {
   await chmod(path, 0o700);
   return path;
 };
+
+it("retains exact raw provenance at the diagnostic cap, including malformed bytes and cleanup uncertainty", async () => {
+  const root = await createTestTempDirectory("rea-firmware-diagnostic-cap-");
+  const originalBudget = FIRMWARE_LIMITS.diagnosticBytes;
+  const policy = FIRMWARE_LIMITS as { diagnosticBytes: number };
+  const raw = Buffer.concat([
+    Buffer.from("abc"),
+    Buffer.from([255]),
+    Buffer.alloc(20, 122),
+  ]);
+  try {
+    policy.diagnosticBytes = 8;
+    for (const cleanupUncertain of [false, true]) {
+      const marker = join(root, cleanupUncertain ? "uncertain-pid" : "pid");
+      const code = `import os,time\nopen(${JSON.stringify(marker)},"w").write(str(os.getpid()))\nos.write(1,b"abc"+bytes([255])+b"z"*20)\ntime.sleep(20)\n`;
+      let retained: ProviderProcessSupervisor | undefined;
+      const stop = ProviderProcessSupervisor.prototype.stop;
+      const stopFault = cleanupUncertain
+        ? vi
+            .spyOn(ProviderProcessSupervisor.prototype, "stop")
+            .mockImplementationOnce(async function (
+              this: ProviderProcessSupervisor,
+            ) {
+              await stop.call(this);
+              return {
+                status: "incomplete" as const,
+                reason: "injected cleanup uncertainty after supervised stop",
+              };
+            })
+        : undefined;
+      try {
+        const failure: unknown = await runFirmwareCommand({
+          engine: "fixture",
+          operation: "export_corpus_firmware",
+          command: "/usr/bin/python3",
+          limiter: "/usr/bin/prlimit",
+          args: ["-c", code],
+          cwd: root,
+          environment: { PATH: "/usr/bin:/bin" },
+          signal: AbortSignal.timeout(3000),
+          retainCleanup: (owner) => {
+            retained = owner;
+          },
+        }).catch((cause: unknown) => cause);
+        const rich = {
+          stdout: raw.subarray(0, 8).toString("utf8"),
+          stdout_bytes: 8,
+          stdout_observed_bytes: 24,
+          stdout_sha256: createHash("sha256")
+            .update(raw.subarray(0, 8))
+            .digest("hex"),
+          stdout_utf8_valid: false,
+          command: "/usr/bin/python3",
+          arguments: ["-c", code],
+          resource_limiter: "/usr/bin/prlimit",
+          truncated: true,
+        };
+        if (cleanupUncertain) {
+          expect(failure).toMatchObject({
+            _tag: "ProviderAdapterError",
+            diagnostics: {
+              primary_error: {
+                code: "unreadable_output",
+                details: { captured_output: rich },
+              },
+              captured_output: rich,
+            },
+          });
+          expect(retained).toBeDefined();
+        } else
+          expect(failure).toMatchObject({
+            _tag: "AnalysisOutputError",
+            reason: expect.stringContaining("8-byte capture budget"),
+            capturedOutput: rich,
+          });
+        const pid = Number(await readFile(marker, "utf8"));
+        expect(() => process.kill(pid, 0)).toThrow();
+      } finally {
+        stopFault?.mockRestore();
+        if (retained) await retained.stop();
+      }
+    }
+    const control = await runFirmwareCommand({
+      engine: "fixture",
+      operation: "export_corpus_firmware",
+      command: "/usr/bin/python3",
+      limiter: "/usr/bin/prlimit",
+      args: ["-c", "import os;os.write(1,b'abcdefgh')"],
+      cwd: root,
+      environment: { PATH: "/usr/bin:/bin" },
+      signal: AbortSignal.timeout(3000),
+      retainCleanup: () => {
+        throw Error("Unexpected positive cleanup uncertainty");
+      },
+    });
+    expect(control.stdout).toMatchObject({
+      text: "abcdefgh",
+      bytes: 8,
+      observedBytes: 8,
+      utf8Valid: true,
+      sha256: createHash("sha256").update("abcdefgh").digest("hex"),
+    });
+  } finally {
+    policy.diagnosticBytes = originalBudget;
+  }
+}, 10000);
+
+test("keeps the first authoritative capture when later text and byte identities differ", () => {
+  const original = {
+    stdout: "authoritative original",
+    stderr: "",
+    truncated: true,
+  };
+  const failure = new AnalysisOutputError("fixture", "original reason", {
+    capturedOutput: original,
+  });
+  expect(
+    failure.retainCapturedOutput({
+      stdout: "different settled text",
+      stderr: "",
+      truncated: true,
+      stdout_bytes: 99,
+      stdout_sha256: "a".repeat(64),
+      stdout_utf8_valid: false,
+    }),
+  ).toBe(failure);
+  expect(failure.capturedOutput).toEqual(original);
+  expect(failure.reason).toBe("original reason");
+});
