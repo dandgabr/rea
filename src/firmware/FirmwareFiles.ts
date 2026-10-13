@@ -229,12 +229,15 @@ export const identifyFirmwareFile = async (
     async (handle) => {
       const initial = await handle.stat({ bigint: true });
       const hash = createHash("sha256");
-      for await (const chunk of handle.createReadStream({
-        autoClose: false,
-        ...(signal === undefined ? {} : { signal }),
-      })) {
+      // FileHandle streams close their descriptor on abort even with autoClose
+      // disabled. Keep reads and the sole close owner on this admitted handle.
+      const buffer = Buffer.allocUnsafe(64 * 1024);
+      for (;;) {
         signal?.throwIfAborted();
-        hash.update(chunk);
+        const { bytesRead } = await handle.read(buffer, 0, buffer.length, null);
+        signal?.throwIfAborted();
+        if (bytesRead === 0) break;
+        hash.update(buffer.subarray(0, bytesRead));
       }
       signal?.throwIfAborted();
       if (!sameRegularFileState(initial, await handle.stat({ bigint: true })))

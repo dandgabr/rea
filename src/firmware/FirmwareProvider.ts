@@ -292,7 +292,7 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
         request.input.provider_id === "unblob"
           ? request.input.options?.plugins_path
           : undefined;
-      let plugins =
+      const pluginBaseline =
         pluginPath === undefined
           ? undefined
           : await fingerprintUnblobPlugins(
@@ -301,6 +301,7 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
               signal,
               scope,
             );
+      let plugins = pluginBaseline;
       const command = await resolveFirmwareCommand(
         this.environment,
         engineName,
@@ -322,13 +323,22 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
         acceptExitOne = false,
       ) => {
         if (plugins !== undefined) {
-          plugins = await recheckUnblobPlugins(
-            plugins,
+          const checked = await recheckUnblobPlugins(
+            request.operation === "inspect_firmware_provider"
+              ? pluginBaseline!
+              : plugins,
             request.operation,
             signal,
             scope,
           );
-          if (plugins.recheck !== "unchanged")
+          // Inventory attribution belongs to its complete phase, including
+          // output admission/normalization and the post-execution comparison.
+          if (
+            request.operation !== "inspect_firmware_provider" ||
+            checked.recheck !== "unchanged"
+          )
+            plugins = checked;
+          if (checked.recheck !== "unchanged")
             throw new AnalysisOutputError(
               request.operation,
               "Trusted plugin identity changed before producer launch",
@@ -437,25 +447,27 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
           };
         };
         const runInventory = async (...args: Parameters<typeof run>) => {
+          // Invalidate before any phase work. Every exceptional exit retains
+          // unknown attribution without extra reads, even after command success.
+          if (plugins !== undefined)
+            plugins = {
+              ...plugins,
+              recheck: "unverified",
+              attribution: "unknown",
+            };
+          retainInventory();
           try {
             return await run(...args);
-          } catch (cause: unknown) {
-            // A failed launch has no completed post-command fingerprint. Keep the
-            // primary failure/capture and already measured inventory, with unknown attribution.
-            if (plugins !== undefined)
-              plugins = {
-                ...plugins,
-                recheck: "unverified",
-                attribution: "unknown",
-              };
+          } finally {
+            // Retain any completed prelaunch comparison, including a changed
+            // generation that refused execution; this performs no new reads.
             retainInventory();
-            throw cause;
           }
         };
         const recheckInventoryPlugins = async () => {
           if (plugins === undefined) return;
           plugins = await recheckUnblobPlugins(
-            plugins,
+            pluginBaseline!,
             request.operation,
             signal,
             scope,

@@ -38,7 +38,12 @@ if (args.includes("--version")) {
           : "26.6.4",
   );
 } else if (args.includes("--show-external-dependencies")) {
-  if (mode === "inventory-invalid-utf8")
+  if (mode === "inventory-plugin-dependency-invalid")
+    await writeFile(selectedPlugin, "# changed before invalid dependencies\n");
+  if (
+    mode === "inventory-invalid-utf8" ||
+    mode === "inventory-plugin-dependency-invalid"
+  )
     process.stdout.write(Buffer.from([0xff]));
   console.log(
     "The following executables found installed, which are needed by unblob:",
@@ -51,6 +56,23 @@ if (args.includes("--version")) {
   );
   if (mode === "inventory-missing") process.exitCode = 1;
 } else if (args.includes("--build-handlers-doc")) {
+  if (
+    mode?.startsWith("inventory-plugin-doc-") === true &&
+    mode !== "inventory-plugin-doc-failure"
+  ) {
+    await writeFile(
+      selectedPlugin,
+      "# changed before documentation admission\n",
+    );
+    if (mode === "inventory-plugin-doc-missing") process.exit(0);
+    await writeFile(
+      args[args.indexOf("--build-handlers-doc") + 1],
+      mode === "inventory-plugin-doc-invalid"
+        ? Buffer.from([0xff])
+        : Buffer.alloc(8 * 1024 * 1024 + 1, 0x61),
+    );
+    process.exit(0);
+  }
   if (
     mode === "inventory-doc-failure" ||
     mode === "inventory-plugin-doc-failure"

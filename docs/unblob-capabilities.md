@@ -52,6 +52,11 @@ setup; fingerprints are attribution observations, not isolation. Informational
 report hooks are retained without being classified as extractor failures.
 Unknown plugin processing is not asserted complete.
 
+Each plugin-executing inventory phase invalidates the preceding attribution.
+Only a completed post-execution fingerprint can confirm unchanged bytes. Failed
+output admission, normalization, cancellation or cleanup retains unknown
+attribution together with the measured inventory facts and native output.
+
 [dependencies.py](https://github.com/onekey-sec/unblob/blob/1fcc7a0a584a70a96c31f5a276c20944d199a089/python/unblob/dependencies.py)
 uses executable lookup; missing marks and exit 1 remain useful evidence.
 Known dependencies observed before a later documentation failure survive in

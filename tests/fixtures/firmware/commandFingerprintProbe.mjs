@@ -36,7 +36,7 @@ assert.equal(admitted.sha256, digest);
 
 const descriptor = await open(executable, "r");
 const prototype = Object.getPrototypeOf(descriptor);
-const originalStream = prototype.createReadStream;
+const originalRead = prototype.read;
 const originalTimeout = AbortSignal.timeout;
 await descriptor.close();
 const controller = new AbortController();
@@ -52,9 +52,9 @@ const service = new FirmwareAnalysisService(
   }),
 );
 if (mode === "deadline") AbortSignal.timeout = () => controller.signal;
-prototype.createReadStream = function (...args) {
-  const stream = originalStream.apply(this, args);
-  if (readlinkSync(`/proc/self/fd/${this.fd}`) === executable) {
+prototype.read = async function (...args) {
+  const tracked = readlinkSync(`/proc/self/fd/${this.fd}`) === executable;
+  if (tracked && !handles.has(this)) {
     handles.add(this);
     if (mode === "cleanup") {
       const originalClose = this.close.bind(this);
@@ -65,20 +65,21 @@ prototype.createReadStream = function (...args) {
         await originalClose();
       };
     }
-    stream.on("data", (chunk) => {
-      events.push({
-        bytes: chunk.length,
-        afterAbort: controller.signal.aborted,
-      });
-      if (!controller.signal.aborted && events.length === abortChunk)
-        controller.abort(
-          mode === "deadline"
-            ? new DOMException("Controlled deadline", "TimeoutError")
-            : undefined,
-        );
-    });
   }
-  return stream;
+  const observed = await originalRead.apply(this, args);
+  if (tracked && observed.bytesRead > 0) {
+    events.push({
+      bytes: observed.bytesRead,
+      afterAbort: controller.signal.aborted,
+    });
+    if (!controller.signal.aborted && events.length === abortChunk)
+      controller.abort(
+        mode === "deadline"
+          ? new DOMException("Controlled deadline", "TimeoutError")
+          : undefined,
+      );
+  }
+  return observed;
 };
 try {
   const outcome = await service.execute(
@@ -148,7 +149,7 @@ try {
     }),
   );
 } finally {
-  prototype.createReadStream = originalStream;
+  prototype.read = originalRead;
   AbortSignal.timeout = originalTimeout;
   for (const { handle, originalClose } of closeControls) {
     handle.close = originalClose;

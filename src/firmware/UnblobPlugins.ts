@@ -131,8 +131,9 @@ export const fingerprintUnblobPlugins = async (
     identity_sha256: createHash("sha256")
       .update(JSON.stringify(identity))
       .digest("hex"),
-    recheck: "unchanged",
-    attribution: "pre_and_post_fingerprint",
+    // A baseline is one measurement, not a completed execution attribution.
+    recheck: "unverified",
+    attribution: "unknown",
   };
 };
 
@@ -151,7 +152,13 @@ export const recheckUnblobPlugins = async (
       scope,
     );
     return checked.identity_sha256 === identity.identity_sha256
-      ? identity
+      ? identity.recheck === "changed"
+        ? identity
+        : {
+            ...identity,
+            recheck: "unchanged",
+            attribution: "pre_and_post_fingerprint",
+          }
       : { ...identity, recheck: "changed", attribution: "unknown" };
   } catch (cause: unknown) {
     if (

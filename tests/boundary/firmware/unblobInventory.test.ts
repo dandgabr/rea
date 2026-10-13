@@ -1,5 +1,5 @@
 import { expect, it as test } from "vitest";
-import { writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   assertFirmwareCleanup,
@@ -7,6 +7,90 @@ import {
 } from "../../fixtures/firmware/provider.js";
 
 const it = test.skipIf(process.platform !== "linux");
+
+it.each([
+  ["inventory-plugin-doc-missing", "ProviderAdapterError", 3],
+  ["inventory-plugin-doc-invalid", "AnalysisOutputError", 3],
+  ["inventory-plugin-doc-overflow", "AnalysisOutputError", 3],
+  ["inventory-plugin-dependency-invalid", "AnalysisOutputError", 2],
+])(
+  "does not attest an unmeasured inventory phase after successful execution: %s",
+  async (mode, tag, launches) => {
+    const fixture = await firmwareFixture(String(mode));
+    const plugin = join(fixture.root, "trusted.py");
+    await writeFile(plugin, "# original\n");
+    const outcome = await fixture.service.execute("inspect_firmware_provider", {
+      provider_id: "unblob",
+      options: { plugins_path: plugin },
+    });
+    expect(await readFile(plugin, "utf8")).not.toBe("# original\n");
+    expect(outcome).toMatchObject({
+      ok: false,
+      error: {
+        _tag: tag,
+        cleanupIncomplete: false,
+        partialObservation: {
+          result: {
+            engine: {
+              trusted_plugins: {
+                recheck: "unverified",
+                attribution: "unknown",
+              },
+            },
+            dependency_readiness:
+              launches === 2 ? "unknown" : "reported_installed",
+          },
+          provenance: {
+            raw_result: { dependency_execution: { exit_code: 0 } },
+          },
+        },
+      },
+    });
+    if (outcome.ok) throw new Error("Expected inventory admission failure");
+    if (launches === 2)
+      expect(outcome.error.capturedOutput).toMatchObject({
+        stdout_utf8_valid: false,
+        stdout_sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+      });
+    else
+      expect(outcome.error.partialObservation).toMatchObject({
+        result: {
+          dependencies: [{ command: "gzip" }, { command: "sasquatch" }],
+        },
+        provenance: {
+          raw_result: { documentation_execution: { exit_code: 0 } },
+        },
+      });
+    expect(fixture.launches).toHaveLength(Number(launches));
+    await assertFirmwareCleanup(fixture.launches);
+  },
+);
+
+it("promotes inventory attribution only after both stable plugin postchecks complete", async () => {
+  const fixture = await firmwareFixture("inventory");
+  const plugin = join(fixture.root, "trusted.py");
+  await writeFile(plugin, "# stable\n");
+  const outcome = await fixture.service.execute("inspect_firmware_provider", {
+    provider_id: "unblob",
+    options: { plugins_path: plugin },
+  });
+  expect(outcome).toMatchObject({
+    ok: true,
+    value: {
+      normalized_result: {
+        engine: {
+          trusted_plugins: {
+            recheck: "unchanged",
+            attribution: "pre_and_post_fingerprint",
+          },
+        },
+      },
+    },
+  });
+  expect(fixture.launches).toHaveLength(3);
+  expect(await readFile(plugin, "utf8")).toBe("# stable\n");
+  await assertFirmwareCleanup(fixture.launches);
+});
 
 it("does not attest unchanged plugin attribution when a launched inventory command fails", async () => {
   const fixture = await firmwareFixture("inventory-plugin-doc-failure");
