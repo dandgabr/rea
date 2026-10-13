@@ -1,3 +1,15 @@
+import { AnalysisError } from "../domain/analysisErrorBase.js";
+import { projectAnalysisError } from "../domain/analysisErrorProjection.js";
+import { jsonValueSchema } from "../domain/jsonValue.js";
+import type { FileHandle } from "node:fs/promises";
+import { ArtifactResourceScope } from "../artifacts/ArtifactResourceScope.js";
+import { OwnedFileHandle } from "../filesystem/OwnedFileHandle.js";
+import {
+  openRegularFile,
+  RegularFileAdmissionFailure,
+  sameRegularFileState,
+} from "../filesystem/RegularFile.js";
+import { ProviderCleanupError } from "../domain/providerCleanupError.js";
 import { createHash } from "node:crypto";
 import { constants, createReadStream, createWriteStream } from "node:fs";
 import {
@@ -38,25 +50,180 @@ const throwIfFirmwareInventoryCancelled = (
   if (signal?.aborted === true) throw new AnalysisCancelledError(operation);
 };
 
-/** Hash a regular tool or extracted file without retaining its bytes in memory. */
+/** Retains a standalone caller's descriptor scope when cleanup cannot be confirmed. */
+export class FirmwareFileCleanupError extends ProviderCleanupError {
+  constructor(
+    readonly resourceScope: ArtifactResourceScope,
+    paths: string | readonly string[],
+    operation: string,
+    cause: unknown,
+    primary?: unknown,
+    providerId = "firmware",
+  ) {
+    super(
+      providerId,
+      [
+        ...new Set([
+          ...(typeof paths === "string" ? [paths] : paths),
+          ...(primary instanceof AnalysisError ? primary.cleanupResources : []),
+        ]),
+      ],
+      {
+        reason: "Owned firmware descriptor could not be closed",
+        ...(primary === undefined
+          ? {}
+          : {
+              primary_error: jsonValueSchema.parse(
+                primary instanceof AnalysisError
+                  ? projectAnalysisError(primary)
+                  : {
+                      reason:
+                        primary instanceof Error
+                          ? primary.message
+                          : String(primary),
+                    },
+              ),
+            }),
+      },
+      {
+        operation,
+        cause:
+          primary === undefined
+            ? cause
+            : new AggregateError(
+                [primary, cause],
+                "Firmware file operation failed and descriptor cleanup remains incomplete",
+                { cause: primary },
+              ),
+      },
+    );
+    if (
+      primary instanceof AnalysisError &&
+      primary.capturedOutput !== undefined
+    )
+      this.retainCapturedOutput(primary.capturedOutput);
+    if (
+      primary instanceof AnalysisError &&
+      primary.partialObservation !== undefined
+    )
+      this.retainPartialObservation(primary.partialObservation);
+  }
+}
+
+/** Authoritative admission and one cleanup owner rule for one or multiple regular files. */
+export const withFirmwareFiles = async <T>(
+  paths: readonly string[],
+  operation: string,
+  signal: AbortSignal | undefined,
+  scope: ArtifactResourceScope | undefined,
+  use: (handles: readonly FileHandle[]) => Promise<T>,
+  providerId = "firmware",
+): Promise<T> => {
+  const resources = scope ?? new ArtifactResourceScope();
+  const owners: {
+    kind: "file-handle";
+    resource: string;
+    handle: OwnedFileHandle;
+  }[] = [];
+  let primary: unknown;
+  try {
+    for (const path of paths) {
+      try {
+        const handle = await openRegularFile(path, {
+          symlinks: "reject",
+          signal,
+        });
+        owners.push({
+          kind: "file-handle",
+          resource: path,
+          handle: new OwnedFileHandle(handle),
+        });
+      } catch (cause: unknown) {
+        if (cause instanceof RegularFileAdmissionFailure) {
+          owners.push({
+            kind: "file-handle",
+            resource: path,
+            handle: cause.owner,
+          });
+          throw cause.cause;
+        }
+        throw cause;
+      }
+      signal?.throwIfAborted();
+    }
+    return await use(owners.map((owner) => owner.handle.handle));
+  } catch (cause: unknown) {
+    primary =
+      cause instanceof AnalysisError
+        ? cause
+        : signal?.aborted
+          ? new AnalysisCancelledError(operation, { cause })
+          : cause;
+    throw cause;
+  } finally {
+    const failures: { resource: string; cause: unknown }[] = [];
+    for (const owner of owners) {
+      const attempt = await resources.release(owner);
+      if (attempt.kind === "failed")
+        failures.push({ resource: owner.resource, cause: attempt.cause });
+    }
+    if (failures.length > 0)
+      throw new FirmwareFileCleanupError(
+        resources,
+        failures.map((f) => f.resource),
+        operation,
+        new AggregateError(
+          failures.map((f) => f.cause),
+          "Firmware descriptors could not be closed",
+        ),
+        primary,
+        providerId,
+      );
+  }
+};
+
+/** One-file consumers share the same acquisition, primary-error and cleanup boundary. */
+export const withFirmwareFile = <T>(
+  path: string,
+  operation: string,
+  signal: AbortSignal | undefined,
+  scope: ArtifactResourceScope | undefined,
+  use: (handle: FileHandle) => Promise<T>,
+): Promise<T> =>
+  withFirmwareFiles([path], operation, signal, scope, async ([handle]) => {
+    if (handle === undefined)
+      throw new Error("Missing acquired firmware descriptor");
+    return use(handle);
+  });
+
+/** Hash a stable regular tool or extracted file without retaining its bytes in memory. */
 export const hashFirmwareFile = async (
   path: string,
   signal?: AbortSignal,
-): Promise<string> => {
-  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-  const hash = createHash("sha256");
-  try {
-    if (!(await handle.stat()).isFile())
-      throw new Error(`Not a regular file: ${path}`);
-    for await (const chunk of handle.createReadStream({ autoClose: false })) {
+  scope?: ArtifactResourceScope,
+  operation = "firmware_file_identity",
+): Promise<string> =>
+  withFirmwareFile(path, operation, signal, scope, async (handle) => {
+    const initial = await handle.stat({ bigint: true });
+    const hash = createHash("sha256");
+    // Aborting a FileHandle stream can close its FD even with autoClose false.
+    // Await reads on the admitted handle so its scoped owner alone closes it.
+    const buffer = Buffer.allocUnsafe(64 * 1024);
+    for (;;) {
       signal?.throwIfAborted();
-      hash.update(chunk);
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, null);
+      signal?.throwIfAborted();
+      if (bytesRead === 0) break;
+      hash.update(buffer.subarray(0, bytesRead));
     }
-  } finally {
-    await handle.close();
-  }
-  return hash.digest("hex");
-};
+    signal?.throwIfAborted();
+    if (!sameRegularFileState(initial, await handle.stat({ bigint: true })))
+      throw new AnalysisOutputError(
+        operation,
+        `File changed while being identified: ${path}`,
+      );
+    return hash.digest("hex");
+  });
 
 /** Copy and identify the exact bytes consumed by firmware providers. */
 export const snapshotFirmware = async (

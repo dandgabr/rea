@@ -114,6 +114,20 @@ const execution = (
   command: identity.command,
   args: [],
   resource_limiter: identity.limiter,
+  captured_output: {
+    stdout: "",
+    stderr,
+    truncated: false,
+    stdout_bytes: 0,
+    stderr_bytes: Buffer.byteLength(stderr),
+    stdout_observed_bytes: 0,
+    stderr_observed_bytes: Buffer.byteLength(stderr),
+    exit_code,
+    signal: null,
+    command: identity.command,
+    arguments: [],
+    resource_limiter: identity.limiter,
+  },
 });
 const observed = (
   result: Awaited<ReturnType<FactNativeProvider["execute"]>>,
