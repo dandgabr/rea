@@ -9,6 +9,23 @@ import { toolContractMetadata } from "../toolEffects.js";
 /** Explicit local firmware observations and extraction, backed by caller-supplied tools. */
 export const FIRMWARE_TOOL_CONTRACTS = [
   {
+    name: "inspect_firmware_provider",
+    ...toolContractMetadata("inspect_firmware_provider"),
+    kind: "firmware-provider",
+    description:
+      "Inspect the caller-selected Unblob 26.6.x tool with native version, external dependency lookup and generated public handler documentation. Dependency exit 1 is retained as reported missing, not startup failure. Documentation lists only public DOC entries, not every installed handler. No firmware input or fabricated artifact subject. Trusted explicit plugins and installed entrypoints may execute before sandbox setup; identity fingerprints do not attest isolation. Linux and caller-supplied util-linux prlimit required; one outstanding provider operation and 120-second deadline.",
+    inputSchema: firmwareInputSchemas.inspect_firmware_provider,
+    outputSchema: evidenceResultOf(
+      firmwareResultSchemas.inspect_firmware_provider,
+    ),
+    examples: [
+      {
+        title: "Inspect the selected Unblob installation",
+        input: { provider_id: "unblob" },
+      },
+    ],
+  },
+  {
     name: "inspect_firmware_regions",
     ...toolContractMetadata("inspect_firmware_regions"),
     kind: "firmware-provider",

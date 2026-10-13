@@ -1,5 +1,9 @@
 import type { ArtifactResourceScope } from "../artifacts/ArtifactResourceScope.js";
-import { AnalysisError } from "../domain/analysisErrorBase.js";
+import {
+  AnalysisError,
+  type AnalysisCapturedOutput,
+} from "../domain/analysisErrorBase.js";
+import { projectAnalysisError } from "../domain/analysisErrorProjection.js";
 import { randomUUID } from "node:crypto";
 import { access, realpath, stat } from "node:fs/promises";
 import { constants } from "node:fs";
@@ -175,18 +179,42 @@ export const runFirmwareCommand = async (context: {
       },
     },
   );
+  const capture = (): AnalysisCapturedOutput => {
+    const snapshot = supervisor.snapshot();
+    return {
+      stdout: snapshot.stdout.text,
+      stderr: snapshot.stderr.text,
+      truncated: snapshot.diagnosticTruncated ?? false,
+      stdout_bytes: snapshot.stdout.bytes,
+      stderr_bytes: snapshot.stderr.bytes,
+      stdout_observed_bytes: snapshot.stdout.observedBytes,
+      stderr_observed_bytes: snapshot.stderr.observedBytes,
+      exit_code: snapshot.exitCode ?? null,
+      signal: snapshot.signal ?? null,
+      ...(snapshot.stdout.sha256 === undefined
+        ? {}
+        : { stdout_sha256: snapshot.stdout.sha256 }),
+      ...(snapshot.stderr.sha256 === undefined
+        ? {}
+        : { stderr_sha256: snapshot.stderr.sha256 }),
+      ...(snapshot.stdout.utf8Valid === undefined
+        ? {}
+        : { stdout_utf8_valid: snapshot.stdout.utf8Valid }),
+      ...(snapshot.stderr.utf8Valid === undefined
+        ? {}
+        : { stderr_utf8_valid: snapshot.stderr.utf8Valid }),
+      command: context.command,
+      arguments: [...context.args],
+      resource_limiter: context.limiter,
+    };
+  };
   const checkDiagnostics = () => {
     if (diagnosticTruncated) {
-      const snapshot = supervisor.snapshot();
       throw new AnalysisOutputError(
         operation,
         `Tool diagnostics exceeded the ${FIRMWARE_LIMITS.diagnosticBytes}-byte capture budget`,
         {
-          capturedOutput: {
-            stdout: snapshot.stdout.text,
-            stderr: snapshot.stderr.text,
-            truncated: true,
-          },
+          capturedOutput: capture(),
         },
       );
     }
@@ -215,20 +243,31 @@ export const runFirmwareCommand = async (context: {
   }
   const stopped = await supervisor.stop();
   const snapshot = supervisor.snapshot();
+  const captured = capture();
+  if (failure instanceof AnalysisError) failure.retainCapturedOutput(captured);
   if (stopped.status === "incomplete") {
     context.retainCleanup(supervisor);
-    throw new ProviderCleanupError(engine, [runId, context.cwd], {
-      reason: stopped.reason,
-      leader_pid: spawned.ownership.leaderPid,
-      process_group_id: spawned.ownership.processGroupId,
-      exit_code: snapshot.exitCode ?? null,
-      signal: snapshot.signal ?? null,
-      stdout: snapshot.stdout.text,
-      stderr: snapshot.stderr.text,
-      stdout_bytes: snapshot.stdout.bytes,
-      stderr_bytes: snapshot.stderr.bytes,
-      previous_error: failure instanceof Error ? failure.message : null,
-    });
+    throw new ProviderCleanupError(
+      engine,
+      [runId, context.cwd],
+      {
+        reason: stopped.reason,
+        leader_pid: spawned.ownership.leaderPid,
+        process_group_id: spawned.ownership.processGroupId,
+        exit_code: snapshot.exitCode ?? null,
+        signal: snapshot.signal ?? null,
+        stdout: snapshot.stdout.text,
+        stderr: snapshot.stderr.text,
+        stdout_bytes: snapshot.stdout.bytes,
+        stderr_bytes: snapshot.stderr.bytes,
+        previous_error: failure instanceof Error ? failure.message : null,
+        primary_error:
+          failure instanceof AnalysisError
+            ? projectAnalysisError(failure)
+            : null,
+      },
+      { operation, cause: failure, capturedOutput: captured },
+    );
   }
   if (failure !== undefined) throw failure;
   if (
@@ -239,6 +278,7 @@ export const runFirmwareCommand = async (context: {
     )
   )
     throw new ProviderAdapterError(engine, operation, {
+      capturedOutput: captured,
       diagnostics: {
         reason:
           "Tool failed; inspect exit status and stderr for format, dependency, sandbox or resource-limit failures",

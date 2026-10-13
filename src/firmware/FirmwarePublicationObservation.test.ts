@@ -72,6 +72,7 @@ it("the publisher itself retains producer facts without provider fallback or aut
   const retainCleanup = vi.fn();
   await expect(
     publishFirmwareExtraction({
+      maxDepth: 3,
       outputDirectory: output,
       entries: [],
       normalized,

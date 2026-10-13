@@ -3,7 +3,11 @@ import { FirmwareAnalysisService } from "../application/firmware/FirmwareAnalysi
 import { createFirmwareAnalysisProvider } from "../composition/firmware.js";
 import { CLI_COMMANDS } from "../cliCommandNames.js";
 import { logCliCommand } from "../cliLogging.js";
-import { firmwareInputSchemas } from "../domain/firmware/firmwareAnalysis.js";
+import {
+  firmwareInputSchemas,
+  unblobOptionsSchema,
+  unblobExtractionOptionsSchema,
+} from "../domain/firmware/firmwareAnalysis.js";
 import { localPathStringSchema } from "../domain/localPath.js";
 import type { FirmwareOperation } from "../domain/firmware/firmwareAnalysis.js";
 import type { Logger } from "pino";
@@ -11,6 +15,7 @@ import type { CliInstance } from "./types.js";
 import { withCommandCancellation } from "./commandCancellation.js";
 import { absoluteCallerPath } from "../filesystem/callerPath.js";
 import { finishAnalysisCommand } from "./finishAnalysisCommand.js";
+import { resolve } from "node:path";
 
 /** One-shot firmware CLI commands backed by the same workflows as MCP. */
 export const registerFirmwareCommands = (
@@ -23,6 +28,73 @@ export const registerFirmwareCommands = (
   );
   const extractInput = firmwareInputSchemas.extract_firmware.shape;
   const range = extractInput.range.unwrap().shape;
+  const selectionOptions = {
+    offset: range.offset
+      .optional()
+      .describe("Selected byte offset; requires length"),
+    length: range.length
+      .optional()
+      .describe("Selected byte length; requires offset"),
+  };
+  const unblobOptions = {
+    workers: unblobOptionsSchema.shape.workers.removeDefault().optional(),
+    randomnessDepth: unblobOptionsSchema.shape.randomness_depth
+      .removeDefault()
+      .optional(),
+    skipMagic: z
+      .array(z.string())
+      .optional()
+      .describe("Repeatable native magic prefix; appended by default"),
+    clearSkipMagics: z
+      .boolean()
+      .optional()
+      .describe(
+        "Replace native skip magic defaults with the selected prefixes",
+      ),
+    skipExtension: z
+      .array(z.string())
+      .optional()
+      .describe("Repeatable replacement for native skip extension defaults"),
+    pluginsPath: localPathStringSchema
+      .optional()
+      .describe(
+        "Trusted Python plugin file/tree; imported before native sandbox setup",
+      ),
+  };
+  const selection = (options: {
+    offset?: number | undefined;
+    length?: number | undefined;
+  }) =>
+    options.offset === undefined && options.length === undefined
+      ? {}
+      : { range: { offset: options.offset, length: options.length } };
+  const nativeOptions = (options: {
+    workers?: number | undefined;
+    randomnessDepth?: number | undefined;
+    skipMagic?: string[] | undefined;
+    clearSkipMagics?: boolean | undefined;
+    skipExtension?: string[] | undefined;
+    pluginsPath?: string | undefined;
+  }) => ({
+    ...(options.workers === undefined ? {} : { workers: options.workers }),
+    ...(options.randomnessDepth === undefined
+      ? {}
+      : { randomness_depth: options.randomnessDepth }),
+    ...(options.skipMagic === undefined && options.clearSkipMagics !== true
+      ? {}
+      : {
+          skip_magic: {
+            mode: options.clearSkipMagics === true ? "replace" : "append",
+            values: options.skipMagic ?? [],
+          },
+        }),
+    ...(options.skipExtension === undefined
+      ? {}
+      : { skip_extensions: options.skipExtension }),
+    ...(options.pluginsPath === undefined
+      ? {}
+      : { plugins_path: resolve(options.pluginsPath) }),
+  });
   const execute = (
     name: string,
     operation: FirmwareOperation,
@@ -41,16 +113,47 @@ export const registerFirmwareCommands = (
   const path = localPathStringSchema.describe(
     "Local firmware path; never executed",
   );
+  cli.command(CLI_COMMANDS.inspectFirmwareProvider, {
+    description:
+      "Inspect selected tool identity, dependency lookup and native documented formats",
+    options: z.object({
+      providerId: z.literal("unblob"),
+      pluginsPath: unblobOptions.pluginsPath,
+    }),
+    run: ({ options }) =>
+      execute(
+        CLI_COMMANDS.inspectFirmwareProvider,
+        "inspect_firmware_provider",
+        {
+          provider_id: options.providerId,
+          ...(options.pluginsPath === undefined
+            ? {}
+            : { options: { plugins_path: resolve(options.pluginsPath) } }),
+        },
+      ),
+  });
   cli.command(CLI_COMMANDS.inspectFirmwareRegions, {
     description:
       "Inspect firmware signature candidates without extracting them",
     args: z.object({ path }),
-    run: ({ args }) =>
+    options: z.object({
+      providerId: z.enum(["binwalk", "unblob"]).default("binwalk"),
+      ...selectionOptions,
+      ...unblobOptions,
+    }),
+    run: ({ args, options }) =>
       execute(
         CLI_COMMANDS.inspectFirmwareRegions,
         "inspect_firmware_regions",
         // CLI paths are operator-relative; resolve before shared validation.
-        { path: absoluteCallerPath(args.path) },
+        {
+          path: absoluteCallerPath(args.path),
+          provider_id: options.providerId,
+          ...selection(options),
+          ...(Object.keys(nativeOptions(options)).length === 0
+            ? {}
+            : { options: nativeOptions(options) }),
+        },
       ),
   });
   cli.command(CLI_COMMANDS.extractFirmware, {
@@ -63,12 +166,24 @@ export const registerFirmwareCommands = (
       ),
     }),
     options: z.object({
-      offset: range.offset
+      providerId: z.literal("unblob").default("unblob"),
+      ...selectionOptions,
+      ...unblobOptions,
+      keepExtractedChunks:
+        unblobExtractionOptionsSchema.shape.keep_extracted_chunks
+          .removeDefault()
+          .optional(),
+      deleteExtractedFiles: z.enum(["none", "all", "selected"]).optional(),
+      deleteHandler: z
+        .array(z.string())
         .optional()
-        .describe("Selected byte offset; requires length"),
-      length: range.length
-        .optional()
-        .describe("Selected byte length; requires offset"),
+        .describe("Repeatable handler; requires selected deletion mode"),
+      carveSuffix: unblobExtractionOptionsSchema.shape.carve_suffix
+        .removeDefault()
+        .optional(),
+      extractSuffix: unblobExtractionOptionsSchema.shape.extract_suffix
+        .removeDefault()
+        .optional(),
       maxDepth: extractInput.max_depth,
       maxOutputBytes: extractInput.max_output_bytes,
       maxOutputFiles: extractInput.max_output_files,
@@ -77,9 +192,31 @@ export const registerFirmwareCommands = (
       execute(CLI_COMMANDS.extractFirmware, "extract_firmware", {
         path: absoluteCallerPath(args.path),
         output_directory: absoluteCallerPath(args.outputDirectory),
-        ...(options.offset === undefined && options.length === undefined
-          ? {}
-          : { range: { offset: options.offset, length: options.length } }),
+        provider_id: options.providerId,
+        ...selection(options),
+        options: {
+          ...nativeOptions(options),
+          ...(options.keepExtractedChunks === undefined
+            ? {}
+            : { keep_extracted_chunks: options.keepExtractedChunks }),
+          ...(options.deleteExtractedFiles === undefined &&
+          options.deleteHandler === undefined
+            ? {}
+            : {
+                delete_extracted_files: {
+                  mode: options.deleteExtractedFiles ?? "none",
+                  ...(options.deleteHandler === undefined
+                    ? {}
+                    : { handlers: options.deleteHandler }),
+                },
+              }),
+          ...(options.carveSuffix === undefined
+            ? {}
+            : { carve_suffix: options.carveSuffix }),
+          ...(options.extractSuffix === undefined
+            ? {}
+            : { extract_suffix: options.extractSuffix }),
+        },
         max_depth: options.maxDepth,
         max_output_bytes: options.maxOutputBytes,
         max_output_files: options.maxOutputFiles,

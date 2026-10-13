@@ -33,6 +33,8 @@ it("snapshots inspection and extraction ranges with original basenames and readb
           : {}),
       },
     });
+    if (request.operation === "inspect_firmware_provider")
+      throw new Error("Unexpected inventory request");
     const snapshot = await snapshotFirmware(
       request,
       staging,
@@ -63,6 +65,8 @@ it.skipIf(process.platform !== "linux")(
       operation: "inspect_firmware_regions",
       input: { path },
     });
+    if (request.operation !== "inspect_firmware_regions")
+      throw new Error("Unexpected request");
     const sourceDescriptors = async () => {
       const descriptors = await readdir("/proc/self/fd");
       const targets = await Promise.all(

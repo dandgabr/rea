@@ -106,11 +106,23 @@ export const unblobExtractionInputSchema = z.strictObject({
 });
 /** Provider branches are strict; omission preserves the existing engine defaults. */
 export const firmwareInputSchemas = {
-  inspect_firmware_regions: z.union([
-    binwalkRegionInputSchema,
-    unblobRegionInputSchema,
-  ]),
+  inspect_firmware_regions: z
+    .union([binwalkRegionInputSchema, unblobRegionInputSchema])
+    .meta({
+      // Root-object presentation preserves this nested correlation for SDK clients.
+      // Each added provider/options branch must extend this declaration as well.
+      dependentSchemas: {
+        options: {
+          properties: { provider_id: { const: "unblob" } },
+          required: ["provider_id"],
+        },
+      },
+    }),
   extract_firmware: unblobExtractionInputSchema,
+  inspect_firmware_provider: z.strictObject({
+    provider_id: z.literal("unblob"),
+    options: unblobOptionsSchema.pick({ plugins_path: true }).optional(),
+  }),
 } as const;
 
 /** Supported firmware operations. */
@@ -132,8 +144,27 @@ export const firmwareRequestSchema = z.discriminatedUnion("operation", [
     operation: z.literal("extract_firmware"),
     input: firmwareInputSchemas.extract_firmware,
   }),
+  z.strictObject({
+    operation: z.literal("inspect_firmware_provider"),
+    input: firmwareInputSchemas.inspect_firmware_provider,
+  }),
 ]);
 
+export const firmwareTrustedPluginsSchema = z.strictObject({
+  selected_path: z.string(),
+  resolved_path: z.string(),
+  kind: z.enum(["file", "tree"]),
+  files: z.array(
+    z.strictObject({
+      relative_path: z.string(),
+      size: bytes,
+      sha256: digestSchema,
+    }),
+  ),
+  identity_sha256: digestSchema,
+  recheck: z.enum(["unchanged", "changed", "unverified"]),
+  attribution: z.enum(["pre_and_post_fingerprint", "unknown"]),
+});
 export const firmwareEngineSchema = z.strictObject({
   name: z.string(),
   version: z.string(),
@@ -147,6 +178,7 @@ export const firmwareEngineSchema = z.strictObject({
   executable_sha256: digestSchema,
   source_revision: z.null(),
   worker_count: z.number().int().positive(),
+  trusted_plugins: firmwareTrustedPluginsSchema.optional(),
 });
 export const firmwareSelectionSchema = z.strictObject({
   ...range.shape,
@@ -185,6 +217,26 @@ export const extractionGap = z.strictObject({
   dependencies: z.array(z.string()),
   /** Lookup key in the result's extraction_continuations table. */
   continuation_id: z.string(),
+});
+
+/** Inline continuation form retained for native extraction problem rows. */
+export const firmwareExtractionGapSchema = z.strictObject({
+  kind: z.enum([
+    "missing-extractor-dependency",
+    "unknown-chunk-handler",
+    "encrypted-chunk",
+    "depth-limited",
+    "extractor-failure",
+    "unpublished-entry",
+  ]),
+  input_path: z.string(),
+  relative_path: z.string().nullable(),
+  handler: z.string().nullable(),
+  provider_id: z.string().nullable(),
+  range: range.nullable(),
+  root_file_range: range.nullable(),
+  dependencies: z.array(z.string()),
+  continuation: z.string(),
 });
 
 /** Completed firmware result retained when private-runtime cleanup cannot be confirmed. */
@@ -235,6 +287,14 @@ const unblobObservationFields = {
   randomness: z.array(firmwareRandomnessSchema),
   multifiles: z.array(firmwareMultiFileSchema),
   deleted_files: z.array(firmwareDeletedFileSchema),
+  extraction_problems: z.array(
+    z.strictObject({
+      input_path: z.string(),
+      provider_id: z.string().nullable(),
+      handler: z.string().nullable(),
+      dependencies: z.array(z.string()),
+    }),
+  ),
 };
 /** Unblob inspection has native task/chunk semantics, without published artifacts. */
 export const unblobRegionResultSchema = z.strictObject({
@@ -247,6 +307,34 @@ export const unblobRegionResultSchema = z.strictObject({
   ...unblobObservationFields,
 });
 export const firmwareResultSchemas = {
+  inspect_firmware_provider: z.strictObject({
+    provider_id: z.literal("unblob"),
+    engine: firmwareEngineSchema,
+    dependencies: z.array(
+      z.strictObject({ command: z.string(), reported_installed: z.boolean() }),
+    ),
+    dependency_readiness: z.enum([
+      "reported_installed",
+      "reported_missing",
+      "unknown",
+    ]),
+    dependency_inventory_coverage: z.enum(["native_reported", "partial"]),
+    unparsed_dependency_lines: z.array(z.string()),
+    formats: z.array(
+      z.strictObject({
+        name: z.string(),
+        type: z.string(),
+        fully_supported: z.boolean(),
+      }),
+    ),
+    format_inventory_coverage: z.enum([
+      "documented_public_handlers",
+      "partial",
+    ]),
+    unparsed_format_lines: z.array(z.string()),
+    installed_plugin_inventory: z.literal("unknown"),
+    runtime: jsonValueSchema,
+  }),
   inspect_firmware_regions: z.union([
     binwalkRegionResultSchema,
     unblobRegionResultSchema,
@@ -297,6 +385,16 @@ export const firmwareResultSchemas = {
     randomness: z.array(firmwareRandomnessSchema).optional(),
     multifiles: z.array(firmwareMultiFileSchema).optional(),
     deleted_files: z.array(firmwareDeletedFileSchema).optional(),
+    extraction_problems: z
+      .array(
+        z.strictObject({
+          input_path: z.string(),
+          provider_id: z.string().nullable(),
+          handler: z.string().nullable(),
+          dependencies: z.array(z.string()),
+        }),
+      )
+      .optional(),
     published_bytes: bytes,
   }),
 } as const;

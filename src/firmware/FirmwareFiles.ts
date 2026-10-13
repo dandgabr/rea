@@ -56,7 +56,6 @@ const throwIfFirmwareInventoryCancelled = (
 
 /** Retains a standalone caller's descriptor scope when cleanup cannot be confirmed. */
 export class FirmwareFileCleanupError extends ProviderCleanupError {
-  override readonly capturedOutput: AnalysisCapturedOutput | undefined;
   constructor(
     readonly resourceScope: ArtifactResourceScope,
     paths: string | readonly string[],
@@ -102,10 +101,11 @@ export class FirmwareFileCleanupError extends ProviderCleanupError {
               ),
       },
     );
-    this.capturedOutput =
-      primary instanceof AnalysisError && primary.capturedOutput !== undefined
-        ? { ...primary.capturedOutput }
-        : undefined;
+    if (
+      primary instanceof AnalysisError &&
+      primary.capturedOutput !== undefined
+    )
+      this.retainCapturedOutput(primary.capturedOutput);
     if (
       primary instanceof AnalysisError &&
       primary.partialObservation !== undefined
@@ -215,12 +215,12 @@ export const withFirmwareFile = <T>(
   );
 
 /** Hash a stable regular tool or extracted file without retaining its bytes in memory. */
-export const hashFirmwareFile = async (
+export const identifyFirmwareFile = async (
   path: string,
   signal?: AbortSignal,
   scope?: ArtifactResourceScope,
   operation = "firmware_file_identity",
-): Promise<string> =>
+): Promise<{ readonly sha256: string; readonly size: number }> =>
   withFirmwareFile(
     path,
     operation,
@@ -242,10 +242,19 @@ export const hashFirmwareFile = async (
           operation,
           `File changed while being identified: ${path}`,
         );
-      return hash.digest("hex");
+      return { sha256: hash.digest("hex"), size: Number(initial.size) };
     },
     (cause) => new Error(`Not a regular file: ${path}`, { cause }),
   );
+
+/** Existing digest consumers share the same descriptor-bound identity observation. */
+export const hashFirmwareFile = async (
+  path: string,
+  signal?: AbortSignal,
+  scope?: ArtifactResourceScope,
+  operation = "firmware_file_identity",
+): Promise<string> =>
+  (await identifyFirmwareFile(path, signal, scope, operation)).sha256;
 
 /** Copy and identify the exact bytes consumed by firmware providers. */
 export const snapshotFirmware = async (
@@ -289,7 +298,6 @@ export const snapshotFirmware = async (
             message: `Firmware must be a nonempty regular file no larger than ${FIRMWARE_LIMITS.inputBytes} bytes`,
           },
         ]);
-      await mkdir(join(root, "source"), { mode: 0o700 });
       const meter = new Transform({
         transform(chunk: Buffer, _encoding, callback) {
           size += chunk.length;

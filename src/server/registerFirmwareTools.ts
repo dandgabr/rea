@@ -22,6 +22,12 @@ export const registerFirmwareTools = (
     recordEvidence,
     withAdmittedAnalysis,
   );
+  const inventory = toolContract("inspect_firmware_provider");
+  server.registerTool(
+    inventory.name,
+    toolRegistrationOptions(inventory),
+    handler(inventory),
+  );
   const inspect = toolContract("inspect_firmware_regions");
   server.registerTool(
     inspect.name,

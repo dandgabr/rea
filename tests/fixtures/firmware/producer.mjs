@@ -13,6 +13,20 @@ const args = process.argv.slice(2);
 const mode = process.env.REA_FIRMWARE_FIXTURE_MODE;
 const engine = process.env.REA_FIRMWARE_FIXTURE_ENGINE;
 const banner = process.env.REA_FIRMWARE_FIXTURE_VERSION;
+const selectedPlugin = args
+  .find((arg) => arg.startsWith("--plugins-path="))
+  ?.slice("--plugins-path=".length);
+if (
+  mode === "plugin-bytecode" &&
+  selectedPlugin !== undefined &&
+  process.env.PYTHONDONTWRITEBYTECODE !== "1"
+) {
+  await mkdir(join(selectedPlugin, "__pycache__"), { recursive: true });
+  await writeFile(
+    join(selectedPlugin, "__pycache__", "trusted.pyc"),
+    "native import cache",
+  );
+}
 if (args.includes("--version")) {
   console.log(
     mode === "version"
@@ -23,7 +37,48 @@ if (args.includes("--version")) {
           ? "binwalk 3.1.0"
           : "26.6.4",
   );
+} else if (args.includes("--show-external-dependencies")) {
+  if (mode === "inventory-invalid-utf8")
+    process.stdout.write(Buffer.from([0xff]));
+  console.log(
+    "The following executables found installed, which are needed by unblob:",
+  );
+  console.log("    gzip    ✓");
+  console.log(
+    mode === "inventory-malformed"
+      ? "unrecognized dependency row"
+      : `    sasquatch    ${mode === "inventory-missing" ? "✗" : "✓"}`,
+  );
+  if (mode === "inventory-missing") process.exitCode = 1;
+} else if (args.includes("--build-handlers-doc")) {
+  if (
+    mode === "inventory-doc-failure" ||
+    mode === "inventory-plugin-doc-failure"
+  ) {
+    if (mode === "inventory-plugin-doc-failure")
+      await writeFile(
+        selectedPlugin,
+        "# changed before failed documentation\n",
+      );
+    console.error(
+      "Documentation generation failed after dependency inspection",
+    );
+    process.exit(2);
+  }
+  if (mode === "inventory-plugin-drift")
+    await writeFile(
+      args
+        .find((arg) => arg.startsWith("--plugins-path="))
+        ?.slice("--plugins-path=".length),
+      "# changed by trusted inventory plugin\n",
+    );
+  await writeFile(
+    args[args.indexOf("--build-handlers-doc") + 1],
+    '??? example "All supported formats"\n    | Format | Type | Fully supported? |\n    | :--- | :--- | :---: |\n    | [`GZIP`](#gzip) | COMPRESSION | :octicons-check-16: |\n\n## GZIP\n',
+  );
 } else if (mode === "stall") {
+  console.log("native output before cancellation");
+  await writeFile(join(process.cwd(), "ready"), "ready");
   setInterval(() => {}, 1000);
 } else if (mode === "startup") {
   console.error("Landlock sandbox is not available on this fixture host");
@@ -100,6 +155,18 @@ if (args.includes("--version")) {
         shannon: { block_size: 1024, percentages: [0], mean: 0 },
         chi_square: { block_size: 1024, percentages: [0], mean: 0 },
       });
+    if (mode === "custom-report")
+      reports.push({
+        __typename__: "TrustedFirmwareReport",
+        sensitive_password: "firmware-password-observation",
+      });
+    if (mode === "plugin-drift")
+      await writeFile(
+        args
+          .find((arg) => arg.startsWith("--plugins-path="))
+          ?.slice("--plugins-path=".length),
+        "# changed after import\n",
+      );
     await writeFile(
       reportPath,
       JSON.stringify([

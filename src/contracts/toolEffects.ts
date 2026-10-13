@@ -249,6 +249,13 @@ export const TOOL_EFFECTS: Readonly<Record<string, ToolEffects>> = {
   }),
   inspect_pe_resources: evidence,
   inspect_analysis_view: evidence,
+  inspect_firmware_provider: effects({
+    mutatesSession: true,
+    launchesProcess: true,
+    writesFilesystem: true,
+    executesForeignCode: true,
+    accessesNetwork: true,
+  }),
   inspect_firmware_regions: effects({
     mutatesSession: true,
     launchesProcess: true,

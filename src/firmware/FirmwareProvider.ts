@@ -36,6 +36,14 @@ import {
   createFirmwareExtractionObservation,
   createFirmwareInspectionObservation,
 } from "./FirmwareExtractionObservation.js";
+import {
+  fingerprintUnblobPlugins,
+  recheckUnblobPlugins,
+} from "./UnblobPlugins.js";
+import {
+  normalizeUnblobInventory,
+  readUnblobDocumentation,
+} from "./UnblobInventory.js";
 import { unblobExecutionOptions } from "./UnblobOptions.js";
 import {
   FIRMWARE_LIMITS,
@@ -94,6 +102,7 @@ const combineCleanupFailures = (
   );
 };
 const limitations = [
+  "Listed extraction gaps describe unexamined or unpublished coverage; they do not establish target corruption or an empty filesystem.",
   "Signature matches and reported sizes do not establish partition validity, encryption or runtime mappings. Binwalk may infer unknown lengths before emitting its report.",
   "Only Linux is supported by this integration. Configured workers, inherited per-process address-space/file-size/CPU limits and a deadline constrain execution; staging byte and entry budgets are polled and may transiently overshoot. Limits are not aggregate process-memory or filesystem quotas.",
   "Unblob's default sandbox setup is requested, but Landlock can silently fall back; isolation is not attested. Caller-selected skip rules and missing external extractors, unknown chunks, encrypted chunks or depth limits constrain coverage. Trusted installed plugin entrypoints can execute code and access the network before sandbox setup with unknown inventory. Extracted code is never automatically executed; only regular files are published, without executable permission bits.",
@@ -279,15 +288,19 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
     let outcome: Outcome;
     try {
       if (signal.aborted) throw new AnalysisCancelledError(request.operation);
-      if (
-        request.input.provider_id === "unblob" &&
-        request.input.options.plugins_path !== undefined
-      )
-        throw firmwareToolUnavailable(
-          engineName,
-          request.operation,
-          "Explicit trusted plugin identity is not yet implemented by this firmware adapter",
-        );
+      const pluginPath =
+        request.input.provider_id === "unblob"
+          ? request.input.options?.plugins_path
+          : undefined;
+      let plugins =
+        pluginPath === undefined
+          ? undefined
+          : await fingerprintUnblobPlugins(
+              pluginPath,
+              request.operation,
+              signal,
+              scope,
+            );
       const command = await resolveFirmwareCommand(
         this.environment,
         engineName,
@@ -299,18 +312,38 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
       root = await PrivateRuntimeRoot.create({ prefix: "rea-firmware-" });
       const ownedRoot = root;
       signal.throwIfAborted();
-      const target = await snapshotFirmware(request, root.path, signal, scope);
-      const run = (
+      const target =
+        request.operation === "inspect_firmware_provider"
+          ? undefined
+          : await snapshotFirmware(request, root.path, signal, scope);
+      const run = async (
         args: readonly string[],
         outputBudget?: { root: string; bytes: number; entries: number },
-      ) =>
-        runFirmwareCommand({
+        acceptExitOne = false,
+      ) => {
+        if (plugins !== undefined) {
+          plugins = await recheckUnblobPlugins(
+            plugins,
+            request.operation,
+            signal,
+            scope,
+          );
+          if (plugins.recheck !== "unchanged")
+            throw new AnalysisOutputError(
+              request.operation,
+              "Trusted plugin identity changed before producer launch",
+            );
+        }
+        return runFirmwareCommand({
           engine: engineName,
           operation: request.operation,
           ...command,
           args,
           cwd: root?.path ?? "",
-          environment: this.environment,
+          environment:
+            pluginPath === undefined
+              ? this.environment
+              : { ...this.environment, PYTHONDONTWRITEBYTECODE: "1" },
           signal,
           retainCleanup: (supervisor) => {
             this.#pendingCleanup.set(ownedRoot.path, {
@@ -321,10 +354,24 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
             });
           },
           ...(this.launcher === undefined ? {} : { launcher: this.launcher }),
-          ...(outputBudget === undefined
-            ? {}
-            : { outputBudget, acceptReportedExtractionFailure: true }),
+          acceptReportedExtractionFailure:
+            acceptExitOne || outputBudget !== undefined,
+          ...(outputBudget === undefined ? {} : { outputBudget }),
         });
+      };
+      if (plugins !== undefined) {
+        plugins = await recheckUnblobPlugins(
+          plugins,
+          request.operation,
+          signal,
+          scope,
+        );
+        if (plugins.recheck !== "unchanged")
+          throw new AnalysisOutputError(
+            request.operation,
+            "Trusted plugin identity changed before producer launch",
+          );
+      }
       const versionRun = await run(["--version"]);
       const version = versionRun.stdout.text.trim();
       if (versionRun.stdout.bytes > 1024)
@@ -332,6 +379,11 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
           engineName,
           request.operation,
           `Tool version banner is ${String(versionRun.stdout.bytes)} bytes; expected a short ${engineName} version line.`,
+        );
+      if (versionRun.stdout.utf8Valid === false)
+        throw new AnalysisOutputError(
+          request.operation,
+          "Tool version is not valid UTF-8",
         );
       const admitted = admitFirmwareVersion(engineName, version);
       if (admitted.status === "unsupported" || admitted.status === "unresolved")
@@ -349,215 +401,369 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
           : { resolved_executable_path: command.resolvedCommand }),
         executable_sha256: command.sha256,
         source_revision: null,
+        ...(plugins === undefined ? {} : { trusted_plugins: plugins }),
         worker_count:
-          request.input.provider_id === "unblob"
+          request.input.provider_id === "unblob" &&
+          request.operation !== "inspect_firmware_provider"
             ? request.input.options.workers
             : 1,
       };
-      const reportPath = join(root.path, "report.json");
-      let result: unknown;
-      let raw: unknown;
-      if (
-        request.operation === "inspect_firmware_regions" &&
-        request.input.provider_id === "binwalk"
-      ) {
-        const processRun = await run([
-          "--quiet",
-          "--search-all",
-          "--threads",
-          "1",
-          "--log",
-          reportPath,
-          target.inputPath,
+      if (request.operation === "inspect_firmware_provider") {
+        const pluginArgs =
+          pluginPath === undefined ? [] : [`--plugins-path=${pluginPath}`];
+        const inventoryRaw: Record<string, unknown> = {
+          version_execution: versionRun,
+        };
+        let inventoryResult: Record<string, unknown> = {
+          provider_id: "unblob",
+          engine,
+          dependency_readiness: "unknown",
+          format_inventory_coverage: "partial",
+        };
+        const retainInventory = () => {
+          if (plugins !== undefined) engine.trusted_plugins = plugins;
+          inventoryResult = { ...inventoryResult, engine };
+          prepublicationObservation = {
+            kind: "firmware",
+            result: jsonValueSchema.parse(inventoryResult),
+            provenance: jsonValueSchema.parse({
+              raw_result: inventoryRaw,
+              subject: null,
+              provider: {
+                ...UNBLOB_PROVIDER_IDENTITY,
+                version: admitted.version,
+              },
+            }),
+          };
+        };
+        const runInventory = async (...args: Parameters<typeof run>) => {
+          try {
+            return await run(...args);
+          } catch (cause: unknown) {
+            // A failed launch has no completed post-command fingerprint. Keep the
+            // primary failure/capture and already measured inventory, with unknown attribution.
+            if (plugins !== undefined)
+              plugins = {
+                ...plugins,
+                recheck: "unverified",
+                attribution: "unknown",
+              };
+            retainInventory();
+            throw cause;
+          }
+        };
+        const recheckInventoryPlugins = async () => {
+          if (plugins === undefined) return;
+          plugins = await recheckUnblobPlugins(
+            plugins,
+            request.operation,
+            signal,
+            scope,
+          );
+          retainInventory();
+          if (plugins.recheck !== "unchanged")
+            throw new AnalysisOutputError(
+              request.operation,
+              "Trusted plugin identity changed during provider inventory",
+            );
+        };
+        retainInventory();
+        const dependenciesRun = await runInventory(
+          [...pluginArgs, "--show-external-dependencies"],
+          undefined,
+          true,
+        );
+        inventoryRaw.dependency_execution = dependenciesRun;
+        retainInventory();
+        if (dependenciesRun.stdout.utf8Valid === false)
+          throw new AnalysisOutputError(
+            request.operation,
+            "Native dependency inventory is not valid UTF-8",
+            {
+              capturedOutput: {
+                stdout: dependenciesRun.stdout.text,
+                stderr: dependenciesRun.stderr.text,
+                truncated: false,
+                stdout_bytes: dependenciesRun.stdout.bytes,
+                ...(dependenciesRun.stdout.sha256 === undefined
+                  ? {}
+                  : { stdout_sha256: dependenciesRun.stdout.sha256 }),
+                stdout_utf8_valid: dependenciesRun.stdout.utf8Valid,
+              },
+            },
+          );
+        inventoryResult = normalizeUnblobInventory(dependenciesRun, "", engine);
+        retainInventory();
+        await recheckInventoryPlugins();
+        const documentationPath = join(root.path, "handlers.md");
+        const documentationRun = await runInventory([
+          ...pluginArgs,
+          "--build-handlers-doc",
+          documentationPath,
         ]);
-        const report = await readFirmwareCommandReport({
+        inventoryRaw.documentation_execution = documentationRun;
+        retainInventory();
+        const documentation = await readUnblobDocumentation(
+          documentationPath,
           signal,
           scope,
-          path: reportPath,
-          engine: engineName,
-          operation: request.operation,
-          execution: processRun,
-        });
-        result = binwalkRegionResultSchema.parse({
+        );
+        inventoryRaw.documentation = documentation;
+        inventoryResult = normalizeUnblobInventory(
+          dependenciesRun,
+          documentation,
           engine,
-          input_size: target.size,
-          ...(request.input.range === undefined
-            ? {}
-            : { selection: target.selection }),
-          regions: normalizeBinwalkReport(report, target.inputPath, {
-            inputSize: target.size,
+        );
+        retainInventory();
+        await recheckInventoryPlugins();
+        outcome = ok(
+          createAnalysisExecution(
+            inventoryResult,
+            { ...UNBLOB_PROVIDER_IDENTITY, version: admitted.version },
+            {
+              rawResult: {
+                version_execution: versionRun,
+                dependency_execution: dependenciesRun,
+                documentation_execution: documentationRun,
+                documentation,
+              },
+              limitations: [
+                ...limitations,
+                "Dependency marks report executable lookup, not working extractors. Native public documentation omits handlers without public DOC metadata.",
+              ],
+            },
+          ),
+        );
+      } else {
+        if (target === undefined) throw new Error("Missing firmware snapshot");
+        const reportPath = join(root.path, "report.json");
+        let result: unknown;
+        let raw: unknown;
+        if (
+          request.operation === "inspect_firmware_regions" &&
+          request.input.provider_id === "binwalk"
+        ) {
+          const processRun = await run([
+            "--quiet",
+            "--search-all",
+            "--threads",
+            "1",
+            "--log",
+            reportPath,
+            target.inputPath,
+          ]);
+          const report = await readFirmwareCommandReport({
+            signal,
+            scope,
+            path: reportPath,
+            engine: engineName,
+            operation: request.operation,
+            execution: processRun,
+          });
+          result = binwalkRegionResultSchema.parse({
+            engine,
+            input_size: target.size,
             ...(request.input.range === undefined
               ? {}
               : { selection: target.selection }),
-          }),
-          coverage: "signature_scan",
-        });
-        raw = { report, execution: processRun, version_execution: versionRun };
-      } else {
-        if (
-          request.operation === "extract_firmware" &&
-          !isAbsolute(request.input.output_directory)
-        )
-          throw new AnalysisInputError(request.operation, undefined, [
-            {
-              path: ["output_directory"],
-              reason: "invalid_format",
-              message: "Extraction output directory must be absolute",
-            },
-          ]);
-        const outputRoot = join(root.path, "extracted");
-        const nativeOptions = unblobExecutionOptions(request);
-        const maxDepth =
-          request.operation === "extract_firmware"
-            ? request.input.max_depth
-            : 1;
-        const outputBytes =
-          request.operation === "extract_firmware"
-            ? request.input.max_output_bytes
-            : 256 * 1024 * 1024;
-        const outputFiles =
-          request.operation === "extract_firmware"
-            ? request.input.max_output_files
-            : 10_000;
-        const processRun = await run(
-          [
-            ...nativeOptions.args,
-            "--report",
-            reportPath,
-            "--log",
-            join(root.path, "unblob.log"),
-            "--extract-dir",
-            outputRoot,
-            target.inputPath,
-          ],
-          {
-            root: outputRoot,
-            bytes: outputBytes,
-            entries: outputFiles,
-          },
-        );
-        const report = await readFirmwareCommandReport({
-          signal,
-          scope,
-          path: reportPath,
-          engine: engineName,
-          operation: request.operation,
-          execution: processRun,
-        });
-        const normalized = normalizeUnblobReport(report, {
-          operation: request.operation,
-          inputPath: target.inputPath,
-          outputRoot,
-          ...target.selection,
-          maxDepth,
-          skipMagic: nativeOptions.skipMagic,
-          skipExtensions: nativeOptions.skipExtensions,
-        });
-        raw = { report, execution: processRun, version_execution: versionRun };
-        const observation =
-          request.operation === "extract_firmware"
-            ? createFirmwareExtractionObservation({
-                outputDirectory: request.input.output_directory,
-                normalized,
-                selection: target.selection,
-                engine,
-              })
-            : createFirmwareInspectionObservation({
-                engine,
-                inputSize: target.size,
-                selection: target.selection,
-                normalized,
-              });
-        prepublicationObservation = {
-          ...observation,
-          provenance: jsonValueSchema.parse({
-            raw_result: raw,
-            provider: {
-              ...UNBLOB_PROVIDER_IDENTITY,
-              version: admitted.version,
-            },
-            subject: target.subject,
-            locations: [
-              {
-                kind: "file-offset-range",
-                start: target.selection.offset,
-                end: target.selection.offset + target.selection.length,
-              },
-            ],
-            limitations: [
-              ...limitations,
-              ...(admitted.status === "compatible"
-                ? [admitted.limitation]
-                : []),
-            ],
-          }),
-        };
-        if (processRun.exit_code === 1 && normalized.diagnostics.length === 0)
-          throw new AnalysisOutputError(
-            request.operation,
-            "Unblob failed without a reported extraction diagnostic",
-          );
-        if (request.operation === "inspect_firmware_regions") {
-          result = observation.result;
+            regions: normalizeBinwalkReport(report, target.inputPath, {
+              inputSize: target.size,
+              ...(request.input.range === undefined
+                ? {}
+                : { selection: target.selection }),
+            }),
+            coverage: "signature_scan",
+          });
+          raw = {
+            report,
+            execution: processRun,
+            version_execution: versionRun,
+          };
         } else {
-          const entries = await inventoryFirmwareOutput(
-            outputRoot,
-            request.input.max_output_bytes,
-            request.input.max_output_files,
-            request.operation,
-            signal,
+          if (
+            request.operation === "extract_firmware" &&
+            !isAbsolute(request.input.output_directory)
+          )
+            throw new AnalysisInputError(request.operation, undefined, [
+              {
+                path: ["output_directory"],
+                reason: "invalid_format",
+                message: "Extraction output directory must be absolute",
+              },
+            ]);
+          const outputRoot = join(root.path, "extracted");
+          const nativeOptions = unblobExecutionOptions(request);
+          const maxDepth =
+            request.operation === "extract_firmware"
+              ? request.input.max_depth
+              : 1;
+          const outputBytes =
+            request.operation === "extract_firmware"
+              ? request.input.max_output_bytes
+              : 256 * 1024 * 1024;
+          const outputFiles =
+            request.operation === "extract_firmware"
+              ? request.input.max_output_files
+              : 10_000;
+          const processRun = await run(
+            [
+              ...nativeOptions.args,
+              "--report",
+              reportPath,
+              "--log",
+              join(root.path, "unblob.log"),
+              "--extract-dir",
+              outputRoot,
+              target.inputPath,
+            ],
+            {
+              root: outputRoot,
+              bytes: outputBytes,
+              entries: outputFiles,
+            },
           );
-          result = await publishFirmwareExtraction({
-            outputDirectory: request.input.output_directory,
-            entries,
-            normalized,
-            observation: prepublicationObservation,
-            selection: target.selection,
-            maxDepth,
-            engine,
+          const report = await readFirmwareCommandReport({
             signal,
             scope,
-            retainCleanup: (tree) => {
-              const pending: PendingFirmwareCleanup = this.#pendingCleanup.get(
-                ownedRoot.path,
-              ) ?? {
-                root: ownedRoot,
-                engine: engineName,
-                operation: request.operation,
-              };
-              pending.tree = tree;
-              this.#pendingCleanup.set(ownedRoot.path, pending);
-            },
+            path: reportPath,
+            engine: engineName,
+            operation: request.operation,
+            execution: processRun,
           });
-        }
-      }
-      const catalog =
-        engineName === "binwalk"
-          ? BINWALK_PROVIDER_IDENTITY
-          : UNBLOB_PROVIDER_IDENTITY;
-      outcome = ok(
-        createAnalysisExecution(
-          result,
-          { ...catalog, version: admitted.version },
-          {
-            subject: target.subject,
-            rawResult: raw,
-            limitations: [
-              ...limitations,
-              ...(admitted.status === "compatible"
-                ? [admitted.limitation]
-                : []),
-            ],
-            locations: [
-              {
-                kind: "file-offset-range",
-                start: target.selection.offset,
-                end: target.selection.offset + target.selection.length,
+          const normalized = normalizeUnblobReport(report, {
+            operation: request.operation,
+            inputPath: target.inputPath,
+            outputRoot,
+            ...target.selection,
+            maxDepth,
+            skipMagic: nativeOptions.skipMagic,
+            skipExtensions: nativeOptions.skipExtensions,
+            explicitPlugins: pluginPath !== undefined,
+          });
+          raw = {
+            report,
+            execution: processRun,
+            version_execution: versionRun,
+          };
+          if (plugins !== undefined) {
+            plugins = await recheckUnblobPlugins(
+              plugins,
+              request.operation,
+              signal,
+              scope,
+            );
+            engine.trusted_plugins = plugins;
+          }
+          const observation =
+            request.operation === "extract_firmware"
+              ? createFirmwareExtractionObservation({
+                  outputDirectory: request.input.output_directory,
+                  maxDepth,
+                  normalized,
+                  selection: target.selection,
+                  engine,
+                })
+              : createFirmwareInspectionObservation({
+                  engine,
+                  inputSize: target.size,
+                  selection: target.selection,
+                  normalized,
+                });
+          prepublicationObservation = {
+            ...observation,
+            provenance: jsonValueSchema.parse({
+              raw_result: raw,
+              provider: {
+                ...UNBLOB_PROVIDER_IDENTITY,
+                version: admitted.version,
               },
-            ],
-          },
-        ),
-      );
+              subject: target.subject,
+              locations: [
+                {
+                  kind: "file-offset-range",
+                  start: target.selection.offset,
+                  end: target.selection.offset + target.selection.length,
+                },
+              ],
+              limitations: [
+                ...limitations,
+                ...(admitted.status === "compatible"
+                  ? [admitted.limitation]
+                  : []),
+              ],
+            }),
+          };
+          if (plugins !== undefined && plugins.recheck !== "unchanged")
+            throw new AnalysisOutputError(
+              request.operation,
+              "Trusted plugin identity changed after producer execution; attribution is unknown",
+            );
+          if (processRun.exit_code === 1 && normalized.diagnostics.length === 0)
+            throw new AnalysisOutputError(
+              request.operation,
+              "Unblob failed without a reported extraction diagnostic",
+            );
+          if (request.operation === "inspect_firmware_regions") {
+            result = observation.result;
+          } else {
+            const entries = await inventoryFirmwareOutput(
+              outputRoot,
+              request.input.max_output_bytes,
+              request.input.max_output_files,
+              request.operation,
+              signal,
+            );
+            result = await publishFirmwareExtraction({
+              outputDirectory: request.input.output_directory,
+              entries,
+              normalized,
+              observation: prepublicationObservation,
+              maxDepth,
+              selection: target.selection,
+              engine,
+              signal,
+              scope,
+              retainCleanup: (tree) => {
+                const pending: PendingFirmwareCleanup =
+                  this.#pendingCleanup.get(ownedRoot.path) ?? {
+                    root: ownedRoot,
+                    engine: engineName,
+                    operation: request.operation,
+                  };
+                pending.tree = tree;
+                this.#pendingCleanup.set(ownedRoot.path, pending);
+              },
+            });
+          }
+        }
+        const catalog =
+          engineName === "binwalk"
+            ? BINWALK_PROVIDER_IDENTITY
+            : UNBLOB_PROVIDER_IDENTITY;
+        outcome = ok(
+          createAnalysisExecution(
+            result,
+            { ...catalog, version: admitted.version },
+            {
+              subject: target.subject,
+              rawResult: raw,
+              limitations: [
+                ...limitations,
+                ...(admitted.status === "compatible"
+                  ? [admitted.limitation]
+                  : []),
+              ],
+              locations: [
+                {
+                  kind: "file-offset-range",
+                  start: target.selection.offset,
+                  end: target.selection.offset + target.selection.length,
+                },
+              ],
+            },
+          ),
+        );
+      }
     } catch (cause: unknown) {
       let nested: unknown = cause;
       const seen = new Set<unknown>();
@@ -575,11 +781,24 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
         cause instanceof AnalysisError && cause.cleanupIncomplete
           ? cause
           : options?.signal?.aborted === true
-            ? new AnalysisCancelledError(request.operation)
+            ? new AnalysisCancelledError(request.operation, {
+                cause,
+                capturedOutput:
+                  cause instanceof AnalysisError
+                    ? cause.capturedOutput
+                    : undefined,
+              })
             : deadline.aborted
               ? new AnalysisTimeoutError(
                   request.operation,
                   FIRMWARE_LIMITS.timeoutMs,
+                  {
+                    cause,
+                    capturedOutput:
+                      cause instanceof AnalysisError
+                        ? cause.capturedOutput
+                        : undefined,
+                  },
                 )
               : cause instanceof AnalysisError
                 ? cause

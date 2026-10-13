@@ -37,7 +37,7 @@ export class FirmwareAnalysisService {
     const executed = await this.provider.execute(parsed.data, options);
     if (!executed.ok) return executed;
     const execution = executed.value;
-    if (execution.subject === null)
+    if (execution.subject === null && operation !== "inspect_firmware_provider")
       return err(
         new AnalysisOutputError(
           operation,
@@ -53,6 +53,12 @@ export class FirmwareAnalysisService {
         locations: execution.locations,
         limitations: execution.limitations,
         confidence: "observed",
+        ...(operation === "inspect_firmware_provider"
+          ? {
+              subjectUnavailableReason:
+                "Provider inventory describes the selected tool; no firmware artifact was analyzed.",
+            }
+          : {}),
       }),
       options?.signal,
     );

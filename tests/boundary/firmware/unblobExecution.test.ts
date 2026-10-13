@@ -1,12 +1,42 @@
 import { access, readFile, writeFile } from "node:fs/promises";
 import { basename } from "node:path";
-import { expect, it as test } from "vitest";
+import { expect, it as test, vi } from "vitest";
 import {
   firmwareFixture,
   assertFirmwareCleanup,
 } from "../../fixtures/firmware/provider.js";
 
 const it = test.skipIf(process.platform !== "linux");
+
+it("preserves measured command output through caller cancellation and workspace cleanup", async () => {
+  const fixture = await firmwareFixture("stall");
+  const controller = new AbortController();
+  const operation = fixture.service.execute(
+    "inspect_firmware_regions",
+    { provider_id: "unblob", path: fixture.path },
+    { signal: controller.signal },
+  );
+  await vi.waitFor(async () => {
+    expect(fixture.launches).toHaveLength(2);
+    await access(`${fixture.launches[1]?.cwd ?? ""}/ready`);
+  });
+  controller.abort();
+  const outcome = await operation;
+  expect(outcome).toMatchObject({
+    ok: false,
+    error: {
+      _tag: "AnalysisCancelledError",
+      operation: "inspect_firmware_regions",
+      capturedOutput: {
+        stdout: "native output before cancellation\n",
+        stdout_utf8_valid: true,
+        stdout_observed_bytes: 34,
+        stdout_sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+      },
+    },
+  });
+  await assertFirmwareCleanup(fixture.launches);
+});
 
 it.each(["append", "replace"])(
   "executes caller Unblob options with native skip semantics: %s",

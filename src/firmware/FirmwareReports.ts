@@ -172,31 +172,43 @@ const taskDisposition = (context: {
   return decision("examined_unrecognized");
 };
 
+const nativeExtractionErrorKinds = new Set([
+  "ExtractorDependencyNotFoundReport",
+  "ExtractCommandFailedReport",
+  "ExtractorTimedOut",
+  "OutputDirectoryExistsReport",
+  "UnknownError",
+  "MaliciousSymlinkRemoved",
+]);
+const hasNativeExtractionProblem = (reports: readonly JsonValue[]): boolean =>
+  reports.some(
+    (item) =>
+      typeof item === "object" &&
+      item !== null &&
+      !Array.isArray(item) &&
+      typeof item.__typename__ === "string" &&
+      nativeExtractionErrorKinds.has(item.__typename__),
+  );
+
 const dependencyFailure = z.object({
   __typename__: z.literal("ExtractorDependencyNotFoundReport"),
-  dependencies: z.array(z.string().min(1)).min(1),
+  dependencies: z.array(z.string()),
 });
 
 /** Collect the named extractors from any dependency report nested in one value. */
 const missingDependencies = (value: unknown): string[] => {
-  // Producer-controlled name volume must not make deduplication quadratic;
-  // a Set keeps collection linear and uniqueSorted restores canonical order.
   const found = new Set<string>();
-  const visit = (node: unknown): void => {
-    if (Array.isArray(node)) {
-      for (const item of node) visit(item);
-      return;
-    }
-    if (typeof node !== "object" || node === null) return;
+  const pending: unknown[] = [value];
+  while (pending.length > 0) {
+    const node = pending.pop();
+    if (typeof node !== "object" || node === null) continue;
     const failure = dependencyFailure.safeParse(node);
     if (failure.success) {
-      for (const dependency of failure.data.dependencies) found.add(dependency);
-      return;
-    }
-    for (const child of Object.values(node)) visit(child);
-  };
-  visit(value);
-  return [...found];
+      for (const dependency of failure.data.dependencies)
+        if (dependency !== "") found.add(dependency);
+    } else pending.push(...Object.values(node));
+  }
+  return [...found].sort();
 };
 
 /**
@@ -400,6 +412,12 @@ export const normalizeUnblobReport = (
     root_file_range: { offset: number; length: number } | null;
     extraction_failed: boolean;
   }[] = [];
+  const extractionProblems: {
+    input_path: string;
+    provider_id: string | null;
+    handler: string | null;
+    dependencies: string[];
+  }[] = [];
   const seen = new Set<string>();
   const taskFailures = new Set<string>();
   type DependencyFacts = { readonly names: Set<string>; unnamed: boolean };
@@ -581,6 +599,16 @@ export const normalizeUnblobReport = (
         depth: record.task.depth,
       });
     for (const item of record.reports) {
+      if (item.__typename__ === "ExtractorDependencyNotFoundReport") {
+        const dependencies = missingDependencies(item);
+        if (dependencies.length > 0)
+          extractionProblems.push({
+            input_path: path,
+            provider_id: null,
+            handler: null,
+            dependencies,
+          });
+      }
       if (item.__typename__ === "RandomnessReport")
         addRandomness(item, path, "whole_file", 0, parsedStat.size);
       if (item.__typename__ === "ExtractedFileDeletedReport") {
@@ -677,6 +705,16 @@ export const normalizeUnblobReport = (
             // Nested under one chunk: keep the owning chunk, not the whole task.
             noteChunkMissingDependencies(path, parsed.id, [problem]);
           }
+        if (
+          detail !== null &&
+          hasNativeExtractionProblem(detail.extraction_reports)
+        )
+          extractionProblems.push({
+            input_path: path,
+            provider_id: parsed.id,
+            handler: detail.handler_name,
+            dependencies: missingDependencies(detail.extraction_reports),
+          });
         addBlobOrigin(path, parsed.id, {
           handler: detail?.handler_name ?? null,
           range: { offset: parsed.start_offset, length: parsed.size },
@@ -705,6 +743,13 @@ export const normalizeUnblobReport = (
           range: null,
         });
         if (parsed.extraction_reports.length > 0) {
+          if (hasNativeExtractionProblem(parsed.extraction_reports))
+            extractionProblems.push({
+              input_path: path,
+              provider_id: parsed.id,
+              handler: parsed.handler_name,
+              dependencies: missingDependencies(parsed.extraction_reports),
+            });
           diagnostics.push(
             extractionDiagnostic(
               path,
@@ -865,6 +910,7 @@ export const normalizeUnblobReport = (
     randomness,
     multifiles,
     deleted_files: deletedFiles,
+    extraction_problems: extractionProblems,
     coverage:
       depths.length > 0 ||
       diagnostics.length > 0 ||

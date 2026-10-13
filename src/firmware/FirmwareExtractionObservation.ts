@@ -7,6 +7,8 @@ import type { z } from "zod";
 import type { normalizeUnblobReport } from "./FirmwareReports.js";
 import { jsonValueSchema } from "../domain/jsonValue.js";
 
+import { firmwareExtractionGaps } from "./FirmwareExtractionGaps.js";
+
 const facts = (normalized: ReturnType<typeof normalizeUnblobReport>) => ({
   coverage: normalized.coverage,
   chunks: normalized.chunks,
@@ -25,6 +27,7 @@ export const createFirmwareExtractionObservation = (context: {
   engine: z.infer<typeof firmwareExtractionObservationSchema>["engine"];
   selection: z.infer<typeof firmwareExtractionObservationSchema>["selection"];
   normalized: ReturnType<typeof normalizeUnblobReport>;
+  maxDepth: number;
 }): FirmwarePartialObservation => ({
   kind: "firmware",
   result: jsonValueSchema.parse(
@@ -34,6 +37,10 @@ export const createFirmwareExtractionObservation = (context: {
       publication_state: "not_committed",
       requested_output_directory: context.outputDirectory,
       ...facts(context.normalized),
+      extraction_gaps: firmwareExtractionGaps(
+        context.normalized,
+        context.maxDepth,
+      ),
     }),
   ),
 });

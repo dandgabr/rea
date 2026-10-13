@@ -97,9 +97,16 @@ explicit path or endpoint and do not need it.
   Archive member inventory still uses the archive route above.
 - Managed PE/CLI assembly: `inspect_managed_artifact`.
 - Firmware image: `inspect_firmware_regions` when advertised. Use
-  `extract_firmware` when extraction is requested, with a caller-selected new
+  `inspect_firmware_provider` with `provider_id: "unblob"` for native identity,
+  dependency lookup and public documented formats (subject null). Select
+  `provider_id: "unblob"` explicitly for Unblob inspection; omitted inspection
+  keeps Binwalk. Preserve ranges, native randomness units and unknown child
+  offsets. Use `extract_firmware` when extraction is requested, with a caller-selected new
   absolute output directory. These tools use caller-supplied Binwalk/Unblob on
-  Linux; see the [firmware guide](https://github.com/morluto/rea/blob/main/docs/firmware-analysis.md).
+  Linux. Read `extraction_gaps` and typed partial observations before proposing
+  another request; never install extractors, replay failures or import plugins
+  implicitly. Explicit `options.plugins_path` imports trusted code before native
+  sandbox setup; fingerprints do not attest isolation. See the [firmware guide](https://github.com/morluto/rea/blob/main/docs/firmware-analysis.md).
 - .NET NativeAOT PE/ELF: native Ghidra analysis. Native code can yield pseudocode;
   consult the NativeAOT workflow in `references/native-and-artifacts.md` for
   optional metadata recovery and its supported host/layout boundary.

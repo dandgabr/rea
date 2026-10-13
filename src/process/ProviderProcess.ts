@@ -1,4 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { createHash } from "node:crypto";
+import { createHash } from "node:crypto";
 import type { EventEmitter } from "node:events";
 import type { Readable, Writable } from "node:stream";
 
@@ -103,20 +105,30 @@ export interface ProviderProcessSnapshot {
   readonly diagnosticTruncated?: boolean;
   readonly stdout: {
     readonly text: string;
+    readonly invalidUtf8?: true;
     /** True when retained bytes cannot be represented exactly as UTF-8 text. */
     readonly invalidUtf8?: true;
     /** Bytes retained in text, limited by maxDiagnosticBytes when configured. */
     readonly bytes: number;
     /** All bytes drained from this stream since construction or resetOutput. */
     readonly observedBytes: number;
+    readonly sha256: string;
+    readonly utf8Valid: boolean;
+    readonly sha256?: string;
+    readonly utf8Valid?: boolean;
   };
   readonly stderr: {
     readonly text: string;
+    readonly invalidUtf8?: true;
     /** True when retained bytes cannot be represented exactly as UTF-8 text. */
     readonly invalidUtf8?: true;
     /** Bytes retained in text, limited by maxDiagnosticBytes when configured. */
     readonly bytes: number;
     readonly observedBytes: number;
+    readonly sha256: string;
+    readonly utf8Valid: boolean;
+    readonly sha256?: string;
+    readonly utf8Valid?: boolean;
   };
   readonly exitCode: number | null | undefined;
   readonly signal: NodeJS.Signals | null | undefined;
@@ -754,18 +766,24 @@ class ProcessOutputCapture {
     buffer: Buffer,
     observedBytes: number,
   ): ProviderProcessSnapshot["stdout"] {
-    const text = buffer.toString("utf8");
-    let invalidUtf8 = false;
+    let text: string,
+      utf8Valid = true;
     try {
-      new TextDecoder("utf-8", { fatal: true }).decode(buffer);
+      text = new TextDecoder("utf-8", {
+        fatal: true,
+        ignoreBOM: true,
+      }).decode(buffer);
     } catch {
-      invalidUtf8 = true;
+      utf8Valid = false;
+      text = buffer.toString("utf8");
     }
     return {
       text,
       bytes: buffer.byteLength,
       observedBytes,
-      ...(invalidUtf8 ? { invalidUtf8: true } : {}),
+      sha256: createHash("sha256").update(buffer).digest("hex"),
+      utf8Valid,
+      ...(utf8Valid ? {} : { invalidUtf8: true as const }),
     };
   }
 }
