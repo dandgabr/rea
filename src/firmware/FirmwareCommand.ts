@@ -1,3 +1,5 @@
+import { AnalysisError } from "../domain/analysisErrorBase.js";
+import type { ArtifactResourceScope } from "../artifacts/ArtifactResourceScope.js";
 import { randomUUID } from "node:crypto";
 import { access, lstat, realpath, stat } from "node:fs/promises";
 import { constants } from "node:fs";
@@ -70,8 +72,9 @@ export const resolveFirmwareCommand = async (
     await access(command, constants.R_OK | constants.X_OK);
     if (!(await stat(command)).isFile())
       throw new TypeError("Configured path is not a regular file");
-    sha256 = await hashFirmwareFile(command);
+    sha256 = await hashFirmwareFile(command, undefined, undefined, operation);
   } catch (cause: unknown) {
+    if (cause instanceof AnalysisError && cause.cleanupIncomplete) throw cause;
     throw firmwareToolUnavailable(
       engine,
       operation,
@@ -267,10 +270,22 @@ export const readFirmwareCommandReport = async (context: {
   engine: string;
   operation: string;
   execution: Awaited<ReturnType<typeof runFirmwareCommand>>;
+  signal?: AbortSignal;
+  scope?: ArtifactResourceScope;
 }): Promise<unknown> => {
   try {
-    return await readFirmwareReport(context.path, context.operation);
+    return await readFirmwareReport(
+      context.path,
+      context.operation,
+      context.signal,
+      context.scope,
+    );
   } catch (cause: unknown) {
+    if (
+      context.signal?.aborted ||
+      (cause instanceof AnalysisError && cause.cleanupIncomplete)
+    )
+      throw cause;
     if (context.execution.exit_code === 1)
       throw new ProviderAdapterError(context.engine, context.operation, {
         cause,

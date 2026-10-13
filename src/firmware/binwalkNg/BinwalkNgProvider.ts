@@ -1,3 +1,6 @@
+import { ArtifactAnalysisResources } from "../../process/ArtifactAnalysisResources.js";
+import { readStableArtifact } from "../../artifacts/readStableArtifact.js";
+import { readLinuxResourceLimits } from "../../process/LinuxResourceLimits.js";
 import {
   createAnalysisExecution,
   type AnalysisExecution,
@@ -45,10 +48,18 @@ const limitations = [
   "Entropy preserves native Shannon values and measured byte windows without encryption/compression interpretation. Native plot dimensions are verified from the bounded PNG header, not a complete image decode. Optional PNG controls publication only.",
 ] as const;
 
-/** Queued BYO binwalk-ng provider owning all processes, private roots and output cleanup. */
+/** Single-outstanding BYO binwalk-ng provider owning all processes, private roots and output cleanup. */
 export class BinwalkNgProvider {
-  #tail: Promise<void> = Promise.resolve();
-  #closed = false;
+  readonly #resources = new ArtifactAnalysisResources(
+    "binwalk-ng",
+    "firmware",
+    readStableArtifact,
+    readLinuxResourceLimits,
+    {
+      message: "One heavy binwalk-ng operation is already outstanding",
+      details: { maximum_outstanding: 1 },
+    },
+  );
   readonly #owned = new Set<OwnedWorkflow>();
   constructor(
     readonly environment: Readonly<
@@ -61,36 +72,26 @@ export class BinwalkNgProvider {
     request: BinwalkNgRequest,
     options?: ExecutionOptions,
   ): Promise<Outcome> {
-    if (this.#closed) return err(new AnalysisCancelledError(request.operation));
-    const predecessor = this.#tail;
-    let release = () => {};
-    this.#tail = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    try {
-      await waitForPredecessor(predecessor, options?.signal, request.operation);
-    } catch (cause: unknown) {
-      void predecessor.then(release);
-      return err(
-        cause instanceof AnalysisError
-          ? cause
-          : new AnalysisCancelledError(request.operation),
-      );
-    }
-    try {
-      if (this.#closed)
-        return err(new AnalysisCancelledError(request.operation));
-      const cleanup = await this.#cleanup();
-      if (cleanup !== undefined) return err(cleanup);
-      return await this.#execute(request, options);
-    } finally {
-      release();
-    }
+    const deadline = AbortSignal.timeout(FIRMWARE_LIMITS.timeoutMs);
+    const signal =
+      options?.signal === undefined
+        ? deadline
+        : AbortSignal.any([options.signal, deadline]);
+    return this.#resources.run(
+      async () => {
+        if (signal.aborted)
+          return err(new AnalysisCancelledError(request.operation));
+        const cleanup = await this.#cleanup();
+        if (cleanup !== undefined) return err(cleanup);
+        return this.#execute(request, options, signal, deadline);
+      },
+      signal,
+      request.operation,
+    );
   }
 
   async close(): Promise<void> {
-    this.#closed = true;
-    await this.#tail;
+    await this.#resources.close();
     const cleanup = await this.#cleanup();
     if (cleanup !== undefined) throw cleanup;
   }
@@ -138,13 +139,10 @@ export class BinwalkNgProvider {
 
   async #execute(
     request: BinwalkNgRequest,
-    options?: ExecutionOptions,
+    options: ExecutionOptions | undefined,
+    signal: AbortSignal,
+    deadline: AbortSignal,
   ): Promise<Outcome> {
-    const deadline = AbortSignal.timeout(FIRMWARE_LIMITS.timeoutMs);
-    const signal =
-      options?.signal === undefined
-        ? deadline
-        : AbortSignal.any([options.signal, deadline]);
     let owner: OwnedWorkflow | undefined;
     let outcome: Outcome;
     try {
@@ -176,7 +174,12 @@ export class BinwalkNgProvider {
       };
       this.#owned.add(owner);
       const owned = owner;
-      const target = await snapshotFirmware(request, root.path, signal);
+      const target = await snapshotFirmware(
+        request,
+        root.path,
+        signal,
+        owner.scope,
+      );
       const produced = await runBinwalkNgWorkflow({
         request,
         root: root.path,
@@ -285,18 +288,3 @@ export class BinwalkNgProvider {
     return outcome;
   }
 }
-
-const waitForPredecessor = (
-  predecessor: Promise<void>,
-  signal: AbortSignal | undefined,
-  operation: string,
-) =>
-  new Promise<void>((resolve, reject) => {
-    const abort = () => reject(new AnalysisCancelledError(operation));
-    signal?.addEventListener("abort", abort, { once: true });
-    if (signal?.aborted === true) abort();
-    void predecessor.then(() => {
-      signal?.removeEventListener("abort", abort);
-      resolve();
-    });
-  });

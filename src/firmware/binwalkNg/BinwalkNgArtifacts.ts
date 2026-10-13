@@ -1,4 +1,6 @@
-import { constants, createReadStream } from "node:fs";
+import { createHash } from "node:crypto";
+import { sameRegularFileState } from "../../filesystem/RegularFile.js";
+import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { ArtifactResourceScope } from "../../artifacts/ArtifactResourceScope.js";
@@ -9,7 +11,11 @@ import { AnalysisOutputError } from "../../domain/analysisErrorCore.js";
 import { ProviderCleanupError } from "../../domain/providerCleanupError.js";
 import { readPngHeaderDimensions } from "../../domain/pngHeader.js";
 import { jsonValueSchema } from "../../domain/jsonValue.js";
-import { hashFirmwareFile, type FirmwareEntry } from "../FirmwareFiles.js";
+import {
+  hashFirmwareFile,
+  withFirmwareFile,
+  type FirmwareEntry,
+} from "../FirmwareFiles.js";
 import { FIRMWARE_LIMITS } from "../FirmwareRelease.js";
 
 /** Close every acquired descriptor, retaining failed owners instead of losing them. */
@@ -17,6 +23,7 @@ const withFiles = async <T>(
   scope: ArtifactResourceScope,
   paths: readonly string[],
   operation: string,
+  signal: AbortSignal,
   use: (handles: readonly OwnedFileHandle[]) => Promise<T>,
 ): Promise<T> => {
   const owners: {
@@ -26,10 +33,18 @@ const withFiles = async <T>(
   }[] = [];
   try {
     for (const path of paths) {
+      signal.throwIfAborted();
       const handle = new OwnedFileHandle(
-        await open(path, constants.O_RDONLY | constants.O_NOFOLLOW),
+        await open(
+          path,
+          constants.O_RDONLY |
+            constants.O_NOFOLLOW |
+            constants.O_NONBLOCK |
+            constants.O_NOCTTY,
+        ),
       );
       owners.push({ kind: "file-handle", resource: path, handle });
+      signal.throwIfAborted();
       if (!(await handle.handle.stat()).isFile())
         throw new AnalysisOutputError(operation, `Not a regular file: ${path}`);
     }
@@ -50,6 +65,11 @@ const withFiles = async <T>(
 };
 
 /** A filename is only a candidate: exact source bytes must establish correspondence. */
+export interface BinwalkNgCarvingObservation {
+  readonly sha256: string;
+  readonly local_range: { offset: number; length: number };
+  readonly original_file_range: { offset: number; length: number } | null;
+}
 export const verifyBinwalkNgCarving = async (context: {
   entry: FirmwareEntry;
   inputPath: string;
@@ -58,6 +78,7 @@ export const verifyBinwalkNgCarving = async (context: {
   scope: ArtifactResourceScope;
   signal: AbortSignal;
   operation: string;
+  observe?: (proof: BinwalkNgCarvingObservation) => void;
 }) => {
   const prefix = `${basename(context.inputPath)}_`;
   const name = basename(context.entry.path);
@@ -72,18 +93,22 @@ export const verifyBinwalkNgCarving = async (context: {
     context.entry.size > context.inputSize - offset
   )
     return null;
-  const equal = await withFiles(
+  return withFiles(
     context.scope,
     [context.inputPath, context.entry.path],
     context.operation,
+    context.signal,
     async ([source, candidate]) => {
       if (source === undefined || candidate === undefined)
         throw new Error("Missing acquired comparison descriptors");
+      const sourceInitial = await source.handle.stat({ bigint: true }),
+        candidateInitial = await candidate.handle.stat({ bigint: true });
       if (
-        (await source.handle.stat()).size !== context.inputSize ||
-        (await candidate.handle.stat()).size !== context.entry.size
+        sourceInitial.size !== BigInt(context.inputSize) ||
+        candidateInitial.size !== BigInt(context.entry.size)
       )
-        return false;
+        return null;
+      const hash = createHash("sha256");
       const a = Buffer.alloc(64 * 1024),
         b = Buffer.alloc(64 * 1024);
       let position = 0;
@@ -99,14 +124,24 @@ export const verifyBinwalkNgCarving = async (context: {
           right.bytesRead !== length ||
           !a.subarray(0, length).equals(b.subarray(0, length))
         )
-          return false;
+          return null;
+        hash.update(b.subarray(0, length));
         position += length;
       }
-      return (await candidate.handle.stat()).size === context.entry.size;
-    },
-  );
-  return equal
-    ? {
+      context.signal.throwIfAborted();
+      if (
+        !sameRegularFileState(
+          sourceInitial,
+          await source.handle.stat({ bigint: true }),
+        ) ||
+        !sameRegularFileState(
+          candidateInitial,
+          await candidate.handle.stat({ bigint: true }),
+        )
+      )
+        return null;
+      const proof: BinwalkNgCarvingObservation = {
+        sha256: hash.digest("hex"),
         local_range: { offset, length: context.entry.size },
         original_file_range:
           context.rootOffset === null
@@ -115,9 +150,22 @@ export const verifyBinwalkNgCarving = async (context: {
                 offset: context.rootOffset + offset,
                 length: context.entry.size,
               },
-      }
-    : null;
+      };
+      context.observe?.(proof);
+      return proof;
+    },
+  );
 };
+
+export interface BinwalkNgPngObservation {
+  readonly width: number;
+  readonly height: number;
+  readonly size: number;
+  readonly sha256: string;
+  readonly validation: "png_header";
+  path: string | null;
+  publication_state: "unpublished" | "published";
+}
 
 /** Verify the native plot's actual bounded header and retain its independent digest. */
 export const inspectBinwalkNgPng = async (
@@ -125,10 +173,12 @@ export const inspectBinwalkNgPng = async (
   scope: ArtifactResourceScope,
   signal: AbortSignal,
   operation: string,
-) => {
-  const header = await withFiles(scope, [path], operation, async ([owner]) => {
+  observe?: (png: BinwalkNgPngObservation) => void,
+): Promise<BinwalkNgPngObservation> => {
+  return withFiles(scope, [path], operation, signal, async ([owner]) => {
     if (owner === undefined) throw new Error("Missing acquired PNG descriptor");
-    const size = (await owner.handle.stat()).size;
+    const initial = await owner.handle.stat({ bigint: true });
+    const size = Number(initial.size);
     if (size < 24 || size > FIRMWARE_LIMITS.reportBytes)
       throw new AnalysisOutputError(
         operation,
@@ -147,14 +197,33 @@ export const inspectBinwalkNgPng = async (
         operation,
         "Native PNG header does not match the 2048x1024 source profile",
       );
-    return { ...dimensions, size };
+    const hash = createHash("sha256");
+    for await (const chunk of owner.handle.createReadStream({
+      autoClose: false,
+      start: 0,
+      signal,
+    })) {
+      signal.throwIfAborted();
+      hash.update(chunk);
+    }
+    if (
+      !sameRegularFileState(initial, await owner.handle.stat({ bigint: true }))
+    )
+      throw new AnalysisOutputError(
+        operation,
+        "Private PNG changed during inspection",
+      );
+    const png: BinwalkNgPngObservation = {
+      ...dimensions,
+      size,
+      sha256: hash.digest("hex"),
+      validation: "png_header",
+      path: null,
+      publication_state: "unpublished",
+    };
+    observe?.(png);
+    return png;
   });
-  return {
-    ...header,
-    sha256: await hashFirmwareFile(path, signal),
-    validation: "png_header" as const,
-    path: null as string | null,
-  };
 };
 
 /** Fresh, verified regular-file publication; nonregular entries remain metadata. */
@@ -163,6 +232,8 @@ export const publishBinwalkNgFiles = async (context: {
   entries: readonly FirmwareEntry[];
   signal: AbortSignal;
   operation: string;
+  scope?: ArtifactResourceScope;
+  expectedIdentities?: ReadonlyMap<string, string> | undefined;
   ownTree(tree: SafeOutputTree): void;
   releaseTree(): void;
 }) => {
@@ -199,12 +270,34 @@ export const publishBinwalkNgFiles = async (context: {
         });
         continue;
       }
-      const sha256 = await hashFirmwareFile(entry.path, context.signal);
-      await tree.write(
-        entry.relativePath,
-        createReadStream(entry.path),
-        { sha256, bytes: entry.size },
+      const sha256 = await hashFirmwareFile(
+        entry.path,
         context.signal,
+        context.scope,
+        context.operation,
+      );
+      const expected = context.expectedIdentities?.get(entry.relativePath);
+      if (expected !== undefined && expected !== sha256)
+        throw new AnalysisOutputError(
+          context.operation,
+          `Artifact changed after independent inspection: ${entry.relativePath}`,
+        );
+      const outputTree = tree;
+      await withFirmwareFile(
+        entry.path,
+        context.operation,
+        context.signal,
+        context.scope,
+        async (handle) =>
+          outputTree.write(
+            entry.relativePath,
+            handle.createReadStream({
+              autoClose: false,
+              signal: context.signal,
+            }),
+            { sha256, bytes: entry.size },
+            context.signal,
+          ),
       );
       files.push({
         relative_path: entry.relativePath,

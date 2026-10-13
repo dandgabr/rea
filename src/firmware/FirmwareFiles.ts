@@ -1,15 +1,27 @@
+import { AnalysisError } from "../domain/analysisErrorBase.js";
+import { projectAnalysisError } from "../domain/analysisErrorProjection.js";
+import { jsonValueSchema } from "../domain/jsonValue.js";
 import { createHash } from "node:crypto";
-import { constants, createReadStream, createWriteStream } from "node:fs";
+import { createReadStream, createWriteStream } from "node:fs";
 import {
   chmod,
   lstat,
   mkdir,
   opendir,
-  open,
   readlink,
   realpath,
 } from "node:fs/promises";
 import { basename, isAbsolute, join, relative, sep } from "node:path";
+import type { FileHandle } from "node:fs/promises";
+import { ArtifactResourceScope } from "../artifacts/ArtifactResourceScope.js";
+import { OwnedFileHandle } from "../filesystem/OwnedFileHandle.js";
+import {
+  openRegularFile,
+  RegularFileAdmissionFailure,
+  sameRegularFileState,
+} from "../filesystem/RegularFile.js";
+import { absoluteCallerPath } from "../filesystem/callerPath.js";
+import { ProviderCleanupError } from "../domain/providerCleanupError.js";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import {
@@ -17,7 +29,6 @@ import {
   AnalysisInputError,
   AnalysisOutputError,
 } from "../domain/analysisErrorCore.js";
-import { absoluteCallerPath } from "../filesystem/callerPath.js";
 import { readBoundedFileBytes } from "../process/BoundedFileBytes.js";
 import { FIRMWARE_LIMITS } from "./FirmwareRelease.js";
 import { compareUnicodeCodePoints } from "../domain/unicodeCodePointOrder.js";
@@ -38,25 +49,130 @@ const throwIfFirmwareInventoryCancelled = (
   if (signal?.aborted === true) throw new AnalysisCancelledError(operation);
 };
 
-/** Hash a regular tool or extracted file without retaining its bytes in memory. */
+/** Retains a standalone caller's descriptor scope when cleanup cannot be confirmed. */
+export class FirmwareFileCleanupError extends ProviderCleanupError {
+  constructor(
+    readonly resourceScope: ArtifactResourceScope,
+    path: string,
+    operation: string,
+    cause: unknown,
+    primary?: unknown,
+  ) {
+    super(
+      "firmware",
+      [path],
+      {
+        reason: "Owned firmware descriptor could not be closed",
+        ...(primary === undefined
+          ? {}
+          : {
+              primary_error: jsonValueSchema.parse(
+                primary instanceof AnalysisError
+                  ? projectAnalysisError(primary)
+                  : {
+                      reason:
+                        primary instanceof Error
+                          ? primary.message
+                          : String(primary),
+                    },
+              ),
+            }),
+      },
+      { operation, cause },
+    );
+    if (
+      primary instanceof AnalysisError &&
+      primary.partialObservation !== undefined
+    )
+      this.retainPartialObservation(primary.partialObservation);
+  }
+}
+
+/** Authoritative nonblocking regular-file admission and retained descriptor cleanup. */
+export const withFirmwareFile = async <T>(
+  path: string,
+  operation: string,
+  signal: AbortSignal | undefined,
+  scope: ArtifactResourceScope | undefined,
+  use: (handle: FileHandle) => Promise<T>,
+): Promise<T> => {
+  const resources = scope ?? new ArtifactResourceScope();
+  let owner: OwnedFileHandle;
+  try {
+    owner = new OwnedFileHandle(
+      await openRegularFile(path, { symlinks: "reject", signal }),
+    );
+  } catch (cause: unknown) {
+    if (cause instanceof RegularFileAdmissionFailure) {
+      const retry = await resources.release({
+        kind: "file-handle",
+        resource: path,
+        handle: cause.owner,
+      });
+      if (retry.kind === "released") throw cause.cause;
+      throw new FirmwareFileCleanupError(
+        resources,
+        path,
+        operation,
+        cause,
+        signal?.aborted
+          ? new AnalysisCancelledError(operation, { cause: cause.cause })
+          : cause.cause,
+      );
+    }
+    throw cause;
+  }
+  let primary: unknown;
+  try {
+    signal?.throwIfAborted();
+    return await use(owner.handle);
+  } catch (cause: unknown) {
+    primary = signal?.aborted
+      ? new AnalysisCancelledError(operation, { cause })
+      : cause;
+    throw cause;
+  } finally {
+    const attempt = await resources.release({
+      kind: "file-handle",
+      resource: path,
+      handle: owner,
+    });
+    if (attempt.kind === "failed")
+      throw new FirmwareFileCleanupError(
+        resources,
+        path,
+        operation,
+        attempt.cause,
+        primary,
+      );
+  }
+};
+
+/** Hash a stable regular tool or extracted file without retaining its bytes in memory. */
 export const hashFirmwareFile = async (
   path: string,
   signal?: AbortSignal,
-): Promise<string> => {
-  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-  const hash = createHash("sha256");
-  try {
-    if (!(await handle.stat()).isFile())
-      throw new Error(`Not a regular file: ${path}`);
-    for await (const chunk of handle.createReadStream({ autoClose: false })) {
+  scope?: ArtifactResourceScope,
+  operation = "firmware_file_identity",
+): Promise<string> =>
+  withFirmwareFile(path, operation, signal, scope, async (handle) => {
+    const initial = await handle.stat({ bigint: true });
+    const hash = createHash("sha256");
+    for await (const chunk of handle.createReadStream({
+      autoClose: false,
+      ...(signal === undefined ? {} : { signal }),
+    })) {
       signal?.throwIfAborted();
       hash.update(chunk);
     }
-  } finally {
-    await handle.close();
-  }
-  return hash.digest("hex");
-};
+    signal?.throwIfAborted();
+    if (!sameRegularFileState(initial, await handle.stat({ bigint: true })))
+      throw new AnalysisOutputError(
+        operation,
+        `File changed while being identified: ${path}`,
+      );
+    return hash.digest("hex");
+  });
 
 /** Copy and identify the exact bytes consumed by firmware providers. */
 export const snapshotFirmware = async (
@@ -71,51 +187,65 @@ export const snapshotFirmware = async (
   },
   root: string,
   signal: AbortSignal,
+  scope?: ArtifactResourceScope,
 ) => {
+  signal.throwIfAborted();
   const sourcePath = absoluteCallerPath(request.input.path);
   const source = await realpath(sourcePath);
-  const handle = await open(source, constants.O_RDONLY | constants.O_NOFOLLOW);
   const fullPath = join(root, "source", basename(sourcePath));
   const hash = createHash("sha256");
   let size = 0;
-  try {
-    const stat = await handle.stat();
-    if (
-      !stat.isFile() ||
-      stat.size === 0 ||
-      stat.size > FIRMWARE_LIMITS.inputBytes
-    )
-      throw new AnalysisInputError(request.operation, undefined, [
-        {
-          path: ["path"],
-          reason: "out_of_range",
-          message: `Firmware must be a nonempty regular file no larger than ${FIRMWARE_LIMITS.inputBytes} bytes`,
+  await withFirmwareFile(
+    source,
+    request.operation,
+    signal,
+    scope,
+    async (handle) => {
+      const initial = await handle.stat({ bigint: true });
+      const stat = await handle.stat();
+      if (
+        !stat.isFile() ||
+        stat.size === 0 ||
+        stat.size > FIRMWARE_LIMITS.inputBytes
+      )
+        throw new AnalysisInputError(request.operation, undefined, [
+          {
+            path: ["path"],
+            reason: "out_of_range",
+            message: `Firmware must be a nonempty regular file no larger than ${FIRMWARE_LIMITS.inputBytes} bytes`,
+          },
+        ]);
+      await mkdir(join(root, "source"), { mode: 0o700 });
+      const meter = new Transform({
+        transform(chunk: Buffer, _encoding, callback) {
+          size += chunk.length;
+          if (size > FIRMWARE_LIMITS.inputBytes) {
+            callback(new Error("Firmware grew beyond the input byte budget"));
+            return;
+          }
+          hash.update(chunk);
+          callback(null, chunk);
         },
-      ]);
-    await mkdir(join(root, "source"), { mode: 0o700 });
-    const meter = new Transform({
-      transform(chunk: Buffer, _encoding, callback) {
-        size += chunk.length;
-        if (size > FIRMWARE_LIMITS.inputBytes) {
-          callback(new Error("Firmware grew beyond the input byte budget"));
-          return;
-        }
-        hash.update(chunk);
-        callback(null, chunk);
-      },
-    });
-    await pipeline(
-      handle.createReadStream({ autoClose: false }),
-      meter,
-      createWriteStream(fullPath, { flags: "wx", mode: 0o600 }),
-      { signal },
-    );
-  } finally {
-    await handle.close();
-  }
+      });
+      await pipeline(
+        handle.createReadStream({ autoClose: false }),
+        meter,
+        createWriteStream(fullPath, { flags: "wx", mode: 0o600 }),
+        { signal },
+      );
+      if (!sameRegularFileState(initial, await handle.stat({ bigint: true })))
+        throw new AnalysisOutputError(
+          request.operation,
+          "Firmware changed during snapshot admission",
+        );
+    },
+  );
   await chmod(fullPath, 0o400);
   const sha256 = hash.digest("hex");
-  if ((await hashFirmwareFile(fullPath, signal)) !== sha256)
+  if (
+    (await hashFirmwareFile(fullPath, signal, scope, request.operation)) !==
+    sha256
+  )
     throw new AnalysisOutputError(
       request.operation,
       "Immutable input snapshot digest readback failed",
@@ -152,7 +282,7 @@ export const snapshotFirmware = async (
       sha256:
         selected === undefined
           ? sha256
-          : await hashFirmwareFile(inputPath, signal),
+          : await hashFirmwareFile(inputPath, signal, scope, request.operation),
     },
   };
 };
@@ -161,14 +291,16 @@ export const snapshotFirmware = async (
 export const readFirmwareReport = async (
   path: string,
   operation: string,
-): Promise<unknown> => {
-  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-  try {
+  signal?: AbortSignal,
+  scope?: ArtifactResourceScope,
+): Promise<unknown> =>
+  withFirmwareFile(path, operation, signal, scope, async (handle) => {
     if (!(await handle.stat()).isFile())
       throw new AnalysisOutputError(operation, "Report is not a regular file");
     const bytes = await readBoundedFileBytes(
       handle,
       FIRMWARE_LIMITS.reportBytes,
+      signal,
     );
     if (bytes === undefined)
       throw new AnalysisOutputError(
@@ -189,10 +321,7 @@ export const readFirmwareReport = async (
         { cause },
       );
     }
-  } finally {
-    await handle.close();
-  }
-};
+  });
 
 /** Inventory private output without following links, enforcing aggregate staging budgets. */
 export const inventoryFirmwareOutput = async (
@@ -228,15 +357,19 @@ export const inventoryFirmwareOutput = async (
     });
     if (handle === undefined) continue;
     const names: string[] = [];
-    for await (const entry of handle) {
-      throwIfFirmwareInventoryCancelled(signal, operation);
-      count++;
-      if (count > maxEntries)
-        throw new AnalysisOutputError(
-          operation,
-          `Staging entry budget exceeded (${maxEntries})`,
-        );
-      names.push(entry.name);
+    try {
+      for await (const entry of handle) {
+        throwIfFirmwareInventoryCancelled(signal, operation);
+        count++;
+        if (count > maxEntries)
+          throw new AnalysisOutputError(
+            operation,
+            `Staging entry budget exceeded (${maxEntries})`,
+          );
+        names.push(entry.name);
+      }
+    } finally {
+      await handle.close().catch(() => undefined);
     }
     for (const name of names.sort()) {
       const path = join(directory, name);

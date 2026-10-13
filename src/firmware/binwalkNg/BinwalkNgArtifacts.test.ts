@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, it, vi } from "vitest";
@@ -6,6 +7,7 @@ import { ArtifactResourceScope } from "../../artifacts/ArtifactResourceScope.js"
 import { SafeOutputTree } from "../../artifacts/SafeOutputTree.js";
 import { OwnedFileHandle } from "../../filesystem/OwnedFileHandle.js";
 import {
+  inspectBinwalkNgPng,
   publishBinwalkNgFiles,
   verifyBinwalkNgCarving,
 } from "./BinwalkNgArtifacts.js";
@@ -34,12 +36,14 @@ it("requires actual source bytes, bounds and a nonempty regular carving before a
   };
   try {
     expect(await verifyBinwalkNgCarving(context)).toEqual({
+      sha256: createHash("sha256").update("cd").digest("hex"),
       local_range: { offset: 2, length: 2 },
       original_file_range: { offset: 18, length: 2 },
     });
     expect(
       await verifyBinwalkNgCarving({ ...context, rootOffset: null }),
     ).toEqual({
+      sha256: createHash("sha256").update("cd").digest("hex"),
       local_range: { offset: 2, length: 2 },
       original_file_range: null,
     });
@@ -72,6 +76,7 @@ it("retains failed descriptor owners and closes all comparison handles before re
   await writeFile(inputPath, "same");
   await writeFile(path, "same");
   const scope = new ArtifactResourceScope();
+  const observed: unknown[] = [];
   const close = vi
     .spyOn(OwnedFileHandle.prototype, "close")
     .mockRejectedValueOnce(new Error("injected close failure"));
@@ -84,6 +89,7 @@ it("retains failed descriptor owners and closes all comparison handles before re
         scope,
         signal: new AbortController().signal,
         operation: "carve_firmware",
+        observe: (proof) => observed.push(proof),
         entry: {
           path,
           relativePath: "input.bin_0_gzip.raw",
@@ -96,6 +102,12 @@ it("retains failed descriptor owners and closes all comparison handles before re
       cleanupIncomplete: true,
       cleanupResources: [inputPath],
     });
+    expect(observed).toEqual([
+      expect.objectContaining({
+        sha256: createHash("sha256").update("same").digest("hex"),
+        original_file_range: { offset: 0, length: 4 },
+      }),
+    ]);
     expect(close).toHaveBeenCalledTimes(2);
     await scope.retryCleanup();
     expect(close).toHaveBeenCalledTimes(3);
@@ -147,5 +159,51 @@ it("preserves durably published files when commit reports a later cleanup failur
   } finally {
     commit.mockRestore();
     await owned?.rollback();
+  }
+});
+
+it("delivers established private PNG facts to their observation owner before a descriptor close failure", async () => {
+  const root = await createTestTempDirectory("rea-ng-png-close-");
+  const path = join(root, "entropy.png");
+  const bytes = Buffer.alloc(24);
+  Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(bytes);
+  bytes.writeUInt32BE(13, 8);
+  bytes.write("IHDR", 12);
+  bytes.writeUInt32BE(2048, 16);
+  bytes.writeUInt32BE(1024, 20);
+  await writeFile(path, bytes);
+  const scope = new ArtifactResourceScope();
+  const observed: unknown[] = [];
+  const close = vi
+    .spyOn(OwnedFileHandle.prototype, "close")
+    .mockRejectedValueOnce(new Error("injected PNG descriptor failure"));
+  try {
+    await expect(
+      inspectBinwalkNgPng(
+        path,
+        scope,
+        new AbortController().signal,
+        "inspect_firmware_entropy",
+        (png) => observed.push(png),
+      ),
+    ).rejects.toMatchObject({
+      cleanupIncomplete: true,
+      cleanupResources: [path],
+    });
+    expect(observed).toEqual([
+      expect.objectContaining({
+        size: 24,
+        width: 2048,
+        height: 1024,
+        path: null,
+        publication_state: "unpublished",
+        sha256: createHash("sha256").update(bytes).digest("hex"),
+      }),
+    ]);
+    await scope.retryCleanup();
+    expect(close).toHaveBeenCalledTimes(2);
+  } finally {
+    close.mockRestore();
+    await scope.close();
   }
 });

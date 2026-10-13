@@ -24,6 +24,7 @@ import {
   inspectBinwalkNgPng,
   publishBinwalkNgFiles,
   verifyBinwalkNgCarving,
+  type BinwalkNgCarvingObservation,
 } from "./BinwalkNgArtifacts.js";
 import {
   probeBinwalkNgSandbox,
@@ -63,13 +64,14 @@ interface QueuedFile {
   sha256: string;
 }
 interface FileLineage {
-  analysis_depth: number;
-  parent_analysis_file: string;
+  analysis_depth: number | null;
+  parent_analysis_file: string | null;
   parent_signature_ids: string[];
   runtime_address: null;
   original_file_range: { offset: number; length: number } | null;
   local_range: { offset: number; length: number } | null;
   byte_correspondence: "verified" | "unknown";
+  carving_observation: Awaited<ReturnType<typeof verifyBinwalkNgCarving>>;
 }
 
 const nativeScanOptions = (options: {
@@ -140,9 +142,13 @@ export const runBinwalkNgWorkflow = async (
     parent_file: string | null;
     returned: boolean;
   }[] = [];
-  const unexamined: { path: string; reason: string; depth: number }[] = [];
+  const unexamined: { path: string; reason: string; depth: number | null }[] =
+    [];
   const lineages = new Map<string, FileLineage>();
   const diagnostics: string[] = [];
+  let pngObservation:
+    | Awaited<ReturnType<typeof inspectBinwalkNgPng>>
+    | undefined;
   let entropyObservation: ReturnType<typeof parseBinwalkNgEntropy> | undefined;
   const queue: QueuedFile[] = [
     {
@@ -157,12 +163,15 @@ export const runBinwalkNgWorkflow = async (
   const publication = (
     entries: readonly FirmwareEntry[],
     outputDirectory: string,
+    expectedIdentities?: ReadonlyMap<string, string>,
   ) =>
     publishBinwalkNgFiles({
       entries,
       outputDirectory,
       signal,
       operation: request.operation,
+      scope: context.scope,
+      expectedIdentities,
       ownTree: context.ownTree,
       releaseTree: context.releaseTree,
     });
@@ -176,6 +185,11 @@ export const runBinwalkNgWorkflow = async (
       unexamined_files: unexamined,
       diagnostics,
       coverage: "partial",
+      artifact_observations: [...lineages].map(([relative_path, lineage]) => ({
+        relative_path,
+        ...lineage,
+      })),
+      ...(pngObservation === undefined ? {} : { png: pngObservation }),
       ...(entropyObservation === undefined
         ? {}
         : { entropy: entropyObservation }),
@@ -195,6 +209,9 @@ export const runBinwalkNgWorkflow = async (
         ...context.runtime,
         inputPath: file.inputPath,
         workRoot,
+        signal,
+        scope: context.scope,
+        operation: request.operation,
       });
       const reportPath = join(workRoot, "reports", `${pass}.json`);
       const pngPath = join(workRoot, "entropy.png");
@@ -269,6 +286,8 @@ export const runBinwalkNgWorkflow = async (
         engine: "binwalk-ng",
         operation: request.operation,
         execution,
+        signal,
+        scope: context.scope,
       });
       runs.push(
         jsonValueSchema.parse({
@@ -303,8 +322,12 @@ export const runBinwalkNgWorkflow = async (
           context.scope,
           signal,
           request.operation,
+          (png) => {
+            pngObservation = png;
+          },
         );
-        await recheckRuntime(sandbox, signal, request.operation);
+        pngObservation = png;
+        await recheckRuntime(sandbox, signal, request.operation, context.scope);
         if (request.input.output_directory !== undefined) {
           const output = await publication(
             [
@@ -317,8 +340,16 @@ export const runBinwalkNgWorkflow = async (
               },
             ],
             request.input.output_directory,
+            new Map([["entropy.png", png.sha256]]),
           );
-          png.path = output.files[0]?.path ?? null;
+          const publishedPng = output.files[0];
+          if (publishedPng?.sha256 !== png.sha256)
+            throw new AnalysisOutputError(
+              request.operation,
+              "Private PNG identity changed before publication",
+            );
+          png.path = publishedPng.path;
+          png.publication_state = "published";
         }
         return {
           result: {
@@ -376,7 +407,7 @@ export const runBinwalkNgWorkflow = async (
         diagnostics.push(
           `Native report omitted admitted file ${reportedPath}; examination remains unknown`,
         );
-      await recheckRuntime(sandbox, signal, request.operation);
+      await recheckRuntime(sandbox, signal, request.operation, context.scope);
       if (!producingArtifacts)
         return {
           result: {
@@ -410,6 +441,19 @@ export const runBinwalkNgWorkflow = async (
           nativeOutput,
           workRoot,
         );
+        const retainCarving = (carving: BinwalkNgCarvingObservation | null) =>
+          lineages.set(entry.relativePath, {
+            analysis_depth: file.depth + 1,
+            parent_analysis_file: reportedPath,
+            parent_signature_ids: owners.map(
+              (owner) => owner.provider_local_id,
+            ),
+            runtime_address: null,
+            original_file_range: carving?.original_file_range ?? null,
+            local_range: carving?.local_range ?? null,
+            byte_correspondence: carving === null ? "unknown" : "verified",
+            carving_observation: carving,
+          });
         const carving =
           request.operation === "carve_firmware" || request.input.options.carve
             ? await verifyBinwalkNgCarving({
@@ -420,17 +464,10 @@ export const runBinwalkNgWorkflow = async (
                 scope: context.scope,
                 signal,
                 operation: request.operation,
+                observe: retainCarving,
               })
             : null;
-        lineages.set(entry.relativePath, {
-          analysis_depth: file.depth + 1,
-          parent_analysis_file: reportedPath,
-          parent_signature_ids: owners.map((owner) => owner.provider_local_id),
-          runtime_address: null,
-          original_file_range: carving?.original_file_range ?? null,
-          local_range: carving?.local_range ?? null,
-          byte_correspondence: carving === null ? "unknown" : "verified",
-        });
+        retainCarving(carving);
         if (
           request.operation !== "extract_firmware" ||
           !request.input.options.recursive
@@ -469,21 +506,71 @@ export const runBinwalkNgWorkflow = async (
           { operation: request.operation, input: { path: entry.path } },
           childRoot,
           signal,
+          context.scope,
         );
         queue.push({
           inputPath: child.inputPath,
           size: child.selection.length,
-          rootOffset: carving?.original_file_range?.offset ?? null,
+          rootOffset:
+            child.selection.sha256 === carving?.sha256
+              ? (carving.original_file_range?.offset ?? null)
+              : null,
           depth: nextDepth,
           parentPath: reportedPath,
           sha256: child.selection.sha256,
         });
       }
       if (queue.length === 0) {
+        for (const entry of entries)
+          if (!lineages.has(entry.relativePath)) {
+            lineages.set(entry.relativePath, {
+              analysis_depth: null,
+              parent_analysis_file: null,
+              parent_signature_ids: [],
+              runtime_address: null,
+              original_file_range: null,
+              local_range: null,
+              byte_correspondence: "unknown",
+              carving_observation: null,
+            });
+            unexamined.push({
+              path: entry.relativePath,
+              reason: "unattributed_output",
+              depth: null,
+            });
+            diagnostics.push(
+              `Final inventory contains unattributed output ${entry.relativePath}; parent and examination remain unknown`,
+            );
+          }
         const published = await publication(
           entries,
           request.input.output_directory,
         );
+        const finalLineage = (entry: {
+          relative_path: string;
+          sha256?: string;
+        }) => {
+          const lineage = lineages.get(entry.relative_path);
+          if (
+            lineage?.byte_correspondence === "verified" &&
+            lineage.carving_observation?.sha256 !== entry.sha256
+          ) {
+            diagnostics.push(
+              `Artifact bytes changed after carving comparison: ${entry.relative_path}; prior observation retained, current correspondence unknown`,
+            );
+            return {
+              ...lineage,
+              byte_correspondence: "unknown",
+              original_file_range: null,
+              local_range: null,
+            };
+          }
+          return lineage;
+        };
+        const finalFiles = published.files.map((entry) => ({
+          ...entry,
+          ...finalLineage(entry),
+        }));
         return {
           result: {
             provider_id: "binwalk-ng",
@@ -491,9 +578,10 @@ export const runBinwalkNgWorkflow = async (
             input_size: target.size,
             selection: target.selection,
             ...published,
-            files: published.files.map((entry) => ({
+            files: finalFiles,
+            unpublished_entries: published.unpublished_entries.map((entry) => ({
               ...entry,
-              ...lineages.get(entry.relative_path),
+              ...finalLineage(entry),
             })),
             analyses,
             attempted_files: attempted,
@@ -549,6 +637,7 @@ const recheckRuntime = async (
   sandbox: Awaited<ReturnType<typeof prepareBinwalkNgSandbox>>,
   signal: AbortSignal,
   operation: string,
+  scope: ArtifactResourceScope,
 ) => {
   const identities = [
     sandbox.command,
@@ -561,7 +650,10 @@ const recheckRuntime = async (
     })),
   ];
   for (const identity of identities)
-    if ((await hashFirmwareFile(identity.path, signal)) !== identity.sha256)
+    if (
+      (await hashFirmwareFile(identity.path, signal, scope, operation)) !==
+      identity.sha256
+    )
       throw new AnalysisOutputError(
         operation,
         `Selected runtime identity changed; producing attribution is unknown: ${identity.path}`,

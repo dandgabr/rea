@@ -1,3 +1,5 @@
+import type { ArtifactResourceScope } from "../../artifacts/ArtifactResourceScope.js";
+import { AnalysisError } from "../../domain/analysisErrorBase.js";
 import { constants } from "node:fs";
 import { access, lstat, mkdir, realpath } from "node:fs/promises";
 import { basename, isAbsolute, join, posix, relative, sep } from "node:path";
@@ -52,7 +54,13 @@ const allowedDestination = (destination: string, kind: string) => {
 export const identifyBinwalkNgRuntimeFile = async (
   configured: string,
   executable: boolean,
+  context?: {
+    signal?: AbortSignal;
+    scope?: ArtifactResourceScope;
+    operation?: string;
+  },
 ) => {
+  context?.signal?.throwIfAborted();
   if (!isAbsolute(configured) || configured.includes("\0"))
     throw unavailable("Runtime paths must be explicit absolute local paths");
   try {
@@ -65,9 +73,19 @@ export const identifyBinwalkNgRuntimeFile = async (
     return {
       configured_path: configured,
       path,
-      sha256: await hashFirmwareFile(path),
+      sha256: await hashFirmwareFile(
+        path,
+        context?.signal,
+        context?.scope,
+        context?.operation,
+      ),
     };
   } catch (cause: unknown) {
+    if (
+      context?.signal?.aborted ||
+      (cause instanceof AnalysisError && cause.cleanupIncomplete)
+    )
+      throw cause;
     throw unavailable(
       `Cannot identify selected runtime file ${configured}: ${cause instanceof Error ? cause.message : String(cause)}`,
     );
@@ -82,12 +100,27 @@ export const prepareBinwalkNgSandbox = async (input: {
   readonly manifest: string;
   readonly inputPath: string;
   readonly workRoot: string;
+  readonly signal?: AbortSignal;
+  readonly scope?: ArtifactResourceScope;
+  readonly operation?: string;
 }) => {
   if (process.platform !== "linux")
     throw unavailable("binwalk-ng containment requires Linux");
-  const command = await identifyBinwalkNgRuntimeFile(input.command, true);
-  const bubblewrap = await identifyBinwalkNgRuntimeFile(input.bubblewrap, true);
-  const limiter = await identifyBinwalkNgRuntimeFile(input.limiter, true);
+  const command = await identifyBinwalkNgRuntimeFile(
+    input.command,
+    true,
+    input,
+  );
+  const bubblewrap = await identifyBinwalkNgRuntimeFile(
+    input.bubblewrap,
+    true,
+    input,
+  );
+  const limiter = await identifyBinwalkNgRuntimeFile(
+    input.limiter,
+    true,
+    input,
+  );
   if (!isAbsolute(input.manifest))
     throw unavailable(
       "Runtime manifest must be an explicit absolute file path",
@@ -95,9 +128,15 @@ export const prepareBinwalkNgSandbox = async (input: {
   const manifestFile = await identifyBinwalkNgRuntimeFile(
     input.manifest,
     false,
+    input,
   );
   const parsed = manifestSchema.safeParse(
-    await readFirmwareReport(manifestFile.path, "binwalk_ng_confinement"),
+    await readFirmwareReport(
+      manifestFile.path,
+      input.operation ?? "binwalk_ng_confinement",
+      input.signal,
+      input.scope,
+    ),
   );
   if (!parsed.success)
     throw unavailable(
@@ -118,6 +157,7 @@ export const prepareBinwalkNgSandbox = async (input: {
   const destinations = new Set<string>();
   const runtimeMounts = [];
   for (const mount of parsed.data.mounts) {
+    input.signal?.throwIfAborted();
     if (!allowedDestination(mount.destination, mount.kind))
       throw unavailable(`Unsafe runtime destination: ${mount.destination}`);
     if (destinations.has(mount.destination))
@@ -126,6 +166,7 @@ export const prepareBinwalkNgSandbox = async (input: {
     const identified = await identifyBinwalkNgRuntimeFile(
       mount.source,
       mount.kind === "executable",
+      input,
     );
     if (inside(workRoot, identified.path))
       throw unavailable(
@@ -143,6 +184,7 @@ export const prepareBinwalkNgSandbox = async (input: {
     throw unavailable(
       "The provider executable cannot be inside its writable workspace",
     );
+  input.signal?.throwIfAborted();
   await mkdir(join(workRoot, "home"), { recursive: true });
   await mkdir(join(workRoot, "tmp"), { recursive: true });
   const inputDestination = `/input/${basename(input.inputPath)}`;

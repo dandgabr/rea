@@ -1,3 +1,4 @@
+import type { ArtifactResourceScope } from "../artifacts/ArtifactResourceScope.js";
 import { join, isAbsolute } from "node:path";
 import { z } from "zod";
 import type { FirmwareAnalysisPort } from "../application/firmware/FirmwareAnalysisPort.js";
@@ -40,7 +41,11 @@ import {
   readFirmwareCommandReport,
   type FirmwareLauncher,
 } from "./FirmwareCommand.js";
-import { inventoryFirmwareOutput, snapshotFirmware } from "./FirmwareFiles.js";
+import {
+  FirmwareFileCleanupError,
+  inventoryFirmwareOutput,
+  snapshotFirmware,
+} from "./FirmwareFiles.js";
 import {
   normalizeBinwalkReport,
   normalizeUnblobReport,
@@ -105,6 +110,10 @@ const limitations = [
 export class FirmwareProvider implements FirmwareAnalysisPort {
   #tail: Promise<void> = Promise.resolve();
   #closed = false;
+  readonly #pendingScopes = new Map<
+    ArtifactResourceScope,
+    { resources: readonly string[]; operation: string }
+  >();
   readonly #pendingCleanup = new Map<string, PendingFirmwareCleanup>();
   constructor(
     readonly environment: Readonly<
@@ -158,6 +167,22 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
   async #retryCleanup(): Promise<FirmwareCleanupAttempt> {
     const failures: ProviderCleanupError[] = [];
     let processUnverified = false;
+    for (const [scope, observation] of this.#pendingScopes) {
+      try {
+        await scope.retryCleanup();
+        this.#pendingScopes.delete(scope);
+      } catch (cause: unknown) {
+        processUnverified = true;
+        failures.push(
+          new ProviderCleanupError(
+            "firmware",
+            observation.resources,
+            { reason: String(cause) },
+            { operation: observation.operation, cause },
+          ),
+        );
+      }
+    }
     for (const [path, pending] of this.#pendingCleanup) {
       try {
         const stopped = await pending.supervisor?.stop();
@@ -427,6 +452,17 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
         ),
       );
     } catch (cause: unknown) {
+      const visited = new Set<unknown>();
+      let nested = cause;
+      while (nested instanceof Error && !visited.has(nested)) {
+        visited.add(nested);
+        if (nested instanceof FirmwareFileCleanupError)
+          this.#pendingScopes.set(nested.resourceScope, {
+            resources: nested.cleanupResources,
+            operation: nested.operation,
+          });
+        nested = nested.cause;
+      }
       outcome = err(
         cause instanceof ProviderCleanupError
           ? cause
