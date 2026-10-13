@@ -205,12 +205,15 @@ export const hashFirmwareFile = async (
   withFirmwareFile(path, operation, signal, scope, async (handle) => {
     const initial = await handle.stat({ bigint: true });
     const hash = createHash("sha256");
-    for await (const chunk of handle.createReadStream({
-      autoClose: false,
-      ...(signal === undefined ? {} : { signal }),
-    })) {
+    // Aborting a FileHandle stream can close its FD even with autoClose false.
+    // Await reads on the admitted handle so its scoped owner alone closes it.
+    const buffer = Buffer.allocUnsafe(64 * 1024);
+    for (;;) {
       signal?.throwIfAborted();
-      hash.update(chunk);
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, null);
+      signal?.throwIfAborted();
+      if (bytesRead === 0) break;
+      hash.update(buffer.subarray(0, bytesRead));
     }
     signal?.throwIfAborted();
     if (!sameRegularFileState(initial, await handle.stat({ bigint: true })))
