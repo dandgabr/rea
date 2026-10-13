@@ -10,7 +10,13 @@ import { ProviderAdapterError } from "../../domain/providerAdapterError.js";
 import { projectAnalysisError } from "../../domain/analysisErrorProjection.js";
 import { ProviderCleanupError } from "../../domain/providerCleanupError.js";
 import { PrivateRuntimeRoot } from "../../process/PrivateRuntimeRoot.js";
-import type { ProviderProcessSupervisor } from "../../process/ProviderProcess.js";
+import { ProviderProcessSupervisor } from "../../process/ProviderProcess.js";
+import { randomUUID } from "node:crypto";
+import {
+  admitPodmanExistingProgram,
+  existingPodmanProgramArguments,
+  type PodmanExistingProgramSelection,
+} from "./PodmanFixedProgram.js";
 import {
   runFirmwareCommand,
   type FirmwareLauncher,
@@ -45,6 +51,19 @@ export const podmanImmutableImageSchema = z
     return parsed !== null && parsed[1]!.length <= 255;
   });
 
+/** Existing-service metadata excludes caller environment/configuration materialization. */
+export const PODMAN_EXISTING_GENERATION_FORMAT =
+  '--format=[{"Id":{{json .ID}},"Image":{{json .Image}},"State":{"Running":{{json .State.Running}},"Pid":{{json .State.Pid}},"StartedAt":{{json .State.StartedAt}}}}]';
+export const podmanExistingGenerationCommand = (
+  containerId: string,
+): readonly string[] =>
+  Object.freeze([
+    "inspect",
+    PODMAN_EXISTING_GENERATION_FORMAT,
+    "--",
+    containerId,
+  ]);
+
 /** Only fixed currently supported protocols are admitted; operands always follow '--'. */
 const podmanCommandSchema = z.union([
   z.tuple([z.literal("info"), z.literal("--format=json")]),
@@ -59,6 +78,12 @@ const podmanCommandSchema = z.union([
   z.tuple([
     z.literal("inspect"),
     z.literal("--format=json"),
+    z.literal("--"),
+    z.string().regex(/^[a-f0-9]{64}$/u),
+  ]),
+  z.tuple([
+    z.literal("inspect"),
+    z.literal(PODMAN_EXISTING_GENERATION_FORMAT),
     z.literal("--"),
     z.string().regex(/^[a-f0-9]{64}$/u),
   ]),
@@ -365,26 +390,7 @@ export class PreparedPodmanTransport {
       throw podmanProfileUnavailable(
         "The first prepared transport must verify the selected existing-store metadata before any version/image/container command",
       );
-    const before = await this.#store.recheck(signal, this.#scope);
-    const expected = podmanStoreArguments(
-      this.#store,
-      join(this.#root.path, "hooks"),
-    );
-    if (JSON.stringify(this.#arguments) !== JSON.stringify(expected))
-      throw podmanProfileUnavailable(
-        "Prepared transport omitted or changed a selected store selector before spawn",
-      );
-    for (const selected of [...this.#files, this.#limiter]) {
-      const actual = await identifyPodmanProfileFile(
-        selected.path,
-        signal,
-        this.#scope,
-      );
-      if (JSON.stringify(actual) !== JSON.stringify(selected))
-        throw podmanProfileUnavailable(
-          "Owned transport configuration/authentication or limiter identity changed before spawn",
-        );
-    }
+    const before = await this.#beforeInvocation(signal);
     let result: Awaited<ReturnType<typeof runFirmwareCommand>>;
     try {
       result = await runFirmwareCommand({
@@ -437,6 +443,115 @@ export class PreparedPodmanTransport {
       this.#metadataVerified = true;
     }
     return { ...result, store_before: before, store_after: after };
+  }
+
+  /** Reuse the exact admitted store/config/helper/limiter policy for every fixed invocation. */
+  async #beforeInvocation(
+    signal: AbortSignal,
+  ): Promise<PodmanStoreObservation> {
+    if (this.#closed)
+      throw podmanProfileUnavailable("Prepared container transport is closed");
+    const before = await this.#store.recheck(signal, this.#scope);
+    const expected = podmanStoreArguments(
+      this.#store,
+      join(this.#root.path, "hooks"),
+    );
+    if (JSON.stringify(this.#arguments) !== JSON.stringify(expected))
+      throw podmanProfileUnavailable(
+        "Prepared transport omitted or changed a selected store selector before spawn",
+      );
+    for (const selected of [...this.#files, this.#limiter]) {
+      const actual = await identifyPodmanProfileFile(
+        selected.path,
+        signal,
+        this.#scope,
+      );
+      if (JSON.stringify(actual) !== JSON.stringify(selected))
+        throw podmanProfileUnavailable(
+          "Owned transport configuration/authentication or limiter identity changed before spawn",
+        );
+    }
+    return before;
+  }
+
+  /** Fixed stdin protocol; the adapter owns namespace generation and producer cleanup separately. */
+  async openExistingProgram(
+    selection: PodmanExistingProgramSelection,
+    signal: AbortSignal,
+  ) {
+    if (!this.#metadataVerified)
+      throw podmanProfileUnavailable(
+        "Existing execution requires first verified store metadata",
+      );
+    const admitted = admitPodmanExistingProgram(selection);
+    const before = await this.#beforeInvocation(signal);
+    const command = existingPodmanProgramArguments(admitted);
+    const arguments_ = Object.freeze([
+      "--core=0",
+      "--cpu=120",
+      "--",
+      this.#store.selection.podman.resolved_command,
+      ...this.#arguments,
+      ...command,
+    ]);
+    const options = {
+      command: this.#limiter.path,
+      arguments: arguments_,
+      runId: `rea-podman-protocol-${randomUUID()}`,
+      expectedCommand: null,
+      cwd: this.#root.path,
+      hostEnvironment: this.#environment,
+      stdin: "pipe" as const,
+      signal,
+    };
+    // Admit immutable prefix through the same format owner; the suffix is the
+    // adapter-owned fixed program tuple and has no caller-supplied raw flags.
+    admitPodmanInvocationSelectors(
+      [
+        ...this.#arguments,
+        "inspect",
+        "--format=json",
+        "--",
+        admitted.containerId,
+      ],
+      this.#store,
+      join(this.#root.path, "hooks"),
+    );
+    const spawned = await this.#launcher(options);
+    const supervisor = new ProviderProcessSupervisor(
+      {
+        ...spawned,
+        ownsProcessLifetime: true,
+        cleanup:
+          spawned.cleanup ??
+          (async () => ({
+            cleaned: false as const,
+            reason:
+              "Fixed transport has no direct-client cleanup owner; group signaling is refused",
+          })),
+      },
+      { captureStdout: false, maxDiagnosticBytes: 8 * 1024 * 1024 },
+    );
+    this.#pending.add(supervisor);
+    if (spawned.process.stdin == null || spawned.process.stdout == null) {
+      const stopped = await supervisor.stop();
+      if (stopped.status !== "incomplete") this.#pending.delete(supervisor);
+      throw podmanProfileUnavailable(
+        "Fixed stdin protocol client lacks its owned binary streams",
+      );
+    }
+    return {
+      stdin: spawned.process.stdin,
+      stdout: spawned.process.stdout,
+      supervisor,
+      arguments: arguments_,
+      store_before: before,
+      selected_container_id: admitted.containerId,
+      selected_image_id: admitted.imageId,
+      program: { name: admitted.program.name, sha256: admitted.program.sha256 },
+      observeAfter: async (observationSignal: AbortSignal) =>
+        this.#beforeInvocation(observationSignal),
+    };
   }
 
   async #confirmHelperAfterFailure(primary: unknown): Promise<void> {

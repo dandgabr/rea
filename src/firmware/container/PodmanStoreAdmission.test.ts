@@ -1238,3 +1238,215 @@ it("preserves typed primary setup diagnostics and captured bytes after a failed 
     await f.scope.close();
   }
 });
+
+it("binds an isolated fixed stdin program to the exact existing CID without capturing its binary stdout or granting lifecycle argv", async () => {
+  const { FixedPodmanProgram } = await import("./PodmanFixedProgram.js");
+  const f = await fixture();
+  const body = Buffer.from([0x00, 0xff, 0x61]);
+  let delivered: Buffer | undefined;
+  const launcher: FirmwareLauncher = async (options) => {
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    const stdin = new PassThrough();
+    const process = Object.assign(new EventEmitter(), {
+      stdout,
+      stderr,
+      stdin,
+      exitCode: null as number | null,
+      signalCode: null,
+      kill: () => false,
+    });
+    setImmediate(() => {
+      if (options.arguments.includes("exec")) {
+        stdin.on("data", (bytes: Buffer) => {
+          delivered = bytes;
+        });
+        stdin.on("end", () => {
+          stdout.end(body);
+          stderr.end();
+          process.exitCode = 0;
+          process.emit("exit", 0, null);
+          process.emit("close", 0, null);
+        });
+      } else {
+        stdout.end(
+          JSON.stringify({
+            host: { security: { rootless: true } },
+            store: {
+              graphDriverName: "overlay",
+              graphRoot: f.profile.graph_root,
+              runRoot: f.profile.run_root,
+              volumePath: f.profile.volume_path,
+              configFile: options.hostEnvironment!.CONTAINERS_STORAGE_CONF,
+              graphOptions: { "overlay.mountopt": "nodev" },
+              graphStatus: { "Native Overlay Diff": "true" },
+            },
+            version: { Version: "5.8.7" },
+          }),
+        );
+        stderr.end();
+        process.exitCode = 0;
+        process.emit("exit", 0, null);
+        process.emit("close", 0, null);
+      }
+    });
+    return {
+      process,
+      ownership: {
+        runId: options.runId,
+        leaderPid: 987654,
+        processGroupId: 987654,
+      },
+      cleanup: async () => ({ cleaned: true, signaled: false }),
+    };
+  };
+  const transport = await PreparedPodmanTransport.prepare({
+    profile: f.profilePath,
+    command: f.profile.podman.command,
+    limiter: "/usr/bin/prlimit",
+    signal: f.signal,
+    scope: f.scope,
+    launcher,
+  });
+  try {
+    await transport.run(["info", "--format=json"], f.signal);
+    const program = FixedPodmanProgram.define(
+      "controlled-protocol",
+      "import sys;sys.stdout.buffer.write(sys.stdin.buffer.read())",
+    );
+    const client = await transport.openExistingProgram(
+      {
+        containerId: "a".repeat(64),
+        imageId: "b".repeat(64),
+        interpreter: "/usr/bin/python3",
+        namespaceLimiter: "/usr/bin/prlimit",
+        producerFileBytes: 1024,
+        program,
+      },
+      f.signal,
+    );
+    client.stdin.end("private-request-body");
+    const raw: Buffer[] = [];
+    for await (const chunk of client.stdout)
+      raw.push(Buffer.from(chunk as Uint8Array));
+    expect(Buffer.concat(raw)).toEqual(body);
+    const stopped = await client.supervisor.stop();
+    expect(stopped.status).not.toBe("incomplete");
+    expect(delivered?.toString()).toBe("private-request-body");
+    expect(client.supervisor.snapshot().stdout).toMatchObject({
+      bytes: 0,
+      observedBytes: 0,
+      text: "",
+    });
+    expect(client.arguments.slice(0, 4)).toEqual([
+      "--core=0",
+      "--cpu=120",
+      "--",
+      f.profile.podman.command,
+    ]);
+    expect(client.arguments).toContain("--as=1073741824");
+    expect(client.arguments.indexOf("--as=1073741824")).toBeGreaterThan(
+      client.arguments.indexOf("a".repeat(64)),
+    );
+    expect(client.arguments).not.toContain("create");
+    expect(client.arguments).not.toContain("start");
+    await expect(
+      transport.openExistingProgram(
+        {
+          containerId: "--latest",
+          imageId: "b".repeat(64),
+          interpreter: "/usr/bin/python3",
+          namespaceLimiter: "/usr/bin/prlimit",
+          producerFileBytes: 1024,
+          program,
+        },
+        f.signal,
+      ),
+    ).rejects.toThrow(/identity|selection/i);
+  } finally {
+    await transport.close();
+  }
+});
+
+it("admits only the literal existing-service generation template without reading container environments", async () => {
+  const { podmanExistingGenerationCommand } =
+    await import("./PodmanTransport.js");
+  const f = await fixture();
+  const spawned: readonly string[][] = [];
+  const mutable = spawned as string[][];
+  const launcher: FirmwareLauncher = async (options) => {
+    mutable.push([...options.arguments]);
+    const process = Object.assign(new EventEmitter(), {
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+      exitCode: null as number | null,
+      signalCode: null,
+      kill: () => false,
+    });
+    setImmediate(() => {
+      process.stdout.end(
+        options.arguments.includes("info")
+          ? JSON.stringify({
+              host: { security: { rootless: true } },
+              store: {
+                graphDriverName: "overlay",
+                graphRoot: f.profile.graph_root,
+                runRoot: f.profile.run_root,
+                volumePath: f.profile.volume_path,
+                configFile: options.hostEnvironment!.CONTAINERS_STORAGE_CONF,
+                graphOptions: { "overlay.mountopt": "nodev" },
+                graphStatus: { "Native Overlay Diff": "true" },
+              },
+              version: { Version: "5.8.7" },
+            })
+          : JSON.stringify([
+              {
+                Id: "a".repeat(64),
+                Image: "b".repeat(64),
+                State: { Running: true, Pid: 501, StartedAt: "fixture" },
+              },
+            ]),
+      );
+      process.stderr.end();
+      process.exitCode = 0;
+      process.emit("exit", 0, null);
+      process.emit("close", 0, null);
+    });
+    return {
+      process,
+      ownership: {
+        runId: options.runId,
+        leaderPid: 987654,
+        processGroupId: 987654,
+      },
+      cleanup: async () => ({ cleaned: true, signaled: false }),
+    };
+  };
+  const transport = await PreparedPodmanTransport.prepare({
+    profile: f.profilePath,
+    command: f.profile.podman.command,
+    limiter: "/usr/bin/prlimit",
+    signal: f.signal,
+    scope: f.scope,
+    launcher,
+  });
+  try {
+    await transport.run(["info", "--format=json"], f.signal);
+    const command = podmanExistingGenerationCommand("a".repeat(64));
+    const result = await transport.run(command, f.signal);
+    expect(result.stdout.text).not.toContain("Env");
+    expect(command[1]).toContain(".ID");
+    expect(command[1]).not.toContain(".Config");
+    expect(spawned.at(-1)?.slice(-4)).toEqual(command);
+    const before = spawned.length;
+    await expect(
+      transport.run(
+        ["inspect", "--format={{json .Config.Env}}", "--", "a".repeat(64)],
+        f.signal,
+      ),
+    ).rejects.toThrow();
+    expect(spawned.length).toBe(before);
+  } finally {
+    await transport.close();
+  }
+});
