@@ -8,6 +8,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
   vi.useRealTimers();
 });
@@ -301,5 +302,108 @@ it("reports no remaining time after terminal expiry near the monotonic boundary"
   } finally {
     deadline.dispose();
     vi.useRealTimers();
+  }
+});
+it("latches an exhausted budget when its timer fires fractionally before the numerical deadline", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  const now = vi.spyOn(performance, "now").mockReturnValue(0);
+  const caller = new AbortController();
+  const releaseCaller = vi.spyOn(caller.signal, "removeEventListener");
+  const deadline = new ProviderStartupDeadline(40, caller.signal);
+  const releaseWait = vi.spyOn(deadline.signal, "removeEventListener");
+  try {
+    const waiting = deadline.wait(500);
+    now.mockReturnValue(39.5);
+    expect(deadline.remainingMs()).toBe(1);
+    expect(deadline.interruption).toBeUndefined();
+    vi.advanceTimersByTime(40);
+    await expect(waiting).resolves.toBe("aborted");
+    expect(deadline.signal.aborted).toBe(true);
+    expect(deadline.signal.reason).toMatchObject({ name: "TimeoutError" });
+    expect(deadline.interruption).toBe("timeout");
+    expect(deadline.remainingMs()).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(releaseCaller).toHaveBeenCalledWith("abort", expect.any(Function));
+    expect(releaseWait).toHaveBeenCalledWith("abort", expect.any(Function));
+    caller.abort(new Error("late caller cancellation"));
+    now.mockReturnValue(0);
+    expect(deadline.interruption).toBe("timeout");
+    expect(deadline.remainingMs()).toBe(0);
+    await expect(deadline.wait(500)).resolves.toBe("aborted");
+    expect(vi.getTimerCount()).toBe(0);
+  } finally {
+    deadline.dispose();
+  }
+});
+
+it("preserves first caller cancellation and its numerical budget while releasing the timer and listener", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  const now = vi.spyOn(performance, "now").mockReturnValue(0);
+  const caller = new AbortController();
+  const release = vi.spyOn(caller.signal, "removeEventListener");
+  const deadline = new ProviderStartupDeadline(40, caller.signal);
+  try {
+    now.mockReturnValue(10);
+    const reason = new Error("caller stopped startup");
+    caller.abort(reason);
+    expect(deadline.interruption).toBe("cancelled");
+    expect(deadline.signal.reason).toBe(reason);
+    expect(deadline.remainingMs()).toBe(30);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(release).toHaveBeenCalledWith("abort", expect.any(Function));
+    vi.advanceTimersByTime(100);
+    now.mockReturnValue(100);
+    expect(deadline.interruption).toBe("cancelled");
+    expect(deadline.remainingMs()).toBe(0);
+    await expect(deadline.wait(500)).resolves.toBe("aborted");
+  } finally {
+    deadline.dispose();
+  }
+});
+
+it("disposes an active deadline without fabricating an interruption", () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  const now = vi.spyOn(performance, "now").mockReturnValue(0);
+  const caller = new AbortController();
+  const release = vi.spyOn(caller.signal, "removeEventListener");
+  const deadline = new ProviderStartupDeadline(40, caller.signal);
+  deadline.dispose();
+  deadline.dispose();
+  expect(vi.getTimerCount()).toBe(0);
+  expect(release).toHaveBeenCalledWith("abort", expect.any(Function));
+  caller.abort();
+  now.mockReturnValue(10);
+  vi.advanceTimersByTime(100);
+  expect(deadline.signal.aborted).toBe(false);
+  expect(deadline.interruption).toBeUndefined();
+  expect(deadline.remainingMs()).toBe(30);
+});
+
+it("keeps timeout exhaustion consistent across bounded seeded fractional timer deliveries", () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  const now = vi.spyOn(performance, "now");
+  let seed = 0x444c3430;
+  const next = () => {
+    seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+    return seed;
+  };
+  for (let index = 0; index < 32; index += 1) {
+    const origin = next() % 100_000;
+    const timeout = 1 + (next() % 1000);
+    const fractionalLead = (1 + (next() % 999)) / 1000;
+    now.mockReturnValue(origin);
+    const deadline = new ProviderStartupDeadline(timeout);
+    try {
+      now.mockReturnValue(origin + timeout - fractionalLead);
+      expect(deadline.remainingMs()).toBe(1);
+      expect(deadline.signal.aborted).toBe(false);
+      vi.advanceTimersByTime(timeout);
+      expect(deadline.interruption).toBe("timeout");
+      expect(deadline.signal.aborted).toBe(true);
+      expect(deadline.remainingMs()).toBe(0);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      deadline.dispose();
+    }
   }
 });

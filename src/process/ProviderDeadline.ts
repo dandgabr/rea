@@ -77,7 +77,11 @@ export class ProviderStartupDeadline {
     );
   }
 
-  /** Milliseconds still available to the next startup phase. */
+  /**
+   * Milliseconds still available to the next startup phase. Timer expiry owns
+   * exhaustion even if delivered fractionally before the numerical deadline.
+   * Caller cancellation preserves its numerical budget and aborts the signal.
+   */
   remainingMs(): number {
     // Node timers can fire a fraction of a millisecond before the monotonic
     // deadline, so an elapsed timer must not report time left to spend. A
