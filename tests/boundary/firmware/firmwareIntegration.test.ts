@@ -15,6 +15,7 @@ import { toolContract } from "../../../src/contracts/toolContracts.js";
 import { ToolResultDelivery } from "../../../src/server/toolResult.js";
 import { SafeOutputTree } from "../../../src/artifacts/SafeOutputTree.js";
 import { SafeOutputTreeCreationFailure } from "../../../src/artifacts/SafeOutputTreeCreationFailure.js";
+import { jsonObjectSchema } from "../../../src/domain/jsonValue.js";
 
 // Assert recovery behavior through the public reference table, while keeping
 // row identity expectations independent of the instruction's digest.
@@ -72,6 +73,144 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 const delivery = new ToolResultDelivery(STDIO_DEFAULT_MAX_BUFFER_SIZE);
 
 const it = test.skipIf(process.platform !== "linux");
+
+it.each([
+  "existing-output",
+  "missing-file",
+  "write-failure",
+  "cancelled-write",
+])(
+  "retains native facts and raw provenance through ordinary publication failure: %s",
+  async (failure) => {
+    const fixture = await firmwareFixture(
+      failure === "missing-file"
+        ? "observation-facts-missing"
+        : "observation-facts",
+    );
+    if (failure === "existing-output") {
+      await mkdir(fixture.output);
+      await writeFile(`${fixture.output}/sentinel`, "caller bytes");
+    }
+    const originalWrite = SafeOutputTree.prototype.write;
+    const controller = new AbortController();
+    let actualWriteCompleted = false;
+    const write =
+      failure === "write-failure" || failure === "cancelled-write"
+        ? vi.spyOn(SafeOutputTree.prototype, "write")
+        : undefined;
+    if (write !== undefined) {
+      write.mockImplementationOnce(async function (
+        this: SafeOutputTree,
+        ...args
+      ) {
+        await originalWrite.apply(this, args);
+        expect(await readFile(`${this.outputRoot}/${args[0]}`, "utf8")).toBe(
+          "firmware=true\n",
+        );
+        actualWriteCompleted = true;
+        if (failure === "cancelled-write") {
+          controller.abort();
+          controller.signal.throwIfAborted();
+        }
+        throw new Error("injected after actual staged file write");
+      });
+    }
+    try {
+      const result = await fixture.service.execute(
+        "extract_firmware",
+        { path: fixture.path, output_directory: fixture.output },
+        { signal: controller.signal },
+      );
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error._tag).toBe(
+        failure === "missing-file"
+          ? "AnalysisOutputError"
+          : failure === "cancelled-write"
+            ? "AnalysisCancelledError"
+            : "ProviderAdapterError",
+      );
+      expect(result.error.cleanupIncomplete).toBe(false);
+      if (write !== undefined) expect(actualWriteCompleted).toBe(true);
+      expect(projectAnalysisError(result.error)).toMatchObject({
+        details: {
+          partial_observation: {
+            kind: "firmware",
+            result: {
+              publication_state: "not_committed",
+              requested_output_directory: fixture.output,
+              tasks: expect.arrayContaining([
+                expect.objectContaining({
+                  path: "$input",
+                  hashes: expect.objectContaining({
+                    md5: createHash("md5")
+                      .update("fixture-input-data")
+                      .digest("hex"),
+                    sha1: createHash("sha1")
+                      .update("fixture-input-data")
+                      .digest("hex"),
+                  }),
+                  magic: { description: "ASCII text", mime_type: "text/plain" },
+                }),
+              ]),
+              randomness: [
+                expect.objectContaining({
+                  input_path: "$output/rootfs/config",
+                  root_file_range: null,
+                  shannon: expect.objectContaining({ mean: 40.000000001 }),
+                }),
+              ],
+              multifiles: [
+                expect.objectContaining({
+                  provider_id: "multifile-id",
+                  constituents: [
+                    expect.objectContaining({
+                      path: "$output/rootfs/part",
+                      is_multi_file: true,
+                    }),
+                  ],
+                }),
+              ],
+              deleted_files: [
+                {
+                  path: "$output/rootfs/intermediate.gz",
+                  handler: "gzip",
+                  reported_sha256: createHash("sha256")
+                    .update("firmware=true\n")
+                    .digest("hex"),
+                },
+              ],
+            },
+            provenance: {
+              subject: { path: fixture.path },
+              raw_result: {
+                report: expect.any(Array),
+                execution: { exit_code: 0 },
+              },
+            },
+          },
+        },
+      });
+      const partial = jsonObjectSchema.parse(result.error.partialObservation);
+      const facts = jsonObjectSchema.parse(partial.result);
+      expect(facts).not.toHaveProperty("files");
+      expect(facts).not.toHaveProperty("output_directory");
+      if (failure === "existing-output") {
+        expect(await readFile(`${fixture.output}/sentinel`, "utf8")).toBe(
+          "caller bytes",
+        );
+        expect(await readdir(fixture.output)).toEqual(["sentinel"]);
+      } else {
+        await expect(access(fixture.output)).rejects.toMatchObject({
+          code: "ENOENT",
+        });
+      }
+      await assertFirmwareCleanup(fixture.launches);
+    } finally {
+      vi.restoreAllMocks();
+    }
+  },
+);
 
 it("keeps cleanup-failure state local to the selected factory instance", async () => {
   const failed = await firmwareFixture("cleanup-failure");
@@ -227,6 +366,18 @@ it("retains a setup-failed publication tree for provider cleanup retry", async (
       ok: false,
       error: {
         cleanupIncomplete: true,
+        partialObservation: {
+          kind: "firmware",
+          result: {
+            publication_state: "not_committed",
+            requested_output_directory: fixture.output,
+            tasks: expect.any(Array),
+          },
+          provenance: {
+            raw_result: { report: expect.any(Array) },
+            subject: { path: fixture.path },
+          },
+        },
         diagnostics: {
           previous_error: expect.stringContaining(
             "injected post-acquisition setup failure",

@@ -257,3 +257,17 @@ export const firmwareResultSchemas = {
     published_bytes: bytes,
   }),
 } as const;
+
+/** Producer facts survive failed publication without asserting committed artifact paths. */
+export const firmwareExtractionObservationSchema =
+  firmwareResultSchemas.extract_firmware
+    .omit({
+      output_directory: true,
+      files: true,
+      unpublished_entries: true,
+      published_bytes: true,
+    })
+    .extend({
+      publication_state: z.literal("not_committed"),
+      requested_output_directory: z.string(),
+    });

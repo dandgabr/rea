@@ -27,6 +27,7 @@ import { PrivateRuntimeRoot } from "../process/PrivateRuntimeRoot.js";
 import type { ProviderProcessSupervisor } from "../process/ProviderProcess.js";
 import type { SafeOutputTree } from "../artifacts/SafeOutputTree.js";
 import { publishFirmwareExtraction } from "./FirmwarePublication.js";
+import { createFirmwareExtractionObservation } from "./FirmwareExtractionObservation.js";
 import {
   FIRMWARE_LIMITS,
   BINWALK_PROVIDER_IDENTITY,
@@ -225,6 +226,7 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
     options?: ExecutionOptions,
   ): Promise<Outcome> {
     let root: PrivateRuntimeRoot | undefined;
+    let prepublicationObservation: FirmwarePartialObservation | undefined;
     const engineName = request.input.provider_id;
     const deadline = AbortSignal.timeout(FIRMWARE_LIMITS.timeoutMs);
     const signal =
@@ -377,6 +379,37 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
           ...target.selection,
           maxDepth: request.input.max_depth,
         });
+        raw = { report, execution: processRun, version_execution: versionRun };
+        const observation = createFirmwareExtractionObservation({
+          outputDirectory: request.input.output_directory,
+          normalized,
+          selection: target.selection,
+          engine,
+        });
+        prepublicationObservation = {
+          ...observation,
+          provenance: jsonValueSchema.parse({
+            raw_result: raw,
+            provider: {
+              ...UNBLOB_PROVIDER_IDENTITY,
+              version: admitted.version,
+            },
+            subject: target.subject,
+            locations: [
+              {
+                kind: "file-offset-range",
+                start: target.selection.offset,
+                end: target.selection.offset + target.selection.length,
+              },
+            ],
+            limitations: [
+              ...limitations,
+              ...(admitted.status === "compatible"
+                ? [admitted.limitation]
+                : []),
+            ],
+          }),
+        };
         if (processRun.exit_code === 1 && normalized.diagnostics.length === 0)
           throw new AnalysisOutputError(
             request.operation,
@@ -393,6 +426,7 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
           outputDirectory: request.input.output_directory,
           entries,
           normalized,
+          observation: prepublicationObservation,
           selection: target.selection,
           maxDepth: request.input.max_depth,
           engine,
@@ -409,7 +443,6 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
             this.#pendingCleanup.set(ownedRoot.path, pending);
           },
         });
-        raw = { report, execution: processRun, version_execution: versionRun };
       }
       const catalog =
         engineName === "binwalk"
@@ -467,6 +500,8 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
                       },
                     }),
       );
+      if (!outcome.ok && prepublicationObservation !== undefined)
+        outcome.error.retainPartialObservation(prepublicationObservation);
     }
     const finished = await finishFirmwareWorkspace(
       root,

@@ -121,27 +121,55 @@ const taskDisposition = (context: {
   magicSkipped: boolean;
   extensionSkipped: boolean;
   explicitPlugins: boolean;
-}): z.infer<typeof firmwareTaskSchema>["processing_disposition"] => {
-  if (context.task.depth >= context.maxDepth) return "unexamined_depth_limit";
-  if (context.stat.is_dir)
-    return context.task.is_multi_file
-      ? "multifile_consumed"
-      : "directory_enumerated";
-  if (!context.stat.is_file || context.stat.is_link) return "nonregular";
-  if (context.task.is_multi_file) return "multifile_consumed";
-  if (context.stat.size === 0) return "empty";
-  if (context.reportKinds.includes("ChunkReport")) return "examined_recognized";
+  directoryProcessingFailed: boolean;
+}): Pick<
+  z.infer<typeof firmwareTaskSchema>,
+  "processing_disposition" | "skip_reasons"
+> => {
+  const decision = (
+    processing_disposition: z.infer<
+      typeof firmwareTaskSchema
+    >["processing_disposition"],
+    skip_reasons: ("magic" | "extension")[] = [],
+  ) => ({ processing_disposition, skip_reasons });
+  const hasProcessingProblem = context.reportKinds.some(
+    (kind) => !known.has(kind),
+  );
+  if (context.task.depth >= context.maxDepth)
+    return decision("unexamined_depth_limit");
+  if (context.stat.is_dir) {
+    if (context.task.is_multi_file) return decision("multifile_consumed");
+    if (context.directoryProcessingFailed)
+      return decision("directory_enumeration_incomplete");
+    if (hasProcessingProblem) return decision("unknown_processing");
+    return decision(
+      context.explicitPlugins
+        ? "unknown_plugin_processing"
+        : "directory_enumerated",
+    );
+  }
+  if (!context.stat.is_file || context.stat.is_link)
+    return decision("nonregular");
+  if (hasProcessingProblem)
+    return decision(
+      context.explicitPlugins
+        ? "unknown_plugin_processing"
+        : "unknown_processing",
+    );
+  if (context.reportKinds.includes("ChunkReport"))
+    return decision("examined_recognized");
   if (context.reportKinds.includes("UnknownChunkReport"))
-    return "examined_unrecognized";
-  if (context.explicitPlugins) return "unknown_plugin_processing";
-  if (
-    !context.hasHashAndMagic ||
-    context.reportKinds.some((kind) => !known.has(kind))
-  )
-    return "unknown_processing";
-  if (context.magicSkipped) return "skipped_magic";
-  if (context.extensionSkipped) return "skipped_extension";
-  return "examined_unrecognized";
+    return decision("examined_unrecognized");
+  if (!context.hasHashAndMagic) return decision("unknown_processing");
+  if (context.task.is_multi_file) return decision("multifile_consumed");
+  if (context.stat.size === 0) return decision("empty");
+  if (context.explicitPlugins) return decision("unknown_plugin_processing");
+  const reasons: ("magic" | "extension")[] = [];
+  if (context.magicSkipped) reasons.push("magic");
+  if (context.extensionSkipped) reasons.push("extension");
+  if (context.magicSkipped) return decision("skipped_magic", reasons);
+  if (context.extensionSkipped) return decision("skipped_extension", reasons);
+  return decision("examined_unrecognized");
 };
 
 const dependencyFailure = z.object({
@@ -298,6 +326,34 @@ export const normalizeUnblobReport = (
     length: number,
   ) => {
     const parsed = nativeRandomness.parse(value);
+    const expectedWindow = Math.min(
+      1024 * 1024,
+      Math.max(1024, Math.floor(length / 80)),
+    );
+    const expectedBlocks = Math.ceil(length / expectedWindow);
+    if (
+      length === 0 ||
+      parsed.shannon.block_size !== expectedWindow ||
+      parsed.chi_square.block_size !== expectedWindow ||
+      parsed.shannon.percentages.length !== expectedBlocks ||
+      parsed.chi_square.percentages.length !== expectedBlocks
+    ) {
+      diagnostics.push(
+        jsonValueSchema.parse({
+          input_path: path,
+          stage: "randomness",
+          measurement_coverage: "unknown",
+          scope,
+          object_range: { offset, length },
+          expected_block_size: expectedWindow,
+          expected_block_count: expectedBlocks,
+          report: value,
+          reason:
+            "Randomness measurements do not establish the native window and complete block coverage",
+        }),
+      );
+      return;
+    }
     randomness.push(
       firmwareRandomnessSchema.parse({
         input_path: path,
@@ -452,11 +508,6 @@ export const normalizeUnblobReport = (
     );
     const parsedHash = hash === undefined ? null : hashes.parse(hash);
     const parsedMagic = magic === undefined ? null : fileMagic.parse(magic);
-    const hasChunks = record.reports.some(
-      (r) =>
-        r.__typename__ === "ChunkReport" ||
-        r.__typename__ === "UnknownChunkReport",
-    );
     const magicSkipped =
       parsedMagic !== null &&
       (context.skipMagic ?? UNBLOB_DEFAULT_SKIP_MAGIC).some((prefix) =>
@@ -474,6 +525,21 @@ export const normalizeUnblobReport = (
       magicSkipped,
       extensionSkipped,
       explicitPlugins: context.explicitPlugins === true,
+      directoryProcessingFailed: record.reports.some(
+        (item) =>
+          item.__typename__ === "UnknownError" ||
+          item.__typename__ === "MultiFileCollisionReport" ||
+          item.__typename__ === "OutputDirectoryExistsReport" ||
+          (item.__typename__ === "MultiFileReport" &&
+            Array.isArray(item.extraction_reports) &&
+            item.extraction_reports.some(
+              (problem) =>
+                typeof problem === "object" &&
+                problem !== null &&
+                !Array.isArray(problem) &&
+                problem.__typename__ === "OutputDirectoryExistsReport",
+            )),
+      ),
     });
     tasks.push(
       firmwareTaskSchema.parse({
@@ -503,17 +569,8 @@ export const normalizeUnblobReport = (
                 description: parsedMagic.magic,
                 mime_type: parsedMagic.mime_type,
               },
-        processing_disposition: processingDisposition,
+        ...processingDisposition,
         disposition_basis: "pinned_native_control_flow",
-        skip_reasons:
-          hasChunks ||
-          record.task.is_multi_file ||
-          record.task.depth >= context.maxDepth
-            ? []
-            : [
-                ...(magicSkipped ? ["magic"] : []),
-                ...(extensionSkipped ? ["extension"] : []),
-              ],
       }),
     );
     if (parsedStat.is_file && !parsedStat.is_link)
@@ -596,7 +653,7 @@ export const normalizeUnblobReport = (
           detail !== null && detail.extraction_reports.length > 0;
         if (detail === null) {
           const unknown = z
-            .object({ randomness: nativeRandomness.nullable() })
+            .object({ randomness: jsonValueSchema.nullable() })
             .parse(item);
           if (unknown.randomness !== null)
             addRandomness(

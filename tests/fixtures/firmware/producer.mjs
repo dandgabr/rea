@@ -62,6 +62,7 @@ if (args.includes("--version")) {
     );
   } else {
     const deleted = mode === "deleted" || mode === "deleted-and-missing";
+    const observationFacts = mode?.startsWith("observation-facts") === true;
     const output = args[args.indexOf("--extract-dir") + 1];
     await mkdir(output, { recursive: true });
     const child =
@@ -74,6 +75,7 @@ if (args.includes("--version")) {
       mode !== "missing-file" &&
       mode !== "depth-reentry" &&
       mode !== "depth-orphan" &&
+      mode !== "observation-facts-missing" &&
       !deleted
     )
       await writeFile(child, mode === "budget" ? Buffer.alloc(10000) : content);
@@ -387,6 +389,80 @@ if (args.includes("--version")) {
           dependencies: [],
         },
       ];
+    }
+    if (observationFacts) {
+      const fullHash = (data) => ({
+        __typename__: "HashReport",
+        md5: createHash("md5").update(data).digest("hex"),
+        sha1: createHash("sha1").update(data).digest("hex"),
+        sha256: createHash("sha256").update(data).digest("hex"),
+      });
+      const magic = {
+        __typename__: "FileMagicReport",
+        magic: "ASCII text",
+        mime_type: "text/plain",
+      };
+      const measurements = {
+        __typename__: "RandomnessReport",
+        shannon: { percentages: [40], block_size: 1024, mean: 40.000000001 },
+        chi_square: { percentages: [0], block_size: 1024, mean: 0 },
+      };
+      records[0].reports = [
+        stat(child, content.length),
+        magic,
+        fullHash(content),
+        measurements,
+      ];
+      records[1].reports[1] = fullHash(bytes);
+      records[1].reports.push(magic);
+      const directory = task(join(output, "rootfs"), 1, "gzip-id");
+      const partPath = join(output, "rootfs", "part");
+      const partBytes = Buffer.from("part=true\n");
+      await writeFile(partPath, partBytes);
+      const partTask = { ...task(partPath, 1, "gzip-id"), is_multi_file: true };
+      const deletedPath = join(output, "rootfs", "intermediate.gz");
+      const deletedTask = task(deletedPath, 1, "gzip-id");
+      records[1].subtasks = [directory];
+      records.push(
+        {
+          task: directory,
+          reports: [
+            { ...stat(directory.path, 4096), is_file: false, is_dir: true },
+            {
+              __typename__: "MultiFileReport",
+              id: "multifile-id",
+              handler_name: "multipart",
+              name: "volume",
+              paths: [partPath],
+              extraction_reports: [],
+            },
+          ],
+          subtasks: [childTask, partTask, deletedTask],
+        },
+        {
+          task: partTask,
+          reports: [
+            stat(partPath, partBytes.length),
+            magic,
+            fullHash(partBytes),
+          ],
+          subtasks: [],
+        },
+        {
+          task: deletedTask,
+          reports: [
+            stat(deletedPath, content.length),
+            magic,
+            fullHash(content),
+            {
+              __typename__: "ExtractedFileDeletedReport",
+              path: deletedPath,
+              handler_name: "gzip",
+            },
+          ],
+          subtasks: [],
+        },
+      );
     }
     if (mode === "deleted-and-missing") {
       const ghost = join(output, "unreported-deletion");

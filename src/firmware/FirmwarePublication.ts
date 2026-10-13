@@ -7,7 +7,13 @@ import { SafeOutputTreeCreationFailure } from "../artifacts/SafeOutputTreeCreati
 import { AnalysisOutputError } from "../domain/analysisErrorCore.js";
 import { ProviderCleanupError } from "../domain/providerCleanupError.js";
 import { jsonValueSchema } from "../domain/jsonValue.js";
-import { firmwareResultSchemas } from "../domain/firmware/firmwareAnalysis.js";
+import {
+  firmwareResultSchemas,
+  type FirmwarePartialObservation,
+} from "../domain/firmware/firmwareAnalysis.js";
+import { AnalysisError } from "../domain/analysisErrorBase.js";
+import { ProviderAdapterError } from "../domain/providerAdapterError.js";
+import { createFirmwareExtractionObservation } from "./FirmwareExtractionObservation.js";
 import { hashFirmwareFile, type FirmwareEntry } from "./FirmwareFiles.js";
 import type { normalizeUnblobReport } from "./FirmwareReports.js";
 import type { extractionGap } from "../domain/firmware/firmwareAnalysis.js";
@@ -89,8 +95,11 @@ export const publishFirmwareExtraction = async (context: {
   maxDepth: number;
   engine: z.infer<typeof firmwareResultSchemas.extract_firmware>["engine"];
   signal: AbortSignal;
+  observation?: FirmwarePartialObservation;
   retainCleanup: (tree: SafeOutputTree) => void;
 }) => {
+  const observation =
+    context.observation ?? createFirmwareExtractionObservation(context);
   let tree: SafeOutputTree | undefined;
   let result:
     | z.infer<typeof firmwareResultSchemas.extract_firmware>
@@ -194,8 +203,11 @@ export const publishFirmwareExtraction = async (context: {
           ? {
               kind: "firmware" as const,
               result: jsonValueSchema.parse(result),
+              ...(observation.provenance === undefined
+                ? {}
+                : { provenance: observation.provenance }),
             }
-          : undefined;
+          : observation;
       throw new ProviderCleanupError(
         "unblob",
         [context.outputDirectory],
@@ -210,14 +222,20 @@ export const publishFirmwareExtraction = async (context: {
         {
           cause: cleanupCause,
           operation: "extract_firmware",
-          ...(publishedResult === undefined
-            ? {}
-            : { partialObservation: publishedResult }),
+          partialObservation: publishedResult,
         },
       );
     }
     if (tree?.published === true && result !== undefined) return result;
-    throw cause;
+    if (cause instanceof AnalysisError)
+      throw cause.retainPartialObservation(observation);
+    throw new ProviderAdapterError(context.engine.name, "extract_firmware", {
+      cause,
+      partialObservation: observation,
+      diagnostics: {
+        reason: cause instanceof Error ? cause.message : String(cause),
+      },
+    });
   }
 };
 

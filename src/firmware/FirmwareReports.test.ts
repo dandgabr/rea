@@ -65,8 +65,8 @@ const nestedDependencyChunk = (id: string, offset: number) => ({
 
 const measurements = {
   __typename__: "RandomnessReport",
-  shannon: { percentages: [12.5, 25], block_size: 10, mean: 18.75 },
-  chi_square: { percentages: [99, 1], block_size: 10, mean: 50 },
+  shannon: { percentages: [18.75], block_size: 1024, mean: 18.75 },
+  chi_square: { percentages: [50], block_size: 1024, mean: 50 },
 };
 const unrecognized = () => {
   const record = root();
@@ -227,6 +227,11 @@ it("joins unordered multifile constituent identity and hashes without original o
         md5: String(index + 1).repeat(32),
         sha1: String(index + 1).repeat(40),
         sha256: String(index + 1).repeat(64),
+      },
+      {
+        __typename__: "FileMagicReport",
+        magic: "data",
+        mime_type: "application/octet-stream",
       },
     ],
     subtasks: [],

@@ -35,6 +35,7 @@ export const firmwareTaskSchema = z.strictObject({
   processing_disposition: z.enum([
     "unexamined_depth_limit",
     "directory_enumerated",
+    "directory_enumeration_incomplete",
     "multifile_consumed",
     "empty",
     "nonregular",
