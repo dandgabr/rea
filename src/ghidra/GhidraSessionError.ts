@@ -263,7 +263,6 @@ const causeLaunchOutcome = (
   redact: (value: string, incomplete?: boolean) => string,
 ): Record<string, JsonValue> => {
   if (!(cause instanceof GhidraLaunchError)) return {};
-  if (cause.cause instanceof GhidraLaunchSupportError) return {};
   const launchSupport =
     cause.launchSupport.length === 0
       ? {}
@@ -273,6 +272,10 @@ const causeLaunchOutcome = (
             stderr: redact(output.stderr),
           })),
         };
+  // The failing helper reports its own outcome as `command_outcome` on the
+  // nested cause. Earlier helper runs that succeeded still carry warnings
+  // that belong to this failure, so they are retained here.
+  if (cause.cause instanceof GhidraLaunchSupportError) return launchSupport;
   const output = cause.capturedOutput;
   if (output === undefined) return launchSupport;
   const stdout = boundedUtf8Text(

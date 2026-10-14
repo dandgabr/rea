@@ -187,10 +187,13 @@ describe.skipIf(process.platform === "win32")(
         );
         const cause = failure.diagnostics.failure_cause;
         if (mode === "env-failure") {
+          // The failing helper reports its own command outcome on the cause.
           expect(cause).toMatchObject({
-            launch_outcome: {
-              exit_code: 3,
-              stderr: expect.stringContaining(`-envvars: ${warning}`),
+            cause: {
+              command_outcome: {
+                stderr: expect.stringContaining(`-envvars: ${warning}`),
+              },
+              cause: { code: 3 },
             },
           });
         } else {
@@ -205,9 +208,11 @@ describe.skipIf(process.platform === "win32")(
         }
         if (mode === "vm-failure")
           expect(cause).toMatchObject({
-            launch_outcome: {
-              exit_code: 3,
-              stderr: expect.stringContaining(`-vmargs: ${warning}`),
+            cause: {
+              command_outcome: {
+                stderr: expect.stringContaining(`-vmargs: ${warning}`),
+              },
+              cause: { code: 3 },
             },
           });
         if (mode === "vm-malformed")
