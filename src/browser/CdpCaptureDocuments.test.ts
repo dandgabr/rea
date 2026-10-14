@@ -130,12 +130,10 @@ describe("CDP DOM string and namespace validity", () => {
     { field: "nodeName", index: -1 },
     { field: "nodeName", index: 20 },
     { field: "nodeName", index: 2, malformedString: true },
-    { field: "nodeValue", index: -1 },
     { field: "nodeValue", index: 20 },
     { field: "nodeValue", index: 5, malformedString: true },
     { field: "attributeName", index: -1 },
     { field: "attributeName", index: 20 },
-    { field: "attributeValue", index: -1 },
     { field: "attributeValue", index: 20 },
   ] as const)(
     "omits a node when its $field string index is invalid ($index)",
@@ -210,6 +208,48 @@ describe("CDP DOM string and namespace validity", () => {
       });
     },
   );
+
+  it("retains nodes whose nodeValue and attribute value are the absent-value index -1", () => {
+    // Chrome reports every element's nodeValue, and a value-less attribute's
+    // value, as string index -1. Excluding those nodes dropped real pages.
+    const strings: unknown[] = [origin + "/app", "#document", "DIV", "hidden"];
+    const completeness = new CdpCaptureCompleteness();
+    const generator = captureDom(
+      {
+        strings,
+        documents: [
+          {
+            documentURL: 0,
+            baseURL: 0,
+            nodes: {
+              nodeType: [9, 1],
+              nodeName: [1, 2],
+              nodeValue: [-1, -1],
+              parentIndex: [-1, 0],
+              attributes: [[], [3, -1]],
+            },
+          },
+        ],
+      },
+      new Set([origin]),
+      inspectWebPageInputSchema.parse({
+        cdp_endpoint: "http://127.0.0.1:9222",
+        allowed_origins: [origin],
+        target_id: "page-1",
+      }),
+      completeness,
+    );
+    let captured = generator.next([]);
+    while (!captured.done) captured = generator.next([]);
+
+    expect(captured.value.nodes.map((node) => node.node_name)).toEqual([
+      "#document",
+      "DIV",
+    ]);
+    expect(completeness.snapshot().excluded).not.toContainEqual(
+      expect.objectContaining({ reason: "invalid_protocol_value" }),
+    );
+  });
 
   it("does not infer SVG ancestry through an element with malformed namespace data", () => {
     const strings: unknown[] = [

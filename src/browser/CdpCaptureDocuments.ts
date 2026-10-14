@@ -249,7 +249,7 @@ export function* captureDom(
       const parent = rawParents[index];
       const attributeIndexes = numberArray(rawAttributes[index]);
       const nodeName = indexedString(strings, nodeNameIndex);
-      const nodeValue = indexedString(strings, nodeValueIndex);
+      const nodeValue = optionalIndexedString(strings, nodeValueIndex);
       if (
         nodeType === undefined ||
         nodeName === undefined ||
@@ -261,8 +261,11 @@ export function* captureDom(
         attributeIndexes === undefined ||
         attributeIndexes.length % 2 !== 0 ||
         attributeIndexes.some(
-          (value) =>
-            value === undefined || indexedString(strings, value) === undefined,
+          (value, position) =>
+            value === undefined ||
+            (position % 2 === 0
+              ? indexedString(strings, value)
+              : optionalIndexedString(strings, value)) === undefined,
         )
       ) {
         completeness?.exclude("dom", "invalid_protocol_value");
@@ -514,6 +517,18 @@ const accessibilityStates = (
 const axText = (value: unknown): string | null =>
   cdpStringValue(recordValue(value)?.value) ?? null;
 
+/**
+ * DOMSnapshot reports an absent node or attribute value (every element's
+ * nodeValue, a value-less attribute) with the string index -1. That is a
+ * genuine "no value" observation, equivalent to the empty string, and unlike
+ * an out-of-range index it must not exclude the node.
+ */
+const optionalIndexedString = (
+  strings: readonly (string | undefined)[],
+  index: unknown,
+): string | undefined =>
+  numberValue(index) === -1 ? "" : indexedString(strings, index);
+
 const indexedString = (
   strings: readonly (string | undefined)[],
   index: unknown,
@@ -598,7 +613,7 @@ const domMetadata = (
   for (let index = 0; index + 1 < attributes.length; index += 2) {
     // Chrome already folds HTML names; SVG/XML names remain case-sensitive.
     const name = indexedString(strings, attributes[index]);
-    const value = indexedString(strings, attributes[index + 1]);
+    const value = optionalIndexedString(strings, attributes[index + 1]);
     if (name === undefined || value === undefined) continue;
     // HTML keeps the first declaration. A later repeat must not move dom_urls.
     if (!pairs.has(name)) pairs.set(name, value);

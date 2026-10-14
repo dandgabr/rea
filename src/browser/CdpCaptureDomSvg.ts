@@ -3,6 +3,9 @@ import { numberValue, recordValue } from "./CdpCaptureValues.js";
 const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
 const XLINK_NAMESPACE = "http://www.w3.org/1999/xlink";
 
+/** DOMSnapshot string index for an attribute that has no value. */
+const NO_ATTRIBUTE_VALUE = -1;
+
 interface DomSnapshotNodes {
   readonly nodeTypes: readonly (number | undefined)[];
   readonly nodeNames: readonly (number | undefined)[];
@@ -304,12 +307,20 @@ const validSvgSourceNode = (
   if (!Array.isArray(rawAttributes) || rawAttributes.length % 2 !== 0)
     return false;
   const attributes = numberArray(rawAttributes);
-  return (
-    attributes.length === rawAttributes.length &&
-    attributes.every(
-      (attribute) =>
-        attribute !== undefined &&
-        stringAt(nodes.strings, attribute) !== undefined,
+  if (attributes.length !== rawAttributes.length) return false;
+  for (let offset = 0; offset + 1 < attributes.length; offset += 2) {
+    const name = attributes[offset];
+    const value = attributes[offset + 1];
+    if (name === undefined || stringAt(nodes.strings, name) === undefined)
+      return false;
+    // DOMSnapshot reports a value-less attribute with the string index -1;
+    // that is a real observation, not a malformed string-table reference.
+    if (
+      value === undefined ||
+      (value !== NO_ATTRIBUTE_VALUE &&
+        stringAt(nodes.strings, value) === undefined)
     )
-  );
+      return false;
+  }
+  return true;
 };
