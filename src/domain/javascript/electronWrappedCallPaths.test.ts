@@ -157,8 +157,12 @@ describe("wrapped contextBridge exposure methods", () => {
         },
         api_key: "isolatedApi",
         members: ["ping"],
-        resolution_basis: "wrapper-substitution",
       }),
+    );
+    // The bundled `electron` binding is recognised directly, so the exposure is
+    // a direct observation rather than a wrapper substitution.
+    expect(result.electron.context_bridge_apis?.[0]).not.toHaveProperty(
+      "resolution_basis",
     );
     expect(result.parse_status).toBe("partial");
   });
