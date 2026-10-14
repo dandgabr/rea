@@ -258,6 +258,9 @@ for (const group of groups) {
           access(join(skillDirectory, "SKILL.md")),
         ).rejects.toMatchObject({ code: "ENOENT" });
     },
+    // Repeated CLI spawns: a loaded CI runner hit the 30 s default here while
+    // the same case takes about 6 s on an idle host.
+    90_000,
   );
 }
 
