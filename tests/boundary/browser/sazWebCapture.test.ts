@@ -478,12 +478,22 @@ it.each([
   expect(JSON.parse(result.stdout).category).toBe(
     ["encrypted", "unknown-member", "dtd"].includes(variant)
       ? "unsupported_provider"
-      : variant === "expanded-limit"
-        ? "execution_failure"
-        : "invalid_input",
+      : "invalid_input",
   );
+  // An archive whose members expand past the budget is a correctable input
+  // problem with a named limit, not an unreadable producer output.
   if (variant === "expanded-limit")
-    expect(JSON.parse(result.stdout).code).toBe("unreadable_output");
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      code: "invalid_request",
+      details: {
+        issues: [
+          {
+            reason: "out_of_range",
+            expected: { maximum_expanded_capture_bytes: 33554432 },
+          },
+        ],
+      },
+    });
   expect(JSON.stringify(result)).not.toContain("malformed-private-input");
 });
 
