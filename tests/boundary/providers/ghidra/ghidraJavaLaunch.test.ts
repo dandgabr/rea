@@ -208,6 +208,13 @@ describe.skipIf(process.platform === "win32")(
         }
         if (mode === "vm-failure")
           expect(cause).toMatchObject({
+            // The earlier, successful -envvars run keeps its warning.
+            launch_support: expect.arrayContaining([
+              expect.objectContaining({
+                mode: "-envvars",
+                stderr: `-envvars: ${warning}\n`,
+              }),
+            ]),
             cause: {
               command_outcome: {
                 stderr: expect.stringContaining(`-vmargs: ${warning}`),
