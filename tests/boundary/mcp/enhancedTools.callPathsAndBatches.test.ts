@@ -125,8 +125,14 @@ describe("enhanced MCP tools", () => {
         limitations: [caveat],
       },
     });
+    // The caveat is a provider limitation of the observations used: it is
+    // retained once in the workflow Evidence and once in the scoped result,
+    // never repeated per node or relationship.
+    expect(graph.structuredContent).toMatchObject({
+      limitations: expect.arrayContaining([caveat]),
+    });
     expect(JSON.stringify(graph.structuredContent)?.split(caveat)).toHaveLength(
-      2,
+      3,
     );
 
     const trace = await client.callTool({
