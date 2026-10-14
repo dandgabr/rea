@@ -256,9 +256,14 @@ describe("HopperClient startup failures", () => {
     expect(
       firstProcess.exitCode !== null || firstProcess.signalCode !== null,
     ).toBe(true);
-    await expect(client.start()).resolves.toEqual({
+    // The authenticated bridge also reports the process that answered.
+    await expect(client.start()).resolves.toMatchObject({
       ok: true,
-      value: { name: "REA Hopper bridge", version: "1.0.0" },
+      value: {
+        name: "REA Hopper bridge",
+        version: "1.0.0",
+        processId: expect.any(Number),
+      },
     });
     await expect(
       client.callTool("echo", { value: "retried" }),
@@ -282,9 +287,14 @@ describe("HopperClient startup failures", () => {
       error: { _tag: "HopperCancelledError" },
     });
     expect(launcher.processes).toHaveLength(0);
-    await expect(client.start()).resolves.toEqual({
+    // The authenticated bridge also reports the process that answered.
+    await expect(client.start()).resolves.toMatchObject({
       ok: true,
-      value: { name: "REA Hopper bridge", version: "1.0.0" },
+      value: {
+        name: "REA Hopper bridge",
+        version: "1.0.0",
+        processId: expect.any(Number),
+      },
     });
     expect(launcher.processes).toHaveLength(1);
     await expect(

@@ -74,15 +74,12 @@ it
       const { stdout } = await parent;
       const { pid } = JSON.parse(stdout) as { pid: number };
       orphanPid = pid;
-      if (alternateMode) {
-        const processEntry = join(procRoot, String(pid));
-        await mkdir(processEntry);
-        for (const name of ["cmdline", "comm", "exe"])
-          await symlink(
-            `/proc/${String(pid)}/${name}`,
-            join(processEntry, name),
-          );
-      }
+      // The synthetic proc root exposes only this fixture, in both modes: the
+      // checker identifies runtimes from procfs facts, not from `ps` output.
+      const processEntry = join(procRoot, String(pid));
+      await mkdir(processEntry);
+      for (const name of ["cmdline", "comm", "exe"])
+        await symlink(`/proc/${String(pid)}/${name}`, join(processEntry, name));
       const { stdout: coordinates } = await execFileAsync("ps", [
         "-p",
         String(pid),

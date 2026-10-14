@@ -16,6 +16,8 @@ import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
 const run = (root: string, command: string, arguments_: readonly string[]) =>
   execFileOutput(command, arguments_, {
     cwd: root,
+    // CI forces colour; the assertions match plain summary text.
+    env: { ...process.env, FORCE_COLOR: "0", NO_COLOR: "1" },
     stopSignal: "SIGTERM",
     timeout: 30_000,
     maxBuffer: 1024 * 1024,

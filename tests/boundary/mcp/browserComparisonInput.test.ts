@@ -110,15 +110,6 @@ describe("browser comparison input boundary", () => {
         },
         { before_scenario: {}, after_scenario: {} },
         { before_scenario: scenario.before_scenario },
-        { ...passive, normalization: { rules: [] } },
-        {
-          before_scenario: scenario.before_scenario,
-          normalization: { rules: [] },
-        },
-        {
-          after_scenario: scenario.after_scenario,
-          normalization: { rules: [] },
-        },
         { ...passive, unexpected: true },
         {
           ...scenario,
@@ -134,7 +125,21 @@ describe("browser comparison input boundary", () => {
         },
       ];
       // The projection leaves group exclusion to the canonical runtime parser.
-      const mixedGroups = [{ ...passive, ...scenario }];
+      // Dependency rules between groups are advertised as guidance in the
+      // description, not as `dependentRequired`, so providers that reject that
+      // keyword still receive a valid schema; the runtime parser enforces them.
+      const mixedGroups = [
+        { ...passive, ...scenario },
+        { ...passive, normalization: { rules: [] } },
+        {
+          before_scenario: scenario.before_scenario,
+          normalization: { rules: [] },
+        },
+        {
+          after_scenario: scenario.after_scenario,
+          normalization: { rules: [] },
+        },
+      ];
       for (const { input, advertisedValid, runtimeValid } of [
         ...[passive, scenario, withoutNormalization].map((input) => ({
           input,

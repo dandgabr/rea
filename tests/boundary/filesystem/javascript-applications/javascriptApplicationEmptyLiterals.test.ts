@@ -142,9 +142,11 @@ it("analyzes a plain long-line loader without package metadata", async () => {
   );
   expect(nodes.map(({ kind }) => kind).sort()).toEqual(["endpoint", "worker"]);
   for (const node of nodes) {
+    // Endpoint identities also carry whether the value is a literal or a
+    // method-like candidate; worker identities are the bare value.
     expect(node.identity).toMatchObject({
       strategy: "artifact-local-key",
-      key: "",
+      key: node.kind === "endpoint" ? JSON.stringify(["literal", ""]) : "",
     });
     expect(node.observations.map(({ label }) => label)).toEqual([null]);
   }
@@ -165,9 +167,9 @@ it("keeps exact values for empty literals without synthetic application labels",
   // a literal two-quote endpoint; both keep exact identities.
   expect(endpoints).toEqual(
     expect.arrayContaining([
-      { key: "", labels: [null], values: [""] },
-      { key: '""', labels: ['""'], values: ['""'] },
-      { key: "/api", labels: ["/api"], values: ["/api"] },
+      { key: '["literal",""]', labels: [null], values: [""] },
+      { key: '["literal","\\"\\""]', labels: ['""'], values: ['""'] },
+      { key: '["literal","/api"]', labels: ["/api"], values: ["/api"] },
     ]),
   );
   expect(endpoints).toHaveLength(3);
@@ -252,7 +254,7 @@ it("does not match an empty endpoint with a literal two-quote seed", async () =>
     case_sensitive: true,
   }).filter(({ node_id: nodeId }) => endpoints.has(nodeId));
   expect(matches.map(({ node_id: nodeId }) => endpoints.get(nodeId))).toEqual([
-    '""',
+    JSON.stringify(["literal", '""']),
   ]);
 });
 

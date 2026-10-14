@@ -328,6 +328,8 @@ export const javaScriptWorkerStaticAnalysisSchema = z
         kind: z.enum(["route", "network"]),
         value: z.string(),
         mechanism: z.string(),
+        // An overloaded callee name suggests the value; its receiver is unproven.
+        interpretation: z.literal("candidate").optional(),
       }),
     ),
     storage: z.array(

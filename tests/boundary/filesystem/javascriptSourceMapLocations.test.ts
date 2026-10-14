@@ -134,22 +134,27 @@ it("associates each source-map URL with its edge when aliases share one physical
   );
   expect(mapEdges).toHaveLength(2);
   expect(mapEdges[0]?.target_node_id).toBe(mapEdges[1]?.target_node_id);
+  // Edge order is derived from identity digests, not from source order.
   expect(
-    mapEdges.map((edge) => {
-      const target = nodes.get(edge.target_node_id);
-      const observation = target?.observations.find(
-        ({ properties }) =>
-          properties.declared_url_sha256 ===
-          edge.properties.declared_url_sha256,
-      );
-      return {
-        declared_url: observation?.properties.declared_url,
-        resolved_path: edge.properties.resolved_path,
-      };
-    }),
+    mapEdges
+      .map((edge) => {
+        const target = nodes.get(edge.target_node_id);
+        const observation = target?.observations.find(
+          ({ properties }) =>
+            properties.declared_url_sha256 ===
+            edge.properties.declared_url_sha256,
+        );
+        return {
+          declared_url: observation?.properties.declared_url,
+          resolved_path: edge.properties.resolved_path,
+        };
+      })
+      .sort((left, right) =>
+        String(left.declared_url).localeCompare(String(right.declared_url)),
+      ),
   ).toEqual([
-    { declared_url: "app.js.map", resolved_path: "dist/app.js.map" },
     { declared_url: "./app.js.map", resolved_path: "dist/app.js.map" },
+    { declared_url: "app.js.map", resolved_path: "dist/app.js.map" },
   ]);
 });
 
@@ -191,6 +196,7 @@ it("resolves a bare source-map file name and worker URL next to the script", asy
       .update("app.js.map")
       .digest("hex"),
     resolved_path: "dist/app.js.map",
+    resolution_status: "resolved",
   });
   expect(
     nodes
