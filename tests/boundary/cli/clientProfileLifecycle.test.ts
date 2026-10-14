@@ -8,10 +8,15 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { join } from "node:path";
-import { expect } from "vitest";
+import { expect, vi } from "vitest";
 import { PRODUCT_IDENTITY } from "../../../src/identity.js";
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
 import { cliTest } from "../../support/cli/cliFixture.js";
+
+// Repeated CLI spawns: a loaded runner turned these passing cases into 30 s
+// timeouts while the work per case is unchanged, so this file carries a
+// wider budget than the 30 s default.
+vi.setConfig({ testTimeout: 90_000 });
 
 const cases = [
   {
@@ -258,9 +263,6 @@ for (const group of groups) {
           access(join(skillDirectory, "SKILL.md")),
         ).rejects.toMatchObject({ code: "ENOENT" });
     },
-    // Repeated CLI spawns: a loaded CI runner hit the 30 s default here while
-    // the same case takes about 6 s on an idle host.
-    90_000,
   );
 }
 
