@@ -206,3 +206,33 @@ describe("JavaScript semantic analysis: child-process signals", () => {
     ]);
   });
 });
+
+describe("JavaScript semantic analysis: configuration reads as call arguments", () => {
+  it.each([
+    ["Number", "const port = Number(process.env.PORT);"],
+    ["parseInt", "const port = parseInt(process.env.PORT, 10);"],
+    ["a user function", "const port = parsePort(process.env.PORT);"],
+  ])("keeps process.env reads passed to %s", (_name, statement) => {
+    const ir = analyzeJavaScriptSemantics(`
+      function run() {
+        ${statement}
+        return port;
+      }
+    `);
+
+    expect(
+      ir.configurationOperations.map(({ kind, key }) => ({ kind, key })),
+    ).toContainEqual({ kind: "environment", key: "PORT" });
+  });
+
+  it("still drops a read that a preceding escape may have changed", () => {
+    const ir = analyzeJavaScriptSemantics(`
+      mutate(process.env);
+      const port = Number(process.env.PORT);
+    `);
+
+    expect(
+      ir.configurationOperations.map(({ kind, key }) => ({ kind, key })),
+    ).not.toContainEqual({ kind: "environment", key: "PORT" });
+  });
+});
