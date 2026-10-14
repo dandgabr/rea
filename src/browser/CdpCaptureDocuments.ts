@@ -3,6 +3,8 @@ import type { WebPageInspection } from "../domain/browserObservationSchemas.js";
 import {
   allowedSanitizedUrl,
   numberValue,
+  optionalSnapshotString,
+  snapshotString,
   recordValue,
   recordsValue,
   requiredRecord,
@@ -183,7 +185,7 @@ export function* captureDom(
   let total = 0;
   let unresolvedSvgNodes = 0;
   for (const document of recordsValue(root.documents)) {
-    const documentUrl = indexedString(strings, document.documentURL);
+    const documentUrl = snapshotString(strings, document.documentURL);
     if (documentUrl === undefined) {
       completeness?.exclude("dom", "invalid_protocol_value");
       continue;
@@ -195,7 +197,7 @@ export function* captureDom(
     const baseUrlValue =
       document.baseURL === undefined
         ? documentUrl
-        : indexedString(strings, document.baseURL);
+        : snapshotString(strings, document.baseURL);
     if (baseUrlValue === undefined) {
       completeness?.exclude("dom", "invalid_protocol_value");
       continue;
@@ -248,8 +250,8 @@ export function* captureDom(
       const nodeValueIndex = rawNodeValues[index];
       const parent = rawParents[index];
       const attributeIndexes = numberArray(rawAttributes[index]);
-      const nodeName = indexedString(strings, nodeNameIndex);
-      const nodeValue = optionalIndexedString(strings, nodeValueIndex);
+      const nodeName = snapshotString(strings, nodeNameIndex);
+      const nodeValue = optionalSnapshotString(strings, nodeValueIndex);
       if (
         nodeType === undefined ||
         nodeName === undefined ||
@@ -264,8 +266,8 @@ export function* captureDom(
           (value, position) =>
             value === undefined ||
             (position % 2 === 0
-              ? indexedString(strings, value)
-              : optionalIndexedString(strings, value)) === undefined,
+              ? snapshotString(strings, value)
+              : optionalSnapshotString(strings, value)) === undefined,
         )
       ) {
         completeness?.exclude("dom", "invalid_protocol_value");
@@ -517,28 +519,6 @@ const accessibilityStates = (
 const axText = (value: unknown): string | null =>
   cdpStringValue(recordValue(value)?.value) ?? null;
 
-/**
- * DOMSnapshot reports an absent node or attribute value (every element's
- * nodeValue, a value-less attribute) with the string index -1. That is a
- * genuine "no value" observation, equivalent to the empty string, and unlike
- * an out-of-range index it must not exclude the node.
- */
-const optionalIndexedString = (
-  strings: readonly (string | undefined)[],
-  index: unknown,
-): string | undefined =>
-  numberValue(index) === -1 ? "" : indexedString(strings, index);
-
-const indexedString = (
-  strings: readonly (string | undefined)[],
-  index: unknown,
-): string | undefined => {
-  const integer = numberValue(index);
-  if (integer === undefined || !Number.isSafeInteger(integer) || integer < 0)
-    return undefined;
-  return strings[integer];
-};
-
 const uniqueAttributeNames = (
   attributeIndexes: readonly number[],
   strings: readonly (string | undefined)[],
@@ -546,7 +526,7 @@ const uniqueAttributeNames = (
   const names: string[] = [];
   const seen = new Set<string>();
   for (let index = 0; index < attributeIndexes.length; index += 2) {
-    const name = indexedString(strings, attributeIndexes[index]);
+    const name = snapshotString(strings, attributeIndexes[index]);
     if (name === undefined) continue;
     if (seen.has(name)) continue;
     seen.add(name);
@@ -612,8 +592,8 @@ const domMetadata = (
   const pairs = new Map<string, string>();
   for (let index = 0; index + 1 < attributes.length; index += 2) {
     // Chrome already folds HTML names; SVG/XML names remain case-sensitive.
-    const name = indexedString(strings, attributes[index]);
-    const value = optionalIndexedString(strings, attributes[index + 1]);
+    const name = snapshotString(strings, attributes[index]);
+    const value = optionalSnapshotString(strings, attributes[index + 1]);
     if (name === undefined || value === undefined) continue;
     // HTML keeps the first declaration. A later repeat must not move dom_urls.
     if (!pairs.has(name)) pairs.set(name, value);

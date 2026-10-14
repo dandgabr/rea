@@ -1,10 +1,12 @@
-import { numberValue, recordValue } from "./CdpCaptureValues.js";
+import {
+  ABSENT_SNAPSHOT_STRING,
+  numberValue,
+  recordValue,
+  snapshotString,
+} from "./CdpCaptureValues.js";
 
 const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
 const XLINK_NAMESPACE = "http://www.w3.org/1999/xlink";
-
-/** DOMSnapshot string index for an attribute that has no value. */
-const NO_ATTRIBUTE_VALUE = -1;
 
 interface DomSnapshotNodes {
   readonly nodeTypes: readonly (number | undefined)[];
@@ -55,16 +57,6 @@ interface DomSvgLink {
   readonly xlinkHref: string | undefined;
 }
 
-const stringAt = (
-  strings: readonly (string | undefined)[],
-  index: unknown,
-): string | undefined => {
-  const integer = numberValue(index);
-  if (integer === undefined || !Number.isSafeInteger(integer) || integer < 0)
-    return undefined;
-  return strings[integer];
-};
-
 const numberArray = (value: unknown): readonly (number | undefined)[] =>
   Array.isArray(value)
     ? value.map((item) => {
@@ -89,7 +81,7 @@ const xmlDocument = (nodes: DomSnapshotNodes): boolean | undefined => {
   for (let index = 0; index < nodes.nodeTypes.length; index += 1) {
     if (nodes.nodeTypes[index] !== 1) continue;
     if (nodes.parents[index] !== documentIndex) continue;
-    const name = stringAt(nodes.strings, nodes.nodeNames[index]);
+    const name = snapshotString(nodes.strings, nodes.nodeNames[index]);
     if (name === undefined || !validSvgSourceNode(nodes, index))
       return undefined;
     if (name === "HTML") return false;
@@ -99,7 +91,7 @@ const xmlDocument = (nodes: DomSnapshotNodes): boolean | undefined => {
     const attributes = numberArray(nodes.attributes[index]);
     for (let offset = 0; offset + 1 < attributes.length; offset += 2) {
       const value = attributes[offset];
-      const attributeName = stringAt(nodes.strings, value);
+      const attributeName = snapshotString(nodes.strings, value);
       if (attributeName === undefined) return undefined;
       if (xmlnsPrefix(attributeName) !== undefined) return true;
     }
@@ -198,7 +190,7 @@ const resolveXmlElements = (
     const svgElement =
       nodes.nodeTypes[node] === 1 &&
       elementNamespace(
-        stringAt(nodes.strings, nodes.nodeNames[node]),
+        snapshotString(nodes.strings, nodes.nodeNames[node]),
         bindings,
       ) === SVG_NAMESPACE;
     resolved.set(node, {
@@ -226,8 +218,8 @@ const applyDeclarations = (
     const nameIndex = attributes[index];
     const valueIndex = attributes[index + 1];
     if (nameIndex === undefined || valueIndex === undefined) continue;
-    const name = stringAt(strings, nameIndex);
-    const value = stringAt(strings, valueIndex);
+    const name = snapshotString(strings, nameIndex);
+    const value = snapshotString(strings, valueIndex);
     if (name === undefined || value === undefined) continue;
     const prefix = xmlnsPrefix(name);
     if (prefix === undefined || seen.has(prefix)) continue;
@@ -280,7 +272,7 @@ const xlinkHrefValue = (
     const nameIndex = attributes[index];
     const valueIndex = attributes[index + 1];
     if (nameIndex === undefined || valueIndex === undefined) continue;
-    const name = stringAt(strings, nameIndex);
+    const name = snapshotString(strings, nameIndex);
     if (name === undefined) continue;
     if (seen.has(name)) continue;
     seen.add(name);
@@ -289,7 +281,7 @@ const xlinkHrefValue = (
     const prefix = name.slice(0, colon);
     const local = name.slice(colon + 1);
     if (local !== "href" || bindings.get(prefix) !== XLINK_NAMESPACE) continue;
-    return stringAt(strings, valueIndex);
+    return snapshotString(strings, valueIndex);
   }
   return undefined;
 };
@@ -300,7 +292,7 @@ const validSvgSourceNode = (
 ): boolean => {
   if (
     nodes.nodeTypes[index] === undefined ||
-    stringAt(nodes.strings, nodes.nodeNames[index]) === undefined
+    snapshotString(nodes.strings, nodes.nodeNames[index]) === undefined
   )
     return false;
   const rawAttributes = nodes.attributes[index];
@@ -311,14 +303,14 @@ const validSvgSourceNode = (
   for (let offset = 0; offset + 1 < attributes.length; offset += 2) {
     const name = attributes[offset];
     const value = attributes[offset + 1];
-    if (name === undefined || stringAt(nodes.strings, name) === undefined)
+    if (name === undefined || snapshotString(nodes.strings, name) === undefined)
       return false;
     // DOMSnapshot reports a value-less attribute with the string index -1;
     // that is a real observation, not a malformed string-table reference.
     if (
       value === undefined ||
-      (value !== NO_ATTRIBUTE_VALUE &&
-        stringAt(nodes.strings, value) === undefined)
+      (value !== ABSENT_SNAPSHOT_STRING &&
+        snapshotString(nodes.strings, value) === undefined)
     )
       return false;
   }

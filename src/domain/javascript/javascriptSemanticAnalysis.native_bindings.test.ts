@@ -225,6 +225,23 @@ describe("JavaScript semantic analysis: configuration reads as call arguments", 
     ).toContainEqual({ kind: "environment", key: "PORT" });
   });
 
+  it.each([
+    [
+      "a callback that runs after the callee escaped the object",
+      `run(process.env, () => Number(process.env.PORT));`,
+    ],
+    [
+      "a read repeated after an earlier iteration's escape",
+      `for (let i = 0; i < 2; i += 1) { mutate(process.env, process.env.PORT); }`,
+    ],
+  ])("does not treat %s as unchanged", (_name, source) => {
+    const ir = analyzeJavaScriptSemantics(source);
+
+    expect(
+      ir.configurationOperations.map(({ kind, key }) => ({ kind, key })),
+    ).not.toContainEqual({ kind: "environment", key: "PORT" });
+  });
+
   it("still drops a read that a preceding escape may have changed", () => {
     const ir = analyzeJavaScriptSemantics(`
       mutate(process.env);

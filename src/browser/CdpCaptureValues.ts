@@ -127,3 +127,35 @@ export const delayWithCancellation = async (
     remaining -= delay;
   }
 };
+
+/** DOMSnapshot string index that reports an absent (not empty) string. */
+export const ABSENT_SNAPSHOT_STRING = -1;
+
+/**
+ * Resolve a DOMSnapshot string-table index. A negative, fractional or
+ * out-of-range index is invalid; the absent marker is not a table reference
+ * and is handled by {@link optionalSnapshotString}.
+ */
+export const snapshotString = (
+  strings: readonly (string | undefined)[],
+  index: unknown,
+): string | undefined => {
+  const integer = numberValue(index);
+  if (integer === undefined || !Number.isSafeInteger(integer) || integer < 0)
+    return undefined;
+  return strings[integer];
+};
+
+/**
+ * Resolve a string slot that Chrome may leave absent (every element's
+ * nodeValue, a value-less attribute's value). Absence resolves to the empty
+ * string for consumers that follow HTML semantics; callers that must tell
+ * absence from an empty value test `index === ABSENT_SNAPSHOT_STRING`.
+ */
+export const optionalSnapshotString = (
+  strings: readonly (string | undefined)[],
+  index: unknown,
+): string | undefined =>
+  numberValue(index) === ABSENT_SNAPSHOT_STRING
+    ? ""
+    : snapshotString(strings, index);

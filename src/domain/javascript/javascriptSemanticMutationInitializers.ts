@@ -73,6 +73,50 @@ const positionPrecedes = (
       left.declaratorIndex >= 0 &&
       left.declaratorIndex < right.declaratorIndex));
 
+/**
+ * Whether `capture` is an operand of the call `effect` that performs the
+ * escape. Operands are evaluated before the call runs, so that escape cannot
+ * have changed the value the capture already read. This holds only for
+ * operands evaluated in the call's own activation: a capture nested in a
+ * function runs whenever the callee invokes it, and a call repeated by a loop
+ * escapes before the next iteration's read.
+ */
+export const semanticEffectConsumesCapture = (
+  effect: t.Node | undefined,
+  capture: t.Node,
+  parents: WeakMap<t.Node, t.Node>,
+): boolean => {
+  if (
+    effect === undefined ||
+    (!t.isCallExpression(effect) &&
+      !t.isOptionalCallExpression(effect) &&
+      !t.isNewExpression(effect))
+  )
+    return false;
+  let contained = false;
+  for (
+    let ancestor = parents.get(capture);
+    ancestor !== undefined;
+    ancestor = parents.get(ancestor)
+  ) {
+    if (ancestor === effect) {
+      contained = true;
+      break;
+    }
+    if (t.isFunction(ancestor) || t.isClass(ancestor)) return false;
+  }
+  if (!contained) return false;
+  for (
+    let ancestor = parents.get(effect);
+    ancestor !== undefined;
+    ancestor = parents.get(ancestor)
+  ) {
+    if (t.isLoop(ancestor)) return false;
+    if (t.isFunction(ancestor) || t.isProgram(ancestor)) break;
+  }
+  return true;
+};
+
 /** Order effects only in a non-repeating top-level activation. */
 export const semanticTopLevelEffectFollowsCapture = (
   capture: t.Node,

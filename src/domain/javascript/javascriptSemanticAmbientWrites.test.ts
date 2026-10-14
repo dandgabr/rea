@@ -35,6 +35,24 @@ const selected = flag ? box : box.next; selected.URL = replacement;`,
     specifier: "./worker.js",
   },
   {
+    name: "a loop-carried alias that becomes the global object after the write",
+    setup: `let alias = {};
+for (let index = 0; index < 2; index += 1) { alias.URL = replacement; alias = globalThis; }`,
+    specifier: null,
+  },
+  {
+    name: "an alias cycle that still reaches the global object",
+    setup: `let first = globalThis; let second = first; first = second;
+first.URL = replacement;`,
+    specifier: null,
+  },
+  {
+    name: "an alias overwritten with a fresh object before the write",
+    setup: `let alias = globalThis; alias = {};
+alias.URL = replacement;`,
+    specifier: "./worker.js",
+  },
+  {
     name: "unrelated writes through widened self-reference projections",
     setup: `let alias = globalThis; alias = alias.globalThis;
 alias.unrelated = replacement;`,

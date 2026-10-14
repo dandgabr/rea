@@ -19,7 +19,10 @@ import {
 } from "./javascriptSemanticPropertyPaths.js";
 
 import { semanticCallableIdForNode } from "./javascriptSemanticProjection.js";
-import { semanticTopLevelEffectFollowsCapture } from "./javascriptSemanticMutationInitializers.js";
+import {
+  semanticEffectConsumesCapture,
+  semanticTopLevelEffectFollowsCapture,
+} from "./javascriptSemanticMutationInitializers.js";
 import {
   resolveSemanticBindingState,
   type JavaScriptSemanticAnalysisState,
@@ -708,32 +711,6 @@ const builtinModuleEffects = (
   return effects;
 };
 
-/**
- * Whether `capture` is evaluated inside `effectNode`. Arguments are evaluated
- * before the call that consumes them, so an escape performed by that call
- * cannot have changed the value the capture already read.
- */
-const effectConsumesCapture = (
-  effectNode: t.Node | undefined,
-  capture: t.Node,
-  parents: WeakMap<t.Node, t.Node>,
-): boolean => {
-  if (
-    effectNode === undefined ||
-    (!t.isCallExpression(effectNode) &&
-      !t.isOptionalCallExpression(effectNode) &&
-      !t.isNewExpression(effectNode))
-  )
-    return false;
-  for (
-    let ancestor = parents.get(capture);
-    ancestor !== undefined;
-    ancestor = parents.get(ancestor)
-  )
-    if (ancestor === effectNode) return true;
-  return false;
-};
-
 /** Check shared exports at the use or method-capture point, not at every later call. */
 const requiredModuleChanged = (
   specifier: string,
@@ -758,7 +735,7 @@ const requiredModuleChanged = (
       affectsBuiltinPath(path, identity.path) &&
       !(
         kind === "escape" &&
-        effectConsumesCapture(node, capture, state.parentsByNode)
+        semanticEffectConsumesCapture(node, capture, state.parentsByNode)
       ) &&
       !semanticTopLevelEffectFollowsCapture(
         capture,
