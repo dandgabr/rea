@@ -1050,13 +1050,12 @@ export class RizinDebugSessionManager {
 
   #startupCapturedOutput(session: RizinDebugSession) {
     const output = session.supervisor.snapshot();
-    const partialFrame =
+    const partialBytes =
       session.bufferedFrameBytes === 0
-        ? ""
-        : Buffer.concat(
-            session.frameChunks,
-            session.bufferedFrameBytes,
-          ).toString("utf8");
+        ? Buffer.alloc(0)
+        : Buffer.concat(session.frameChunks, session.bufferedFrameBytes);
+    const partialFrame = partialBytes.toString("utf8");
+    const invalidUtf8 = session.invalidUtf8Observed || !isUtf8(partialBytes);
     const protocolOutput = [...session.history, partialFrame]
       .filter((frame) => frame.length > 0)
       .join("\n");
@@ -1071,6 +1070,7 @@ export class RizinDebugSessionManager {
     return {
       stdout: protocolBytes.subarray(0, stdoutBytes).toString("utf8"),
       stderr: output.stderr.text,
+      ...(invalidUtf8 ? { output_invalid_utf8: true as const } : {}),
       truncated:
         session.historyTruncated ||
         protocolBytes.length > stdoutBytes ||
@@ -1087,7 +1087,7 @@ export class RizinDebugSessionManager {
   ): void {
     const historyFrame =
       frameBytes > MAX_RECENT_FRAME_BYTES || frame.truncated
-        ? `${frame.text.slice(0, MAX_RECENT_FRAME_BYTES)}[recent frame truncated]`
+        ? `${truncateUtf8(frame.text, MAX_RECENT_FRAME_BYTES)}[recent frame truncated]`
         : frame.text;
     if (frameBytes > MAX_RECENT_FRAME_BYTES || frame.truncated)
       session.historyTruncated = true;

@@ -1853,29 +1853,33 @@ export class GdbSessionManager {
         session.pending.delete(token);
         session.protocolError =
           "A GDB MI command was cancelled; owned-session shutdown was requested because output correlation can no longer be guaranteed.";
+        const retainCancellation = (reason: string, cause: unknown): void => {
+          const failure = new AnalysisCancelledError("gdb_console", {
+            cause,
+            cleanup: { reason, resources: [session.id] },
+            partialObservation: evidence,
+          });
+          // The owned process may still be running; keep its cleanup owner
+          // attached to the session so a later close or retry can resolve it.
+          session.cleanupFailures.add(failure);
+          pending.reject(failure);
+        };
         void this.#stopDebuggerOnly(session).then(
           (stopped) => {
+            if (stopped.status === "incomplete") {
+              retainCancellation(stopped.reason, new Error(stopped.reason));
+              return;
+            }
             pending.reject(
-              stopped.status === "incomplete"
-                ? new AnalysisCancelledError("gdb_console", {
-                    cause: new Error(stopped.reason),
-                    cleanup: {
-                      reason: stopped.reason,
-                      resources: [session.id],
-                    },
-                    partialObservation: evidence,
-                  })
-                : new AnalysisCancelledError("gdb_console", {
-                    partialObservation: evidence,
-                  }),
+              new AnalysisCancelledError("gdb_console", {
+                partialObservation: evidence,
+              }),
             );
           },
           (cause: unknown) =>
-            pending.reject(
-              new AnalysisCancelledError("gdb_console", {
-                cause,
-                partialObservation: evidence,
-              }),
+            retainCancellation(
+              cause instanceof Error ? cause.message : String(cause),
+              cause,
             ),
         );
       };

@@ -41,6 +41,8 @@ export interface AnalysisCapturedOutput {
   readonly truncated: boolean;
   readonly stdout_bytes?: number;
   readonly stderr_bytes?: number;
+  /** Present when decoded text replaced bytes that were not valid UTF-8. */
+  readonly output_invalid_utf8?: true;
   readonly exit_code?: number | null;
   readonly signal?: string | null;
 }

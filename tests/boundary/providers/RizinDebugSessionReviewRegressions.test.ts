@@ -6,6 +6,7 @@ import { join } from "node:path";
 
 import { afterEach, expect, it } from "vitest";
 
+import { RIZIN_DEBUG_TOOL_CONTRACTS } from "../../../src/contracts/rizinDebugToolContracts.js";
 import { RizinDebugSessionManager } from "../../../src/rizin/RizinDebugSessionManager.js";
 import {
   spawnOwnedProviderProcess,
@@ -892,3 +893,77 @@ process.stdin.on("data", (chunk) => {
     process.kill(writerPid, "SIGKILL");
   },
 );
+
+it.skipIf(process.platform === "win32")(
+  "reports invalid UTF-8 in failed Rizin startup output",
+  async () => {
+    const injected = createInjectedProcess({
+      startup: (control) => {
+        control.output(Buffer.from([0x61, 0xff, 0x00, 0x62, 0xfe]));
+        control.exit();
+      },
+    });
+    const manager = createRizinTestManager(
+      { REA_RIZIN_COMMAND: "injected-rizin" },
+      { spawnProcess: injected.spawnProcess },
+    );
+    managers.push(manager);
+
+    const started = await manager.start({
+      path: "/tmp/fixture.bin",
+      inferior_tty: await rizinTestInferiorTty(),
+    });
+
+    expect(started.ok).toBe(false);
+    if (!started.ok)
+      expect(started.error.capturedOutput).toMatchObject({
+        output_invalid_utf8: true,
+      });
+  },
+);
+
+it.skipIf(process.platform === "win32")(
+  "bounds recent Rizin frames by UTF-8 bytes rather than UTF-16 units",
+  async () => {
+    const injected = createInjectedProcess();
+    const manager = createRizinTestManager(
+      { REA_RIZIN_COMMAND: "injected-rizin" },
+      { spawnProcess: injected.spawnProcess },
+    );
+    managers.push(manager);
+    const started = await manager.start({
+      path: "/tmp/fixture.bin",
+      inferior_tty: await rizinTestInferiorTty(),
+    });
+    expect(started.ok).toBe(true);
+    if (!started.ok) return;
+
+    // 9000 two-byte characters: under 16 KiB as UTF-16 units, over it as bytes.
+    injected.control.output(Buffer.from(`${"é".repeat(9000)}\0`, "utf8"));
+
+    const status = manager.status(started.value.session_id);
+    const recent = status?.recent_output.at(-1) ?? "";
+    const marker = "[recent frame truncated]";
+    expect(status?.recent_output_truncated).toBe(true);
+    expect(recent.endsWith(marker)).toBe(true);
+    expect(
+      Buffer.byteLength(recent.slice(0, -marker.length), "utf8"),
+    ).toBeLessThanOrEqual(16 * 1024);
+  },
+);
+
+it("rejects NUL in persistent Rizin command text", () => {
+  const contract = RIZIN_DEBUG_TOOL_CONTRACTS.find(
+    (candidate) => candidate.name === "rizin_debug_command",
+  );
+  const input = {
+    session_id: "00000000-0000-4000-8000-000000000001",
+  };
+
+  expect(
+    contract?.inputSchema.safeParse({ ...input, command: "dr" }).success,
+  ).toBe(true);
+  expect(
+    contract?.inputSchema.safeParse({ ...input, command: "dr\0px" }).success,
+  ).toBe(false);
+});

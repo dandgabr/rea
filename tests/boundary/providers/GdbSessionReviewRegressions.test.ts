@@ -1202,3 +1202,68 @@ setTimeout(() => process.exit(0), 250);
     }
   },
 );
+
+it.skipIf(process.platform === "win32")(
+  "keeps a cancelled command's cleanup failure owned until the session stops",
+  async () => {
+    directory = await mkdtemp(join(tmpdir(), "rea-gdb-cancel-cleanup-owner-"));
+    const provider = join(directory, "fake-gdb-cancel-cleanup-owner.mjs");
+    await writeFile(
+      provider,
+      `#!${process.execPath}
+process.stdout.write("(gdb)\\n");
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => {
+  input += chunk;
+  for (;;) {
+    const boundary = input.indexOf("\\n");
+    if (boundary < 0) break;
+    const line = input.slice(0, boundary); input = input.slice(boundary + 1);
+    const match = /^(\\d+)/.exec(line); if (!match) continue;
+    if (line.includes("auto-load off")) process.stdout.write(match[1] + "^done\\n");
+  }
+});
+setTimeout(() => process.exit(0), 250);
+`,
+    );
+    await chmod(provider, 0o700);
+    let stopCalls = 0;
+    const manager = createGdbManagerForInjectedPlatform({
+      environment: { REA_GDB_COMMAND: provider },
+      stopProcess: async () => {
+        stopCalls += 1;
+        if (stopCalls === 1)
+          throw new Error("simulated unexpected shutdown rejection");
+        return { status: "stopped" };
+      },
+    });
+    managers.push(manager);
+    const started = await manager.start();
+    expect(started.ok).toBe(true);
+    if (!started.ok) return;
+    const controller = new AbortController();
+    const execution = manager.execute(
+      started.value.session_id,
+      "shell sleep 600",
+      controller.signal,
+    );
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 30));
+    controller.abort();
+
+    const cancelled = await execution;
+
+    expect(cancelled.ok).toBe(false);
+    if (cancelled.ok) return;
+    expect(cancelled.error._tag).toBe("AnalysisCancelledError");
+    expect(cancelled.error.cleanup?.reason).toContain(
+      "simulated unexpected shutdown rejection",
+    );
+    expect(cancelled.error.cleanupIncomplete).toBe(true);
+
+    const closed = await manager.close(started.value.session_id);
+
+    expect(closed.ok).toBe(true);
+    expect(cancelled.error.cleanupIncomplete).toBe(false);
+  },
+);

@@ -53,6 +53,10 @@ export const RIZIN_DEBUG_TOOL_CONTRACTS = [
         .refine(
           (value) => !/[\r\n]/u.test(value),
           "A single command line is required",
+        )
+        .refine(
+          (value) => !value.includes("\0"),
+          "NUL bytes are not allowed because Rizin frames its output with NUL",
         ),
     }),
     outputSchema: evidenceResultOf(commandResult),
