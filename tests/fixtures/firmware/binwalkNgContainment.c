@@ -14,6 +14,9 @@ static int check_policy(char **argv) {
     int fd = open(argv[1], O_RDONLY);
     int host_denied = fd < 0;
     if (fd >= 0) close(fd);
+    fd = open(argv[5], O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    int device_denied = fd < 0;
+    if (fd >= 0) close(fd);
     fd = open(argv[2], O_RDONLY);
     int input_readable = fd >= 0;
     if (fd >= 0) close(fd);
@@ -32,13 +35,13 @@ static int check_policy(char **argv) {
     inet_pton(AF_INET, "127.0.0.1", &address.sin_addr);
     int network_denied = sock < 0 || connect(sock, (struct sockaddr *)&address, sizeof(address)) < 0;
     if (sock >= 0) close(sock);
-    printf("host_denied=%d input_readable=%d input_write_denied=%d work_writable=%d inherited_denied=%d ambient_denied=%d network_denied=%d\n", host_denied, input_readable, input_write_denied, work_writable, inherited_denied, ambient_denied, network_denied);
+    printf("host_denied=%d device_denied=%d input_readable=%d input_write_denied=%d work_writable=%d inherited_denied=%d ambient_denied=%d network_denied=%d\n", host_denied, device_denied, input_readable, input_write_denied, work_writable, inherited_denied, ambient_denied, network_denied);
     fflush(stdout);
-    return !(host_denied && input_readable && input_write_denied && work_writable && inherited_denied && ambient_denied && network_denied);
+    return !(host_denied && device_denied && input_readable && input_write_denied && work_writable && inherited_denied && ambient_denied && network_denied);
 }
 
 int main(int argc, char **argv) {
-    if (argc != 5) return 2;
+    if (argc != 6) return 2;
     int result = check_policy(argv);
     pid_t child = fork();
     if (child < 0) return 3;

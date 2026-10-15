@@ -1,7 +1,7 @@
 import { lstat, mkdir } from "node:fs/promises";
 import { basename, join, posix } from "node:path";
 import { ArtifactResourceScope } from "../../artifacts/ArtifactResourceScope.js";
-import type { SafeOutputTree } from "../../artifacts/SafeOutputTree.js";
+import { SafeOutputTree } from "../../artifacts/SafeOutputTree.js";
 import { AnalysisError } from "../../domain/analysisErrorBase.js";
 import { AnalysisOutputError } from "../../domain/analysisErrorCore.js";
 import { ProviderAdapterError } from "../../domain/providerAdapterError.js";
@@ -31,6 +31,7 @@ import {
   probeBinwalkNgSandbox,
   runBinwalkNgCommand,
 } from "./BinwalkNgCommand.js";
+import { BINWALK_NG_CGROUP_LIMITS } from "./BinwalkNgSystemdBoundary.js";
 import {
   parseBinwalkNgAnalyses,
   parseBinwalkNgEntropy,
@@ -45,6 +46,7 @@ export interface BinwalkNgWorkflowContext {
     command: string;
     bubblewrap: string;
     limiter: string;
+    systemdRun: string;
     manifest: string;
   };
   readonly signal: AbortSignal;
@@ -124,15 +126,37 @@ export const runBinwalkNgWorkflow = async (
   const workRoot = join(context.root, "work");
   await mkdir(workRoot, { mode: 0o700 });
   await mkdir(join(workRoot, "reports"), { mode: 0o700 });
-  const artifactRoot = join(workRoot, "artifacts");
-  const maxBytes =
-    "max_output_bytes" in request.input
-      ? request.input.max_output_bytes
-      : 256 * 1024 * 1024;
-  const maxFiles =
-    "max_output_files" in request.input
+  const transferRoot = join(workRoot, "transfer");
+  await mkdir(transferRoot, { mode: 0o700 });
+  const producesArtifacts =
+    request.operation === "carve_firmware" ||
+    request.operation === "extract_firmware";
+  // Scan outputs are report-sized. Producer artifacts use caller limits under
+  // independent absolute 512 MiB/10,000-file ceilings and private tmpfs quotas.
+  const maxBytes = producesArtifacts
+    ? Math.min(
+        request.input.max_output_bytes,
+        BINWALK_NG_CGROUP_LIMITS.outputBytes - FIRMWARE_LIMITS.reportBytes,
+      )
+    : Math.min(
+        "max_output_bytes" in request.input
+          ? request.input.max_output_bytes
+          : FIRMWARE_LIMITS.reportBytes,
+        FIRMWARE_LIMITS.reportBytes,
+      );
+  const maxFiles = Math.min(
+    producesArtifacts && "max_output_files" in request.input
       ? request.input.max_output_files
-      : 10_000;
+      : 2,
+    producesArtifacts ? 10_000 : 2,
+  );
+  // runFirmwareCommand inventories the entire private work root, including
+  // reports/artifacts directories, while maxFiles describes producer files.
+  // Leave bounded slots for those fixed workspace entries and the entropy PNG.
+  const maxStagingEntries = maxFiles + 8;
+  const transferFiles = maxStagingEntries + 2;
+  const transferEntries = transferFiles + 32;
+  const transferBytes = maxBytes + FIRMWARE_LIMITS.reportBytes;
   const analyses: Analysis[] = [];
   const runs: JsonValue[] = [];
   let reportBytes = 0;
@@ -147,6 +171,8 @@ export const runBinwalkNgWorkflow = async (
     [];
   const lineages = new Map<string, FileLineage>();
   const diagnostics: string[] = [];
+  const allArtifactEntries: FirmwareEntry[] = [];
+  let totalArtifactBytes = 0;
   let pngObservation:
     | Awaited<ReturnType<typeof inspectBinwalkNgPng>>
     | undefined;
@@ -161,6 +187,7 @@ export const runBinwalkNgWorkflow = async (
       sha256: target.selection.sha256,
     },
   ];
+  let activeTransferTree: SafeOutputTree | undefined;
   const publication = (
     entries: readonly FirmwareEntry[],
     outputDirectory: string,
@@ -208,6 +235,9 @@ export const runBinwalkNgWorkflow = async (
       const file = queue.shift();
       if (file === undefined) break;
       const pass = String(runs.length).padStart(4, "0");
+      const transferPassRoot = join(transferRoot, pass);
+      const transferTree = await SafeOutputTree.create(transferPassRoot);
+      activeTransferTree = transferTree;
       const sandbox = await prepareBinwalkNgSandbox({
         ...context.runtime,
         inputPath: file.inputPath,
@@ -216,20 +246,41 @@ export const runBinwalkNgWorkflow = async (
         scope: context.scope,
         operation: request.operation,
       });
-      const reportPath = join(workRoot, "reports", `${pass}.json`);
-      const pngPath = join(workRoot, "entropy.png");
-      const commandContext = {
+      const reportPath = join(transferPassRoot, "reports", `${pass}.json`);
+      const pngPath = join(transferPassRoot, "entropy.png");
+      const baseCommandContext = {
         sandbox,
         operation: request.operation,
         signal,
         maxOutputBytes: maxBytes,
-        maxOutputFiles: maxFiles,
+        maxOutputFiles: maxStagingEntries,
         retainCleanup: context.retainCleanup,
         ...(context.launcher === undefined
           ? {}
           : { launcher: context.launcher }),
       };
-      const versionExecution = await probeBinwalkNgSandbox(commandContext);
+      const versionExecution = await probeBinwalkNgSandbox(baseCommandContext);
+      const commandContext = {
+        ...baseCommandContext,
+        transfer: {
+          tree: transferTree,
+          paths: [
+            `reports/${pass}.json`,
+            ...(request.operation === "inspect_firmware_entropy"
+              ? ["entropy.png"]
+              : []),
+            ...(request.operation === "extract_firmware" ||
+            request.operation === "carve_firmware"
+              ? [`artifacts/${pass}`]
+              : []),
+          ],
+          maxBytes: transferBytes,
+          maxFiles: transferFiles,
+          maxEntries: transferEntries,
+          workspaceBytes: transferBytes,
+          workspaceInodes: transferEntries + 4,
+        },
+      };
       const nativeOutput = `/work/artifacts/${pass}`;
       const producingArtifacts =
         request.operation === "extract_firmware" ||
@@ -267,6 +318,8 @@ export const runBinwalkNgWorkflow = async (
         },
         args,
       );
+      await transferTree.commit();
+      activeTransferTree = undefined;
       const reportStat = await lstat(reportPath).catch((cause: unknown) => {
         if (
           cause instanceof Error &&
@@ -431,13 +484,24 @@ export const runBinwalkNgWorkflow = async (
           },
           raw: runs,
         };
+      const passArtifactRoot = join(transferPassRoot, "artifacts");
       const entries = await inventoryFirmwareOutput(
-        artifactRoot,
+        passArtifactRoot,
         maxBytes,
         maxFiles,
         request.operation,
         signal,
       );
+      totalArtifactBytes += entries.reduce((sum, entry) => sum + entry.size, 0);
+      if (
+        totalArtifactBytes > maxBytes ||
+        allArtifactEntries.length + entries.length > maxFiles
+      )
+        throw new AnalysisOutputError(
+          request.operation,
+          "Combined Binwalk-NG artifacts exceed the requested aggregate byte or file budget",
+        );
+      allArtifactEntries.push(...entries);
       const passEntries = entries.filter((entry) =>
         entry.relativePath.startsWith(`${pass}/`),
       );
@@ -446,7 +510,7 @@ export const runBinwalkNgWorkflow = async (
           entry,
           parsed[0],
           nativeOutput,
-          workRoot,
+          transferPassRoot,
         );
         const retainCarving = (carving: BinwalkNgCarvingObservation | null) =>
           lineages.set(entry.relativePath, {
@@ -528,7 +592,7 @@ export const runBinwalkNgWorkflow = async (
         });
       }
       if (queue.length === 0) {
-        for (const entry of entries)
+        for (const entry of allArtifactEntries)
           if (!lineages.has(entry.relativePath)) {
             lineages.set(entry.relativePath, {
               analysis_depth: null,
@@ -550,7 +614,7 @@ export const runBinwalkNgWorkflow = async (
             );
           }
         const published = await publication(
-          entries,
+          allArtifactEntries,
           request.input.output_directory,
         );
         const finalLineage = (entry: {
@@ -612,6 +676,28 @@ export const runBinwalkNgWorkflow = async (
       "No admitted file was analyzed",
     );
   } catch (cause: unknown) {
+    if (activeTransferTree !== undefined) {
+      const transferTree = activeTransferTree;
+      activeTransferTree = undefined;
+      try {
+        const cleanup = await transferTree.rollback();
+        if (cleanup.status === "incomplete")
+          throw new Error(
+            `Private transfer rollback retained ${cleanup.residualPaths.join(", ")}`,
+          );
+      } catch (cleanupCause: unknown) {
+        throw new ProviderCleanupError(
+          "binwalk-ng",
+          [transferTree.outputRoot],
+          {
+            reason: "Private framed-transfer staging could not be rolled back",
+            previous_error:
+              cause instanceof Error ? cause.message : String(cause),
+          },
+          { operation: request.operation, cause: cleanupCause },
+        );
+      }
+    }
     if (runs.length > 0) {
       if (
         cause instanceof ProviderCleanupError &&
@@ -650,6 +736,7 @@ const recheckRuntime = async (
     sandbox.command,
     sandbox.bubblewrap,
     sandbox.limiter,
+    sandbox.systemdRun,
     sandbox.manifest,
     ...sandbox.runtime_mounts.map((mount) => ({
       path: mount.source,

@@ -1,5 +1,21 @@
 # Firmware container transport boundary
 
+## Current support status
+
+Production REA does not create, initialize, start, stop, kill, remove, build,
+pull, or reconfigure containers. It also does not yet admit or execute inside a
+caller-selected existing container. The production lifecycle-command admission
+and container acquisition APIs fail closed. Firmware container execution is
+therefore unsupported in this revision; the internal Podman store and image
+observation work below is not evidence of container confinement or provider
+support. Disposable container lifecycle operations in tests are test-fixture
+cleanup only.
+
+An existing-container mode remains deferred until REA can select an exact
+already-running container and prove its identity, image, mounts, network,
+namespace, capabilities, devices, and input immutability without changing its
+lifecycle. Rootless status alone is insufficient.
+
 The internal container transport accepts a caller-selected, already initialized
 rootless Podman store. This boundary currently provides bootstrap admission,
 controlled host-client execution and local immutable-image observations. It does
@@ -81,3 +97,64 @@ when cleanup also fails; retry does not repeat setup. Exact container IDs, prepa
 container settlement need their separate lifecycle owner; host-client exit does
 not prove container or producer exit. A bootstrap or image-inspection pass is
 not provider conformance.
+
+**Deferred design, not current behavior:** the internal lifecycle owner is retained before `create` can have effects. It
+binds the full container ID, immutable image ID, owner token, creation timestamp
+and selected store before acquiring cleanup authority. A missing acknowledgement
+can be recovered by exact token discovery followed by full identity inspection;
+it never repeats creation, initialization or workload start. Created containers
+need not expose an initialized OCI path or image root yet. Initialization admits
+those later fields, positive host process generations, raw OCI, mountinfo and
+prepared namespace observations before start. Cleanup rechecks the immutable
+association, settles only the owned container and requires exact absence plus
+recorded process-generation settlement. An exited native overlay may omit its
+current merged directory; cleanup retains the original admitted root binding and
+permits that omission only with an exited/stopped, nonrunning PID-zero state.
+Failed cleanup retains the dependent staging and transport roots for retry.
+
+### Deferred policy and observer details
+
+These are design constraints and internal observations; they do not enable
+firmware execution in a container.
+
+The proposed default OCI policy is pinned to Podman 5.8.7 and crun 1.28 on the
+measured Linux x86_64 rootless native-overlay host. Fixed read-only image,
+network-none, nonroot keep-id, zero capabilities and no-new-privileges remain
+mandatory. Staging roles use `/rea-input` read-only, `/rea-work` writable and
+optional `/rea-plugins` read-only, with explicit nosuid/nodev and disjoint source
+roots. Runtime-generated mounts are compared semantically without assuming an
+order for disjoint destinations. Mask multiplicity is preserved, including the
+observed stacked powercap mask. Host-generated CPU thermal masks follow the
+pinned vendor rule rather than a fixed CPU count. Unsupported runtime or policy
+drift is refused. Prepared SELinux execution labels are pending `attr/exec`
+observations; current labels and post-FIFO NNP/seccomp state are distinct facts.
+No experimental label, proc-unmask, privileged or unconfined policy is implied.
+
+Optional `metadata_observer` selects the fixed `python-preloaded-v1` protocol,
+absolute selected/resolved Python paths, executable SHA-256 and Python 3.14.8.
+The packaged helper is read and admitted before launch as fixed `-c` bytes. The
+interpreter executes through its retained FD. All code, imports, failure handling
+and serialization are preloaded in the parent view before single-threaded user
+and mount namespace entry through inherited, generation-bound FDs. A post-entry
+audit guard refuses code loading, process creation and thread creation. There is
+no post-entry exec or helper-path lookup. Credential maps, emptied supplementary
+groups, entered namespaces, acquired host PID/run token and interpreter descriptor
+identity are checked alongside anchored process-generation brackets.
+
+This observer is metadata-only: O_PATH/no-follow descriptors compare the image
+root, four runtime binds and up to three staging roles through helper/prepared
+root views. It neither reads firmware nor grants lifecycle authority over the
+external per-user helper. Its fixed request is at most 16 KiB, response and each
+capture at most 64 KiB, live transient FD count at most 32 and module inventory
+at most 128. Complete argv/environment representation is capped at 96 KiB before
+spawn. Exact UTF-8 response size is accounted before JSON allocation. Its
+supervised process uses a 10-second monotonic operation budget, CPU 5 seconds,
+address space 1 GiB, file size 1 MiB and core size zero. These limits are separate
+from the Go transport and producer policies. Captures and independently observed
+partial facts survive cancellation, refusal and failed close; retry settles the
+same process/descriptor owner before releasing dependent resources.
+
+Source and installed default-policy Python sentinels and alternate private-view
+metadata controls verify this boundary. They do not establish Binwalk readiness,
+inner-bwrap confinement or public firmware container support. Those producer and
+public CLI/MCP acceptance lanes require their own tested policy and evidence.

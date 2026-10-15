@@ -35,6 +35,8 @@ export interface OwnedProviderProcessSpawnOptions {
   readonly hostEnvironment?: NodeJS.ProcessEnv;
   /** Opt into a writable protocol stream; other providers retain ignored stdin. */
   readonly stdin?: "pipe";
+  /** Internal explicit descriptor allow-list; POSIX child slots start at3. */
+  readonly inheritedDescriptors?: readonly number[];
   /**
    * Commit limit in bytes for the whole owned process tree, enforced by its
    * Windows Job Object. Other launchers cannot enforce it and refuse it.
@@ -210,6 +212,15 @@ export const spawnOwnedProviderProcess = async (
   await prepareProcessOwnershipInspection(options.signal);
   options.signal?.throwIfAborted();
   const platform = options.platform ?? process.platform;
+  const descriptors = options.inheritedDescriptors ?? [];
+  if (
+    descriptors.length > 5 ||
+    descriptors.some((fd) => !Number.isSafeInteger(fd) || fd < 0) ||
+    (platform === "win32" && descriptors.length !== 0)
+  )
+    throw new Error(
+      "Explicit descriptor inheritance requires at most 5 valid POSIX handles",
+    );
   const sweepTokenOwnedProcesses =
     options.sweepTokenOwnedProcesses === true && platform !== "win32";
   let captureBaseline: ProcessOwnershipBaseline | undefined;
@@ -258,7 +269,7 @@ export const spawnOwnedProviderProcess = async (
   const child = spawn(options.command, [...options.arguments], {
     shell: false,
     windowsHide: true,
-    stdio: [options.stdin ?? "ignore", "pipe", "pipe"],
+    stdio: [options.stdin ?? "ignore", "pipe", "pipe", ...descriptors],
     detached: platform !== "win32",
     windowsVerbatimArguments: options.windowsVerbatimArguments ?? false,
     env: environment,

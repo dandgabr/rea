@@ -27,6 +27,10 @@ import {
 import { launchPodmanDirectClient } from "./PodmanClientCleanup.js";
 import type { PodmanDescriptorIdentity } from "./PodmanStoreProfile.js";
 import { observePodmanSharedHelper } from "./PodmanSharedHelper.js";
+import {
+  admitPodmanLifecycleCommand,
+  podmanFullContainerId,
+} from "./PodmanLifecycleCommands.js";
 
 // Podman c593b672 vendor/go.podman.io/image/v5/docker/reference grammar:
 // names <=255 ASCII bytes, optional native tag <=128, immutable lowercase SHA256.
@@ -45,8 +49,27 @@ export const podmanImmutableImageSchema = z
     return parsed !== null && parsed[1]!.length <= 255;
   });
 
+/** Fixed existing-service identity projection; unrelated configuration is never requested. */
+export const PODMAN_EXISTING_GENERATION_FORMAT =
+  '--format=[{"Id":{{json .ID}},"Image":{{json .Image}},"State":{"Running":{{json .State.Running}},"Pid":{{json .State.Pid}},"StartedAt":{{json .State.StartedAt}}}}]';
+export const podmanExistingGenerationCommand = (
+  id: string,
+): readonly string[] =>
+  Object.freeze([
+    "inspect",
+    PODMAN_EXISTING_GENERATION_FORMAT,
+    "--",
+    podmanFullContainerId.parse(id),
+  ]);
+
 /** Only fixed currently supported protocols are admitted; operands always follow '--'. */
 const podmanCommandSchema = z.union([
+  z.tuple([
+    z.literal("inspect"),
+    z.literal(PODMAN_EXISTING_GENERATION_FORMAT),
+    z.literal("--"),
+    podmanFullContainerId,
+  ]),
   z.tuple([z.literal("info"), z.literal("--format=json")]),
   z.tuple([z.literal("--version")]),
   z.tuple([
@@ -133,14 +156,17 @@ export const admitPodmanInvocationSelectors = (
       );
     seen.set(key, setting);
   }
-  const command = podmanCommandSchema.safeParse(argv.slice(index));
-  if (!command.success)
+  const command = argv.slice(index);
+  if (
+    !podmanCommandSchema.safeParse(command).success &&
+    !admitPodmanLifecycleCommand(command)
+  )
     throw podmanProfileUnavailable(
       "Actual prepared command has unsupported flags, missing operand delimiter or invalid positional identity before spawn",
     );
   if (
     expectedCommand !== undefined &&
-    JSON.stringify(command.data) !== JSON.stringify(expectedCommand)
+    JSON.stringify(command) !== JSON.stringify(expectedCommand)
   )
     throw podmanProfileUnavailable(
       "Actual prepared command changed the selected operation or positional identity before spawn",
@@ -174,6 +200,7 @@ export class PreparedPodmanTransport {
   readonly #files: PodmanDescriptorIdentity[] = [];
   readonly #limiter: PodmanDescriptorIdentity;
   #closed = false;
+  #closing = false;
   #boundaryUnverified = false;
   #metadataVerified = false;
   private constructor(
@@ -201,6 +228,9 @@ export class PreparedPodmanTransport {
       CONTAINERS_STORAGE_CONF: join(root.path, "storage.conf"),
       DBUS_SESSION_BUS_ADDRESS: `unix:path=${store.selection.runtime_directory}/bus`,
     });
+  }
+  get resource_limiter(): string {
+    return this.#limiter.path;
   }
   get root_path(): string {
     return this.#root.path;
@@ -352,7 +382,7 @@ export class PreparedPodmanTransport {
 
   /** Adapter-only fixed command seam; exact selectors are asserted immediately before launch. */
   async run(args: readonly string[], signal: AbortSignal) {
-    if (this.#closed)
+    if (this.#closed || this.#closing)
       throw podmanProfileUnavailable("Prepared container transport is closed");
     const parsedCommand = podmanCommandSchema.safeParse(args);
     if (!parsedCommand.success)
@@ -360,6 +390,11 @@ export class PreparedPodmanTransport {
         "Prepared command has unsupported flags, missing operand delimiter or invalid positional identity",
       );
     const command = Object.freeze(parsedCommand.data);
+    return this.#execute(command, signal);
+  }
+
+  async #execute(command: readonly string[], signal: AbortSignal) {
+    await this.#settleDirectClients();
     const metadata = command[0] === "info";
     if (!this.#metadataVerified && !metadata)
       throw podmanProfileUnavailable(
@@ -417,6 +452,9 @@ export class PreparedPodmanTransport {
           return this.#launcher(options);
         },
         limitProfile: "container-transport",
+        ...(command[0] === "container" && command[1] === "exists"
+          ? { acceptedExitCodes: [1] }
+          : {}),
         retainCleanup: (owner) => this.#pending.add(owner),
       });
     } catch (cause: unknown) {
@@ -586,21 +624,8 @@ export class PreparedPodmanTransport {
   }
 
   async close(): Promise<void> {
-    this.#closed = true;
-    for (const owner of [...this.#pending]) {
-      const stopped = await owner.stop();
-      if (stopped.status !== "incomplete") this.#pending.delete(owner);
-    }
-    if (this.#pending.size > 0)
-      throw new ProviderCleanupError(
-        "podman",
-        [this.#root.path],
-        {
-          reason:
-            "Direct transport client cleanup remains pending; private configuration is retained",
-        },
-        { operation: "firmware_container_runtime" },
-      );
+    this.#closing = true;
+    await this.#settleDirectClients();
     if (this.#boundaryUnverified) {
       try {
         await observePodmanSharedHelper(
@@ -633,9 +658,30 @@ export class PreparedPodmanTransport {
         { reason: "Private transport root cleanup remains pending" },
         { operation: "firmware_container_runtime", cause: released.cause },
       );
+    this.#closed = true;
+  }
+
+  async #settleDirectClients(): Promise<void> {
+    for (const owner of [...this.#pending]) {
+      const stopped = await owner.stop();
+      if (stopped.status !== "incomplete") this.#pending.delete(owner);
+    }
+    if (this.#pending.size > 0)
+      throw new ProviderCleanupError(
+        "podman",
+        [this.#root.path],
+        {
+          reason:
+            "Direct transport client cleanup remains pending; private configuration is retained",
+        },
+        { operation: "firmware_container_runtime" },
+      );
   }
 }
 
+export type PodmanTransportCapture = Awaited<
+  ReturnType<PreparedPodmanTransport["run"]>
+>;
 /** Normalize the producing setup boundary once; arbitrary causes are not public Evidence. */
 const preparationFailure = (
   cause: unknown,

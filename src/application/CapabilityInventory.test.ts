@@ -40,6 +40,40 @@ it("reports module syntax and native resolution availability separately", () => 
   });
 });
 
+it("keeps Binwalk-NG-only tools unavailable while default providers remain enabled", () => {
+  const policy: Parameters<typeof buildCapabilityInventory>[1] = {
+    processCaptureEnabled: true,
+    firmwareInspectionEnabled: true,
+    firmwareExtractionEnabled: true,
+  };
+  for (const name of ["inspect_firmware_entropy", "inspect_firmware_provider"])
+    expect(entry(name, status(), policy)).toMatchObject({
+      available: false,
+      reason: "provider_missing",
+      remediation: expect.stringContaining("Configure Binwalk-NG"),
+    });
+  expect(entry("carve_firmware", status(), policy)).toMatchObject({
+    available: false,
+    reason: "provider_missing",
+    remediation: expect.stringContaining("Extraction remains unavailable"),
+  });
+  expect(
+    entry("carve_firmware", status(), {
+      ...policy,
+      binwalkNgAnalysisEnabled: true,
+    }),
+  ).toMatchObject({
+    available: true,
+    reason: "available",
+  });
+  expect(entry("inspect_firmware_regions", status(), policy)).toMatchObject({
+    available: true,
+  });
+  expect(entry("extract_firmware", status(), policy)).toMatchObject({
+    available: true,
+  });
+});
+
 const enabledPolicy: Parameters<typeof buildCapabilityInventory>[1] = {
   processCaptureEnabled: true,
   browserObservationEnabled: true,

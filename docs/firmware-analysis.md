@@ -13,11 +13,17 @@ On Linux, Binwalk and Unblob run as REA-owned processes and require a
 procps-compatible `ps` on REA's `PATH`; see the shared
 [Linux process prerequisite](installation.md#linux-owned-process-prerequisite).
 
-Explicit `provider_id: "binwalk-ng"` adds the independent 4.0.0 profile for
-inspection/extraction, `carve_firmware`, `inspect_firmware_entropy` and corpus
-`inspect_firmware_provider`. It requires its own minimal bubblewrap runtime
-manifest; see [binwalk-ng setup, options and coverage](binwalk-ng.md). The
-legacy defaults and their prerequisites described below remain unchanged.
+The independent `binwalk-ng/binwalk-ng` 4.0.0 provider supports provider
+inventory, one-pass region scans, entropy analysis and internal carving on Linux
+when an explicit runtime is configured and user-systemd cgroup v2 plus the
+required bubblewrap policy are available. The service verifies effective
+memory, swap, task and CPU limits before execution and requires a private tmpfs
+work area. Selected carving is bounded by a private tmpfs byte/inode quota and
+verified framed transfer. Helper-based extraction remains unavailable because
+signature-selected external helper execution and exact helper-path identity are
+not admitted. Caller-provided container execution is also unsupported. See
+[Binwalk-NG setup, options and coverage](binwalk-ng.md). The legacy defaults and
+their prerequisites below remain unchanged.
 
 ## Caller-supplied tools
 

@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdir, open, readFile, writeFile } from "node:fs/promises";
+import { existsSync, lstatSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServer } from "node:net";
@@ -9,38 +10,67 @@ import { createTestTempDirectory } from "../../../tests/fixtures/temporaryDirect
 import { prepareBinwalkNgSandbox } from "./BinwalkNgSandbox.js";
 import { runBinwalkNgCommand } from "./BinwalkNgCommand.js";
 
-const manifest = process.env.REA_TEST_BINWALK_NG_RUNTIME_MANIFEST;
-const bubblewrap = process.env.REA_TEST_BWRAP_COMMAND;
+const bubblewrap = process.env.REA_TEST_BWRAP_COMMAND ?? "/usr/bin/bwrap";
+const limiter = process.env.REA_TEST_PRLIMIT_COMMAND ?? "/usr/bin/prlimit";
+const compiler = process.env.REA_TEST_C_COMPILER ?? "/usr/bin/cc";
+const runtimeLibraries = [
+  ["/lib64/libc.so.6", "/lib64/libc.so.6"],
+  ["/lib64/ld-linux-x86-64.so.2", "/lib64/ld-linux-x86-64.so.2"],
+] as const;
+const deviceCanary = ["/dev/kvm", "/dev/mem", "/dev/sda"].find((path) => {
+  try {
+    const metadata = lstatSync(path);
+    return metadata.isCharacterDevice() || metadata.isBlockDevice();
+  } catch {
+    return false;
+  }
+});
 it.runIf(
-  manifest !== undefined &&
-    bubblewrap !== undefined &&
+  existsSync(bubblewrap) &&
+    existsSync(limiter) &&
+    existsSync(compiler) &&
+    runtimeLibraries.every(([source]) => existsSync(source)) &&
+    deviceCanary !== undefined &&
     process.platform === "linux",
 )(
-  "proves real policy denies host reads, input writes, inherited descriptors, ambient environment and host network for leader and descendant",
+  "proves real policy denies host files and device nodes, input writes, inherited descriptors, ambient environment and host network for leader and descendant",
   async () => {
-    if (manifest === undefined || bubblewrap === undefined)
+    if (deviceCanary === undefined)
       throw new Error("Missing explicit real-policy prerequisites");
+    const canaryMetadata = lstatSync(deviceCanary);
+    expect(
+      canaryMetadata.isCharacterDevice() || canaryMetadata.isBlockDevice(),
+    ).toBe(true);
     const root = await createTestTempDirectory("rea-ng-containment-");
     const command = join(root, "probe");
-    await promisify(execFile)(
-      process.env.REA_TEST_C_COMPILER ?? "/usr/bin/cc",
-      [
-        fileURLToPath(
-          new URL(
-            "../../../tests/fixtures/firmware/binwalkNgContainment.c",
-            import.meta.url,
-          ),
+    await promisify(execFile)(compiler, [
+      fileURLToPath(
+        new URL(
+          "../../../tests/fixtures/firmware/binwalkNgContainment.c",
+          import.meta.url,
         ),
-        "-o",
-        command,
-      ],
-    );
+      ),
+      "-o",
+      command,
+    ]);
     const canary = join(root, "host-canary"),
       input = join(root, "input.bin"),
       work = join(root, "work");
     await writeFile(canary, "host-only");
     await writeFile(input, "immutable input");
     await mkdir(work);
+    const manifest = join(root, "runtime.json");
+    await writeFile(
+      manifest,
+      JSON.stringify({
+        profile: "binwalk-ng-4.0.0",
+        mounts: runtimeLibraries.map(([source, destination]) => ({
+          source: realpathSync(source),
+          destination,
+          kind: "library",
+        })),
+      }),
+    );
     const descriptor = await open(canary, "r");
     const server = createServer((socket) => socket.end("host network"));
     await new Promise<void>((resolve, reject) => {
@@ -53,7 +83,9 @@ it.runIf(
     const sandbox = await prepareBinwalkNgSandbox({
       command,
       bubblewrap,
-      limiter: process.env.REA_TEST_PRLIMIT_COMMAND ?? "/usr/bin/prlimit",
+      limiter,
+      systemdRun:
+        process.env.REA_TEST_SYSTEMD_RUN_COMMAND ?? "/usr/bin/systemd-run",
       manifest,
       inputPath: input,
       workRoot: work,
@@ -77,10 +109,11 @@ it.runIf(
           sandbox.input_path,
           String(address.port),
           String(descriptor.fd),
+          deviceCanary,
         ],
       );
       const control =
-        "host_denied=1 input_readable=1 input_write_denied=1 work_writable=1 inherited_denied=1 ambient_denied=1 network_denied=1";
+        "host_denied=1 device_denied=1 input_readable=1 input_write_denied=1 work_writable=1 inherited_denied=1 ambient_denied=1 network_denied=1";
       expect(result.stdout.text.trim().split("\n")).toEqual([control, control]);
       expect(await readFile(input, "utf8")).toBe("immutable input");
     } finally {

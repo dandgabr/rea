@@ -97,6 +97,7 @@ export const prepareBinwalkNgSandbox = async (input: {
   readonly command: string;
   readonly bubblewrap: string;
   readonly limiter: string;
+  readonly systemdRun?: string;
   readonly manifest: string;
   readonly inputPath: string;
   readonly workRoot: string;
@@ -118,6 +119,11 @@ export const prepareBinwalkNgSandbox = async (input: {
   );
   const limiter = await identifyBinwalkNgRuntimeFile(
     input.limiter,
+    true,
+    input,
+  );
+  const systemdRun = await identifyBinwalkNgRuntimeFile(
+    input.systemdRun ?? "/usr/bin/systemd-run",
     true,
     input,
   );
@@ -246,6 +252,7 @@ export const prepareBinwalkNgSandbox = async (input: {
     command,
     bubblewrap,
     limiter,
+    systemdRun,
     manifest: manifestFile,
     runtime_mounts: runtimeMounts,
     input_path: inputDestination,

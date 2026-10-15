@@ -106,6 +106,7 @@ export const inspectBinwalkNgRuntime = async (context: {
     command: string;
     bubblewrap: string;
     limiter: string;
+    systemdRun: string;
     manifest: string;
   };
   signal: AbortSignal;
@@ -154,6 +155,7 @@ export const inspectBinwalkNgRuntime = async (context: {
       sandbox.command,
       sandbox.bubblewrap,
       sandbox.limiter,
+      sandbox.systemdRun,
       sandbox.manifest,
       ...sandbox.runtime_mounts.map((mount) => ({
         path: mount.source,

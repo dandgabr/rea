@@ -66,6 +66,7 @@
     "bridge/ghidra/ReaGhidraPrepareRaw.java",
     "bridge/android/ReaJadxBridge.java",
     "bridge/firmware/podman_db_config.mjs",
+    "bridge/firmware/podman_namespace_metadata.py",
     "bridge/mitmproxy/capture.py",
     "scripts/rea.mjs",
     "scripts/rea-android-workspace-guardian.mjs",

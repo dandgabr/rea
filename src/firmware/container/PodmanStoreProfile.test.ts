@@ -149,3 +149,34 @@ it("rejects incomplete bootstrap, unknown keys, unsupported helpers/options and 
       JSON.stringify(input),
     ).toBe(false);
 });
+
+it("admits explicit pinned preloaded metadata interpreter without making it bootstrap-mandatory", () => {
+  const metadata_observer = {
+    kind: "python-preloaded-v1",
+    command: "/usr/bin/python3",
+    resolved_command: "/usr/bin/python3.14",
+    sha256: "a".repeat(64),
+    version: "3.14.8",
+  };
+  expect(
+    podmanExistingStoreProfileSchema.parse(selectedStore()).metadata_observer,
+  ).toBeUndefined();
+  expect(
+    podmanExistingStoreProfileSchema.parse({
+      ...selectedStore(),
+      metadata_observer,
+    }).metadata_observer,
+  ).toEqual(metadata_observer);
+  for (const change of [
+    { kind: "arbitrary" },
+    { version: "3.11" },
+    { sha256: "x" },
+    { args: ["-c", "code"] },
+  ])
+    expect(
+      podmanExistingStoreProfileSchema.safeParse({
+        ...selectedStore(),
+        metadata_observer: { ...metadata_observer, ...change },
+      }).success,
+    ).toBe(false);
+});

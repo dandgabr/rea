@@ -35,6 +35,7 @@ import {
 import { snapshotFirmware } from "../FirmwareFiles.js";
 import { BINWALK_NG_RELEASE, FIRMWARE_LIMITS } from "../FirmwareRelease.js";
 import { runBinwalkNgWorkflow } from "./BinwalkNgWorkflow.js";
+import { requireBinwalkNgTmpfs } from "./BinwalkNgSystemdBoundary.js";
 
 interface OwnedWorkflow {
   root: PrivateRuntimeRoot;
@@ -47,12 +48,19 @@ type Outcome = Result<AnalysisExecution, AnalysisError>;
 const limitations = [
   "Signature matches and provider-reported sizes do not establish partition validity, encryption, authentication or runtime mappings. Empty native analyses do not attest a successful read or absence of findings.",
   "The selected binwalk-ng 4.0.0 profile is a compatibility declaration. Runtime executable, selected regular-file mounts, launcher and limiter are fingerprinted; the installed source revision remains unknown. Identity readback is not syscall-level TOCTOU prevention.",
-  "Every invocation and descendant uses the probed bubblewrap namespace/mount/environment policy. Only selected runtime files and immutable input are readable, and the owned work tree is writable. No unrestricted fallback is used.",
-  "Per-process address-space/CPU/file-size limits and one global deadline are enforced. Polled staging budgets may transiently overshoot; these are not aggregate process-memory or filesystem quotas.",
-  "Recursion is an explicit bounded queue, respecting native do_not_recurse, empty/nonregular files and admitted depth. Unknown and unexamined files remain explicit. External extractor diagnostics discarded by native JSON remain unknown even after exit zero.",
-  "Carving lineage requires actual source-byte comparison. Decompressed or unattributed children have unknown original byte ranges. Extracted code is never executed. Only regular files are published with private nonexecutable permissions.",
+  "Each invocation runs in a dedicated user-systemd cgroup and the exact bubblewrap namespace/mount policy. Effective cgroup v2 memory, swap, task and CPU limits are read back in-unit before execution. The manager environment is enumerated by name and removed from the service; selected runtime files and immutable input alone are readable inside bubblewrap.",
+  "The private work tree must be tmpfs; producer writes are charged to the same 512 MiB cgroup memory ceiling. Individual report/PNG reads remain capped at 8 MiB and captures are separately bounded. This is not a caller-configurable 512 MiB output quota.",
+  "Provider inventory, one-pass signature scan, native entropy and internal carving are admitted under the verified native boundary. Extraction remains unavailable before target reads because signature-selected external helper execution and helper-path identity have not been admitted.",
+  "Unknown and unexamined files remain explicit. Empty native analyses do not attest successful examination. Extracted code is never executed. No unrestricted fallback is used.",
   "Entropy preserves native Shannon values and measured byte windows without encryption/compression interpretation. Native plot dimensions are verified from the bounded PNG header, not a complete image decode. Optional PNG controls publication only.",
 ] as const;
+
+const nativeOperations = new Set([
+  "inspect_firmware_provider",
+  "inspect_firmware_regions",
+  "inspect_firmware_entropy",
+  "carve_firmware",
+]);
 
 /** Single-outstanding BYO binwalk-ng provider owning all processes, private roots and output cleanup. */
 export class BinwalkNgProvider {
@@ -84,6 +92,14 @@ export class BinwalkNgProvider {
           "binwalk-ng",
           request.operation,
           "This adapter requires explicit binwalk-ng selection",
+        ),
+      );
+    if (!nativeOperations.has(request.operation))
+      return err(
+        firmwareToolUnavailable(
+          "binwalk-ng",
+          request.operation,
+          "Binwalk-NG extraction remains unavailable until signature-selected external helpers and exact helper-path identity are admitted",
         ),
       );
     const deadline = AbortSignal.timeout(FIRMWARE_LIMITS.timeoutMs);
@@ -177,6 +193,9 @@ export class BinwalkNgProvider {
         manifest: required("REA_BINWALK_NG_RUNTIME_MANIFEST"),
         limiter:
           this.environment.REA_FIRMWARE_PRLIMIT_COMMAND ?? "/usr/bin/prlimit",
+        systemdRun:
+          this.environment.REA_FIRMWARE_SYSTEMD_RUN_COMMAND ??
+          "/usr/bin/systemd-run",
       };
       const root = await PrivateRuntimeRoot.create({
         prefix: "rea-binwalk-ng-",
@@ -187,6 +206,8 @@ export class BinwalkNgProvider {
         operation: request.operation,
       };
       this.#owned.add(owner);
+      if (this.launcher === undefined)
+        await requireBinwalkNgTmpfs(root.path, request.operation);
       const owned = owner;
       const common = {
         root: root.path,

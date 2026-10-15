@@ -25,6 +25,10 @@ export const observePodmanProfileFile = (
   maximumBytes: number,
   signal: AbortSignal,
   scope: ArtifactResourceScope,
+  retainObservation?: (observation: {
+    identity: PodmanDescriptorIdentity;
+    bytes: Buffer;
+  }) => void,
 ) =>
   withFirmwareFiles(
     [path],
@@ -61,7 +65,9 @@ export const observePodmanProfileFile = (
         size: bytes.length,
         sha256: createHash("sha256").update(bytes).digest("hex"),
       };
-      return { identity, bytes };
+      const observation = { identity, bytes };
+      retainObservation?.(observation);
+      return observation;
     },
     "podman",
   );

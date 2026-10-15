@@ -47,6 +47,15 @@ const profile = z.strictObject({
     source_semantic_revision: z.literal(PODMAN_SOURCE_SEMANTICS),
     binary_source_attestation: z.literal("unknown"),
   }),
+  metadata_observer: z
+    .strictObject({
+      kind: z.literal("python-preloaded-v1"),
+      command: podmanAbsolutePath,
+      resolved_command: podmanAbsolutePath,
+      sha256: digest,
+      version: z.literal("3.14.8"),
+    })
+    .optional(),
   rootless_uid: uid.positive(),
   runtime_directory: podmanAbsolutePath,
   graph_root: podmanAbsolutePath,

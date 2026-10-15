@@ -54,7 +54,7 @@ export type AvailabilityPolicy = {
   readonly recordedCrashEnabled?: boolean;
   readonly firmwareInspectionEnabled?: boolean;
   readonly firmwareExtractionEnabled?: boolean;
-  readonly firmwareNgEnabled?: boolean;
+  readonly binwalkNgAnalysisEnabled?: boolean;
   readonly androidAnalysisAvailability?: ProviderAvailability;
   readonly adbAnalysisAvailability?: ProviderAvailability;
   readonly apktoolAnalysisAvailability?: ProviderAvailability;
@@ -450,18 +450,35 @@ const workflowAvailabilityFor = ({
             "On Linux x64, set absolute REA_PWNTOOLS_PYTHON to caller-supplied Python with pwntools 4.15.0. No active binary target is required.",
         };
   if (kind === "firmware-provider") {
+    if (name === "carve_firmware")
+      return policy.binwalkNgAnalysisEnabled === true
+        ? { reason: "available", remediation: null }
+        : {
+            reason: "provider_missing",
+            remediation:
+              "Configure the admitted native Binwalk-NG runtime with absolute REA_BINWALK_NG_COMMAND and REA_BINWALK_NG_RUNTIME_MANIFEST paths plus bubblewrap, prlimit, tmpfs and a delegated user-systemd manager. Extraction remains unavailable because external helper identity is not admitted.",
+          };
+    if (
+      name === "inspect_firmware_entropy" ||
+      name === "inspect_firmware_provider"
+    )
+      return policy.binwalkNgAnalysisEnabled === true
+        ? { reason: "available", remediation: null }
+        : {
+            reason: "provider_missing",
+            remediation:
+              "Configure Binwalk-NG with absolute REA_BINWALK_NG_COMMAND and REA_BINWALK_NG_RUNTIME_MANIFEST paths. Native analysis also requires bubblewrap, prlimit, a tmpfs workspace, and a caller's user systemd manager with delegated memory, task, CPU, and runtime limits. Runtime admission is checked again for each operation.",
+          };
     const enabled =
       name === "inspect_firmware_regions"
-        ? policy.firmwareInspectionEnabled
-        : name === "extract_firmware"
-          ? policy.firmwareExtractionEnabled
-          : policy.firmwareNgEnabled;
+        ? policy.firmwareInspectionEnabled || policy.binwalkNgAnalysisEnabled
+        : policy.firmwareExtractionEnabled;
     return enabled === true
       ? { reason: "available", remediation: null }
       : {
           reason: "provider_missing",
           remediation:
-            "On Linux, configure ng with absolute REA_BINWALK_NG_COMMAND, REA_FIRMWARE_BWRAP_COMMAND and REA_BINWALK_NG_RUNTIME_MANIFEST. Legacy operations use an absolute REA_BINWALK_COMMAND (Binwalk 3.1.x, verified with 3.1.0) or REA_UNBLOB_COMMAND (Unblob 26.6.x, verified with 26.6.4) path and util-linux prlimit. Extraction also requires the selected format’s external extractor.",
+            "Configure the default provider with absolute REA_BINWALK_COMMAND (Binwalk 3.1.x) or REA_UNBLOB_COMMAND (Unblob 26.6.x) and util-linux prlimit. Binwalk-NG scan, entropy, and inventory are available only when its bounded native runtime is configured. Extraction also requires the selected format’s external extractor.",
         };
   }
   if (kind === "android-provider")

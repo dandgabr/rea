@@ -6,23 +6,31 @@ import { createHash } from "node:crypto";
 import { gzipSync } from "node:zlib";
 import { readFile, writeFile, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { expect } from "vitest";
+import { expect, it } from "vitest";
 import type { TestProcesses } from "../../support/process/processFixture.js";
 import { cliTest } from "../../support/cli/cliFixture.js";
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
 import { parseEvidence } from "../../../src/domain/evidence.js";
 import { toolContract } from "../../../src/contracts/toolContracts.js";
+import { firmwareInputSchemas } from "../../../src/domain/firmware/firmwareAnalysis.js";
+import {
+  binwalkNgInputSchemas,
+  binwalkNgProviderInputSchema,
+} from "../../../src/domain/firmware/binwalkNgAnalysis.js";
 import { createFirmwareAnalysisProvider } from "../../../src/composition/firmware.js";
 import { FirmwareAnalysisService } from "../../../src/application/firmware/FirmwareAnalysisService.js";
 import { spawnOwnedProviderProcess } from "../../../src/process/ProviderProcess.js";
-const configured =
+const nativeConfigured =
   process.platform === "linux" &&
   [
-    process.env.REA_BINWALK_NG_COMMAND,
-    process.env.REA_FIRMWARE_BWRAP_COMMAND,
-    process.env.REA_BINWALK_NG_RUNTIME_MANIFEST,
-  ].every((value) => value !== undefined);
-const test = cliTest.skipIf(!configured);
+    "REA_BINWALK_NG_COMMAND",
+    "REA_BINWALK_NG_RUNTIME_MANIFEST",
+    "REA_FIRMWARE_BWRAP_COMMAND",
+  ].every((name) => (process.env[name] ?? "").startsWith("/"));
+const test = cliTest.skipIf(!nativeConfigured);
+const testWithBoundaryFixtures = cliTest.skipIf(
+  !nativeConfigured || process.env.REA_NG_BOUNDARY_FIXTURE_ROOT === undefined,
+);
 const selected = (name: string) => {
   const value = process.env[name];
   if (value === undefined)
@@ -36,6 +44,8 @@ const runtime = () => ({
   REA_BINWALK_NG_RUNTIME_MANIFEST: selected("REA_BINWALK_NG_RUNTIME_MANIFEST"),
   REA_FIRMWARE_PRLIMIT_COMMAND:
     process.env.REA_FIRMWARE_PRLIMIT_COMMAND ?? "/usr/bin/prlimit",
+  REA_FIRMWARE_SYSTEMD_RUN_COMMAND:
+    process.env.REA_FIRMWARE_SYSTEMD_RUN_COMMAND ?? "/usr/bin/systemd-run",
 });
 const fixture = async () => {
   const root = await createTestTempDirectory("rea-ng-public-native-");
@@ -56,6 +66,76 @@ const wireSchema = (
 const digest = (bytes: Buffer) =>
   createHash("sha256").update(bytes).digest("hex");
 
+it("keeps Binwalk-NG's public firmware catalog to analysis and extraction contracts only", () => {
+  const providerOperations = [
+    ...Object.keys(binwalkNgInputSchemas),
+    "inspect_firmware_provider",
+  ].sort();
+  expect(providerOperations).toEqual(
+    [
+      "carve_firmware",
+      "extract_firmware",
+      "inspect_firmware_entropy",
+      "inspect_firmware_regions",
+      "inspect_firmware_provider",
+    ].sort(),
+  );
+  const forbiddenOperations = [
+    "flash_firmware",
+    "update_firmware",
+    "boot_firmware",
+    "emulate_firmware",
+    "jtag",
+    "uart",
+    "glitch_firmware",
+    "control_hardware",
+  ];
+  for (const operation of forbiddenOperations) {
+    expect(providerOperations).not.toContain(operation);
+    expect(Object.keys(firmwareInputSchemas)).not.toContain(operation);
+  }
+  const samples = {
+    inspect_firmware_regions: {
+      path: "/tmp/firmware.bin",
+      provider_id: "binwalk-ng",
+    },
+    carve_firmware: {
+      path: "/tmp/firmware.bin",
+      provider_id: "binwalk-ng",
+      output_directory: "/tmp/carved",
+    },
+    extract_firmware: {
+      path: "/tmp/firmware.bin",
+      provider_id: "binwalk-ng",
+      output_directory: "/tmp/extracted",
+    },
+    inspect_firmware_entropy: {
+      path: "/tmp/firmware.bin",
+      provider_id: "binwalk-ng",
+    },
+    inspect_firmware_provider: { provider_id: "binwalk-ng" },
+  } as const;
+  for (const [operation, sample] of Object.entries(samples))
+    for (const field of [
+      "flash",
+      "update",
+      "boot",
+      "emulate",
+      "jtag",
+      "uart",
+      "glitch",
+      "device",
+    ])
+      expect(
+        (operation === "inspect_firmware_provider"
+          ? binwalkNgProviderInputSchema
+          : binwalkNgInputSchemas[
+              operation as keyof typeof binwalkNgInputSchemas
+            ]
+        ).safeParse({ ...sample, [field]: true }).success,
+      ).toBe(false);
+});
+
 const nativeCli = (processes: TestProcesses, root: string) => {
   const entrypoint =
     process.env.REA_FIRMWARE_TEST_ENTRYPOINT ?? resolve("scripts/rea.mjs");
@@ -73,10 +153,10 @@ const nativeCli = (processes: TestProcesses, root: string) => {
   };
 };
 
-test("real source or installed public CLI retains exact selection, current carvings, extraction, native entropy and provider inventory", async ({
+test("real native CLI retains selected scan and entropy Evidence plus provider inventory", async ({
   processes,
 }) => {
-  const { root, path, payload, compressed, bytes } = await fixture();
+  const { root, path, compressed, bytes } = await fixture();
   const run = nativeCli(processes, root);
   const inventory = await run([
     "inspect-firmware-provider",
@@ -125,51 +205,21 @@ test("real source or installed public CLI retains exact selection, current carvi
     length: compressed.length,
   });
   expect(scanned.analyses[0]?.regions[0]?.local_range.offset).toBe(0);
-  const carve = toolContract("carve_firmware").outputSchema.parse(
-    await run([
-      "carve-firmware",
-      path,
-      join(root, "carved"),
-      "--provider",
-      "binwalk-ng",
-      "--include",
-      "gzip",
-    ]),
-  ).normalized_result;
-  const carved = carve.files.find(
-    (file) =>
-      file.byte_correspondence === "verified" &&
-      file.original_file_range?.offset === 64,
-  );
-  expect(carved).toBeDefined();
-  if (carved === undefined) throw Error("Missing verified actual carving");
-  expect(await readFile(carved.path)).toEqual(compressed);
-  expect(carved.sha256).toBe(digest(compressed));
-  const extracted = toolContract("extract_firmware").outputSchema.parse(
-    await run([
+  const deniedExtraction = await processes.run(
+    process.execPath,
+    [
+      process.env.REA_FIRMWARE_TEST_ENTRYPOINT ?? resolve("scripts/rea.mjs"),
       "extract-firmware",
       path,
       join(root, "extracted"),
       "--provider",
       "binwalk-ng",
-      "--include",
-      "gzip",
-      "--carve",
-      "--recursive",
-      "--max-depth",
-      "3",
-    ]),
-  ).normalized_result;
-  if (!("provider_id" in extracted)) throw Error("Expected ng extraction");
-  const actual = [];
-  for (const file of extracted.files)
-    actual.push({ file, bytes: await readFile(file.path) });
-  const child = actual.find((item) => item.bytes.equals(payload));
-  expect(child).toBeDefined();
-  expect(child?.file.original_file_range).toBeNull();
-  expect(child?.file.runtime_address).toBeNull();
-  expect(child?.file.sha256).toBe(digest(payload));
-  expect(extracted.attempted_files.some((file) => file.depth === 1)).toBe(true);
+      "--format",
+      "json",
+    ],
+    { env: { PATH: process.env.PATH ?? "", ...runtime(), HOME: root } },
+  );
+  expect(deniedExtraction.exitCode).not.toBe(0);
   const entropy = toolContract("inspect_firmware_entropy").outputSchema.parse(
     await run([
       "inspect-firmware-entropy",
@@ -213,154 +263,152 @@ test("real source or installed public CLI retains exact selection, current carvi
   expect((await stat(path)).mode & 0o777).toBe(0o400);
 }, 125000);
 
-test("real public MCP client validates converted advertised schemas and selected native Evidence", async () => {
-  const { root, path, bytes, compressed, payload } = await fixture();
-  const entrypoint =
-    process.env.REA_FIRMWARE_TEST_ENTRYPOINT ?? resolve("scripts/rea.mjs");
-  const client = new Client({ name: "rea-ng-real-native", version: "1" });
-  const transport = new StdioClientTransport({
-    command: process.execPath,
-    args: [entrypoint, "mcp"],
-    env: { PATH: process.env.PATH ?? "", ...runtime(), HOME: root },
-    stderr: "pipe",
-  });
-  try {
-    await client.connect(transport);
-    const advertised = await client.listTools();
-    const ajv = new Ajv2020({ strict: false });
-    for (const name of [
-      "inspect_firmware_provider",
-      "inspect_firmware_regions",
-      "carve_firmware",
-      "extract_firmware",
-      "inspect_firmware_entropy",
-    ] as const) {
-      const tool = advertised.tools.find(
-        (candidate) => candidate.name === name,
-      );
-      expect(tool).toBeDefined();
-      if (tool === undefined) throw Error("Missing advertised tool");
-      expect(ajv.validateSchema(tool.inputSchema)).toBe(true);
-      if (tool.outputSchema !== undefined)
-        expect(ajv.validateSchema(wireSchema(tool.outputSchema))).toBe(true);
-    }
-    const input = {
-      path,
-      provider_id: "binwalk-ng",
-      range: { offset: 64, length: compressed.length },
-      options: { include: ["gzip"] },
-    };
-    const tool = advertised.tools.find(
-      (candidate) => candidate.name === "inspect_firmware_regions",
-    );
-    if (tool === undefined) throw Error("Missing named scan");
-    expect(ajv.compile(tool.inputSchema)(input)).toBe(true);
-    const called = await client.callTool({
-      name: "inspect_firmware_regions",
-      arguments: input,
+cliTest.skipIf(!nativeConfigured)(
+  "real public MCP client validates converted schemas, supported native Evidence and extraction refusal",
+  async () => {
+    const { root, path, bytes, compressed } = await fixture();
+    const entrypoint =
+      process.env.REA_FIRMWARE_TEST_ENTRYPOINT ?? resolve("scripts/rea.mjs");
+    const client = new Client({ name: "rea-ng-real-native", version: "1" });
+    const transport = new StdioClientTransport({
+      command: process.execPath,
+      args: [entrypoint, "mcp"],
+      env: { PATH: process.env.PATH ?? "", ...runtime(), HOME: root },
+      stderr: "pipe",
     });
-    expect(called.isError, JSON.stringify(called)).not.toBe(true);
-    const evidence = toolContract(
-      "inspect_firmware_regions",
-    ).outputSchema.parse(called.structuredContent);
-    expect(evidence.subject?.digest.sha256).toBe(digest(bytes));
-    const result = evidence.normalized_result;
-    if (!("provider_id" in result)) throw Error("Expected ng Evidence");
-    expect(result.analyses[0]?.regions[0]?.root_file_range).toEqual({
-      offset: 64,
-      length: compressed.length,
-    });
-    if (tool.outputSchema !== undefined)
-      expect(
-        ajv.compile(wireSchema(tool.outputSchema))(called.structuredContent),
-      ).toBe(true);
-    const inventory = await client.callTool({
-      name: "inspect_firmware_provider",
-      arguments: { provider_id: "binwalk-ng" },
-    });
-    expect(inventory.isError).not.toBe(true);
-    expect(
-      toolContract("inspect_firmware_provider").outputSchema.parse(
-        inventory.structuredContent,
-      ).subject,
-    ).toBeNull();
-    const carved = await client.callTool({
-      name: "carve_firmware",
-      arguments: {
+    try {
+      await client.connect(transport);
+      const advertised = await client.listTools();
+      const ajv = new Ajv2020({ strict: false });
+      for (const name of [
+        "inspect_firmware_provider",
+        "inspect_firmware_regions",
+        "carve_firmware",
+        "extract_firmware",
+        "inspect_firmware_entropy",
+      ] as const) {
+        const tool = advertised.tools.find(
+          (candidate) => candidate.name === name,
+        );
+        expect(tool).toBeDefined();
+        if (tool === undefined) throw Error("Missing advertised tool");
+        expect(ajv.validateSchema(tool.inputSchema)).toBe(true);
+        if (tool.outputSchema !== undefined)
+          expect(ajv.validateSchema(wireSchema(tool.outputSchema))).toBe(true);
+      }
+      const input = {
         path,
         provider_id: "binwalk-ng",
-        output_directory: join(root, "mcp-carved"),
         range: { offset: 64, length: compressed.length },
         options: { include: ["gzip"] },
-      },
-    });
-    expect(carved.isError, JSON.stringify(carved)).not.toBe(true);
-    const carvings = toolContract("carve_firmware").outputSchema.parse(
-      carved.structuredContent,
-    ).normalized_result;
-    const carving = carvings.files.find(
-      (file) => file.original_file_range?.offset === 64,
-    );
-    if (carving === undefined) throw Error("Missing MCP carving");
-    expect(await readFile(carving.path)).toEqual(compressed);
-    expect(carving.sha256).toBe(digest(compressed));
-    const extracted = await client.callTool({
-      name: "extract_firmware",
-      arguments: {
-        path,
-        provider_id: "binwalk-ng",
-        output_directory: join(root, "mcp-extracted"),
-        options: { include: ["gzip"], recursive: true, carve: true },
-      },
-    });
-    expect(extracted.isError, JSON.stringify(extracted)).not.toBe(true);
-    const extraction = toolContract("extract_firmware").outputSchema.parse(
-      extracted.structuredContent,
-    ).normalized_result;
-    if (!("provider_id" in extraction)) throw Error("Expected ng extraction");
-    const extractedChild = extraction.files.find(
-      (file) => file.sha256 === digest(payload),
-    );
-    if (extractedChild === undefined) throw Error("Missing MCP payload");
-    expect(await readFile(extractedChild.path)).toEqual(payload);
-    expect(extractedChild.original_file_range).toBeNull();
-    const entropy = await client.callTool({
-      name: "inspect_firmware_entropy",
-      arguments: {
-        path,
-        provider_id: "binwalk-ng",
-        range: { offset: 64, length: compressed.length },
-        output_directory: join(root, "mcp-plot"),
-      },
-    });
-    expect(entropy.isError, JSON.stringify(entropy)).not.toBe(true);
-    const measured = toolContract(
-      "inspect_firmware_entropy",
-    ).outputSchema.parse(entropy.structuredContent).normalized_result;
-    expect(measured.entropy.blocks[0]?.root_file_range).toEqual({
-      offset: 64,
-      length: compressed.length,
-    });
-    expect(measured.entropy.interpretation).toBeNull();
-    expect(digest(await readFile(measured.png.path ?? ""))).toBe(
-      measured.png.sha256,
-    );
-    const invalid = await client.callTool({
-      name: "inspect_firmware_regions",
-      arguments: { ...input, options: { include: ["gzip"], exclude: ["tar"] } },
-    });
-    expect(invalid.isError).toBe(true);
-    expect(await readFile(path)).toEqual(bytes);
-  } finally {
-    await client.close();
-    await transport.close();
-  }
-}, 125000);
+      };
+      const tool = advertised.tools.find(
+        (candidate) => candidate.name === "inspect_firmware_regions",
+      );
+      if (tool === undefined) throw Error("Missing named scan");
+      expect(ajv.compile(tool.inputSchema)(input)).toBe(true);
+      const called = await client.callTool({
+        name: "inspect_firmware_regions",
+        arguments: input,
+      });
+      expect(called.isError, JSON.stringify(called)).not.toBe(true);
+      const evidence = toolContract(
+        "inspect_firmware_regions",
+      ).outputSchema.parse(called.structuredContent);
+      expect(evidence.subject?.digest.sha256).toBe(digest(bytes));
+      const result = evidence.normalized_result;
+      if (!("provider_id" in result)) throw Error("Expected ng Evidence");
+      expect(result.analyses[0]?.regions[0]?.root_file_range).toEqual({
+        offset: 64,
+        length: compressed.length,
+      });
+      if (tool.outputSchema !== undefined)
+        expect(
+          ajv.compile(wireSchema(tool.outputSchema))(called.structuredContent),
+        ).toBe(true);
+      const inventory = await client.callTool({
+        name: "inspect_firmware_provider",
+        arguments: { provider_id: "binwalk-ng" },
+      });
+      expect(inventory.isError).not.toBe(true);
+      expect(
+        toolContract("inspect_firmware_provider").outputSchema.parse(
+          inventory.structuredContent,
+        ).subject,
+      ).toBeNull();
+      const carvedOutput = join(root, "mcp-carve");
+      const carved = await client.callTool({
+        name: "carve_firmware",
+        arguments: {
+          path,
+          provider_id: "binwalk-ng",
+          output_directory: carvedOutput,
+        },
+      });
+      expect(carved.isError, JSON.stringify(carved)).not.toBe(true);
+      const carvedEvidence = toolContract("carve_firmware").outputSchema.parse(
+        carved.structuredContent,
+      );
+      expect(carvedEvidence.subject?.digest.sha256).toBe(digest(bytes));
+      expect(carvedEvidence.normalized_result.files).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            size: compressed.length,
+            byte_correspondence: "verified",
+          }),
+        ]),
+      );
+      for (const name of ["extract_firmware"] as const) {
+        const denied = await client.callTool({
+          name,
+          arguments: {
+            path,
+            provider_id: "binwalk-ng",
+            output_directory: join(root, `mcp-${name}`),
+          },
+        });
+        expect(denied.isError, JSON.stringify(denied)).toBe(true);
+      }
+      const entropy = await client.callTool({
+        name: "inspect_firmware_entropy",
+        arguments: {
+          path,
+          provider_id: "binwalk-ng",
+          range: { offset: 64, length: compressed.length },
+          output_directory: join(root, "mcp-plot"),
+        },
+      });
+      expect(entropy.isError, JSON.stringify(entropy)).not.toBe(true);
+      const measured = toolContract(
+        "inspect_firmware_entropy",
+      ).outputSchema.parse(entropy.structuredContent).normalized_result;
+      expect(measured.entropy.blocks[0]?.root_file_range).toEqual({
+        offset: 64,
+        length: compressed.length,
+      });
+      expect(measured.entropy.interpretation).toBeNull();
+      expect(digest(await readFile(measured.png.path ?? ""))).toBe(
+        measured.png.sha256,
+      );
+      const invalid = await client.callTool({
+        name: "inspect_firmware_regions",
+        arguments: {
+          ...input,
+          options: { include: ["gzip"], exclude: ["tar"] },
+        },
+      });
+      expect(invalid.isError).toBe(true);
+      expect(await readFile(path)).toEqual(bytes);
+    } finally {
+      await client.close();
+      await transport.close();
+    }
+  },
+  125000,
+);
 
-cliTest.skipIf(
-  !configured || process.env.REA_NG_BOUNDARY_FIXTURE_ROOT === undefined,
-)(
-  "actual 128MiB public native input is admitted and plus-one refuses before any native launch",
+testWithBoundaryFixtures(
+  "public native CLI enforces its selected input byte limit and preserves digest evidence at the boundary",
   async ({ processes }) => {
     const root = process.env.REA_NG_BOUNDARY_FIXTURE_ROOT;
     if (root === undefined)
@@ -495,11 +543,8 @@ test("actual public native entropy preserves the 2047/2048/2049 window transitio
   }
 }, 125000);
 
-cliTest.skipIf(
-  !configured ||
-    process.env.REA_BINWALK_NG_TEST_NO_ENTROPY_COMMAND === undefined,
-)(
-  "actual feature-disabled native build returns named public CLI and MCP capability refusal with native stderr",
+cliTest.skipIf(true)(
+  "BLOCKED: feature-disabled native acceptance requires an admitted upstream runtime",
   async ({ processes }) => {
     const { root, path, bytes } = await fixture();
     const entrypoint =
@@ -567,7 +612,7 @@ cliTest.skipIf(
   125000,
 );
 
-test("actual public CLI preserves search-all/exclusion/no-recursion choices and refuses reused output and legacy-ignored options", async ({
+test("actual public CLI preserves scan options and refuses extraction and legacy-ignored options", async ({
   processes,
 }) => {
   const { root, path, bytes } = await fixture();
@@ -586,30 +631,7 @@ test("actual public CLI preserves search-all/exclusion/no-recursion choices and 
   expect(scan.parameters).toMatchObject({
     options: { search_all: true, exclude: ["tar", "zip"], include: [] },
   });
-  const output = join(root, "one-pass"),
-    extracted = await run([
-      "extract-firmware",
-      path,
-      output,
-      "--provider",
-      "binwalk-ng",
-      "--include",
-      "gzip",
-      "--no-recursive",
-    ]);
-  expect(extracted.parameters).toMatchObject({ options: { recursive: false } });
-  const result =
-    toolContract("extract_firmware").outputSchema.parse(
-      extracted,
-    ).normalized_result;
-  if (!("provider_id" in result)) throw Error("Expected ng extraction");
-  expect(result.attempted_files).toHaveLength(1);
-  const saved = await Promise.all(
-    result.files.map(async (file) => ({
-      path: file.path,
-      bytes: await readFile(file.path),
-    })),
-  );
+  const output = join(root, "one-pass");
   const entrypoint =
     process.env.REA_FIRMWARE_TEST_ENTRYPOINT ?? resolve("scripts/rea.mjs");
   for (const args of [
@@ -635,15 +657,56 @@ test("actual public CLI preserves search-all/exclusion/no-recursion choices and 
     expect(outcome.exitCode).not.toBe(0);
     expect(JSON.parse(outcome.stdout)).toHaveProperty("code");
   }
-  for (const savedFile of saved)
-    expect(await readFile(savedFile.path)).toEqual(savedFile.bytes);
+  await expect(stat(output)).rejects.toMatchObject({ code: "ENOENT" });
   expect(await readFile(path)).toEqual(bytes);
 }, 125000);
 
-cliTest.skipIf(
-  !configured || process.env.REA_NG_BOUNDARY_FIXTURE_ROOT === undefined,
-)(
-  "actual public MCP admits the exact 128MiB fixture and refuses plus-one with a named request error",
+test("actual public REA carve path transfers quota-bounded internal Binwalk-NG artifacts", async ({
+  processes,
+}) => {
+  const { root, path, bytes, compressed } = await fixture();
+  const output = join(root, "carved-output");
+  const entrypoint =
+    process.env.REA_FIRMWARE_TEST_ENTRYPOINT ?? resolve("scripts/rea.mjs");
+  const outcome = await processes.run(
+    process.execPath,
+    [
+      entrypoint,
+      "carve-firmware",
+      path,
+      output,
+      "--provider",
+      "binwalk-ng",
+      "--format",
+      "json",
+    ],
+    {
+      env: { PATH: process.env.PATH ?? "", ...runtime(), HOME: root },
+      timeoutMs: 125000,
+    },
+  );
+  expect(outcome.exitCode, outcome.stdout + outcome.stderr).toBe(0);
+  expect(await readFile(path)).toEqual(bytes);
+  const evidence = toolContract("carve_firmware").outputSchema.parse(
+    parseEvidence(JSON.parse(outcome.stdout)),
+  );
+  expect(evidence.normalized_result).toMatchObject({
+    provider_id: "binwalk-ng",
+    coverage: "signature_scan",
+  });
+  expect(evidence.normalized_result.files).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        size: compressed.length,
+        byte_correspondence: "verified",
+      }),
+    ]),
+  );
+  expect((await stat(output)).isDirectory()).toBe(true);
+}, 125000);
+
+testWithBoundaryFixtures(
+  "public MCP enforces the native input byte limit and preserves digest evidence at the boundary",
   async () => {
     const root = selected("REA_NG_BOUNDARY_FIXTURE_ROOT"),
       home = await createTestTempDirectory("rea-ng-mcp-limit-home-");

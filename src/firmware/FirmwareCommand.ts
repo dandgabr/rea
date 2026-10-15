@@ -5,6 +5,7 @@ import {
 import { projectAnalysisError } from "../domain/analysisErrorProjection.js";
 import type { ArtifactResourceScope } from "../artifacts/ArtifactResourceScope.js";
 import { randomUUID } from "node:crypto";
+import type { Readable } from "node:stream";
 import { access, lstat, realpath, stat } from "node:fs/promises";
 import { constants } from "node:fs";
 import { isAbsolute } from "node:path";
@@ -124,8 +125,15 @@ export const runFirmwareCommand = async (context: {
     readonly maxBytes: number;
   }[];
   acceptReportedExtractionFailure?: boolean;
+  /** A fixed adapter protocol may assign meaning to a nonzero status (for example exact-CID absence). */
+  acceptedExitCodes?: readonly number[];
   /** Host OCI clients have a distinct measured policy; producer limits remain the default. */
-  limitProfile?: "producer" | "container-transport";
+  limitProfile?: "producer" | "container-transport" | "metadata-observer";
+  /** Fixed internal protocol input; copied before launch and bounded to16KiB. */
+  protocolInput?: Buffer;
+  /** Adapter-owned bounded binary protocol; disables stdout diagnostics capture. */
+  protocolStdout?: (stdout: Readable) => Promise<void>;
+  inheritedDescriptors?: readonly number[];
   retainCleanup(supervisor: ProviderProcessSupervisor): void;
 }) => {
   const { engine, operation, signal } = context;
@@ -139,6 +147,19 @@ export const runFirmwareCommand = async (context: {
       operation,
       "Container transport requires its explicit direct-client cleanup owner",
     );
+  if (
+    context.protocolInput !== undefined &&
+    context.protocolInput.length > 16 * 1024
+  )
+    throw firmwareToolUnavailable(
+      engine,
+      operation,
+      "Metadata request exceeds its16KiB protocol input budget",
+    );
+  const protocolInput =
+    context.protocolInput === undefined
+      ? undefined
+      : Buffer.from(context.protocolInput);
   const runId = `rea-firmware-${randomUUID()}`;
   const spawned = await (context.launcher ?? spawnOwnedProviderProcess)({
     command: context.limiter,
@@ -147,15 +168,19 @@ export const runFirmwareCommand = async (context: {
         ? []
         : [
             `--as=${FIRMWARE_LIMITS.addressSpaceBytes}`,
-            `--fsize=${context.outputBudget?.bytes ?? FIRMWARE_LIMITS.reportBytes}`,
+            `--fsize=${context.limitProfile === "metadata-observer" ? 1048576 : (context.outputBudget?.bytes ?? FIRMWARE_LIMITS.reportBytes)}`,
           ]),
       "--core=0",
-      "--cpu=120",
+      context.limitProfile === "metadata-observer" ? "--cpu=5" : "--cpu=120",
       "--",
       context.command,
       ...context.args,
     ],
     expectedCommand: null,
+    ...(protocolInput === undefined ? {} : { stdin: "pipe" as const }),
+    ...(context.inheritedDescriptors === undefined
+      ? {}
+      : { inheritedDescriptors: context.inheritedDescriptors }),
     runId,
     cwd: context.cwd,
     hostEnvironment: context.environment,
@@ -184,7 +209,11 @@ export const runFirmwareCommand = async (context: {
           : () => cleanupOwnedProcessGroup(spawned.ownership)),
     },
     {
-      maxDiagnosticBytes: FIRMWARE_LIMITS.diagnosticBytes,
+      ...(context.protocolStdout === undefined ? {} : { captureStdout: false }),
+      maxDiagnosticBytes:
+        context.limitProfile === "metadata-observer"
+          ? 65536
+          : FIRMWARE_LIMITS.diagnosticBytes,
       onDiagnostic: (event) => {
         if (event.type === "output" && event.truncated === true)
           diagnosticTruncated = true;
@@ -232,9 +261,46 @@ export const runFirmwareCommand = async (context: {
     }
   };
   let failure: unknown;
+  let protocolFailure: unknown;
+  const protocolOutput =
+    context.protocolStdout === undefined
+      ? undefined
+      : spawned.process.stdout === null
+        ? Promise.reject(new Error("Provider omitted protocol stdout"))
+        : context
+            .protocolStdout(spawned.process.stdout)
+            .catch((cause: unknown) => {
+              protocolFailure = cause;
+              throw cause;
+            });
+  void protocolOutput?.catch(() => {});
   try {
+    if (protocolInput !== undefined) {
+      const stdin = spawned.process.stdin;
+      if (stdin === undefined || stdin === null)
+        throw new Error("Fixed protocol launcher omitted stdin");
+      // The writable owns its pipe until child exit; late EPIPE must not become an unhandled event.
+      stdin.on("error", () => {});
+      await new Promise<void>((resolve, reject) => {
+        const aborted = () => reject(new AnalysisCancelledError(operation));
+        signal.addEventListener("abort", aborted, { once: true });
+        stdin.write(protocolInput, (error) => {
+          signal.removeEventListener("abort", aborted);
+          if (error) reject(error);
+          else resolve();
+        });
+        if (signal.aborted) aborted();
+      });
+      stdin.end();
+    }
     const deadline = performance.now() + FIRMWARE_LIMITS.timeoutMs;
     while (!(await supervisor.waitForOutputClose(100))) {
+      if (protocolFailure !== undefined) {
+        const observed = supervisor.snapshot();
+        throw new Error(
+          `${protocolFailure instanceof Error ? protocolFailure.message : String(protocolFailure)}; protocol launcher exit=${observed.exitCode ?? "unknown"}; stderr=${observed.stderr.text}`,
+        );
+      }
       checkDiagnostics();
       await assertFirmwareOutputBounds(
         context.boundedOutputFiles ?? [],
@@ -251,6 +317,16 @@ export const runFirmwareCommand = async (context: {
           operation,
           signal,
         );
+    }
+    if (protocolOutput !== undefined) {
+      try {
+        await protocolOutput;
+      } catch (cause: unknown) {
+        const observed = supervisor.snapshot();
+        throw new Error(
+          `${cause instanceof Error ? cause.message : String(cause)}; protocol launcher exit=${observed.exitCode ?? "unknown"}; stderr=${observed.stderr.text}`,
+        );
+      }
     }
     checkDiagnostics();
     await assertFirmwareOutputBounds(
@@ -293,6 +369,7 @@ export const runFirmwareCommand = async (context: {
   if (failure !== undefined) throw failure;
   if (
     snapshot.exitCode !== 0 &&
+    !context.acceptedExitCodes?.includes(snapshot.exitCode ?? -1) &&
     !(
       context.acceptReportedExtractionFailure === true &&
       snapshot.exitCode === 1

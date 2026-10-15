@@ -42,6 +42,58 @@ import type { FirmwareLauncher } from "../FirmwareCommand.js";
 import * as firmwareCommand from "../FirmwareCommand.js";
 
 const roots: string[] = [];
+it("fails closed for lifecycle argv mutations with seeded zero-launch checks (seed0x43494431,512cases)", async () => {
+  const f = await fixture();
+  const store = await admitPodmanStore(
+    f.profilePath,
+    f.profile.podman.command,
+    f.signal,
+    f.scope,
+  );
+  const hooks = join(f.root, "hooks");
+  const prefix = [
+    "--remote=false",
+    "--root",
+    store.selection.graph_root,
+    "--runroot",
+    store.selection.run_root,
+    "--storage-driver=overlay",
+    "--storage-opt=overlay.mountopt=nodev",
+    "--hooks-dir",
+    hooks,
+  ];
+  const cid = "b".repeat(64);
+  const original = [...prefix, "start", "--attach", "--", cid];
+  let launches = 0;
+  const launch = (argv: readonly string[]) => {
+    admitPodmanInvocationSelectors(argv, store, hooks);
+    launches++;
+  };
+  expect(() => launch(original)).toThrow();
+  let seed = 0x43494431;
+  for (let index = 0; index < 512; index++) {
+    seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+    const position = seed % original.length;
+    const changed = [...original];
+    changed[position] =
+      `${changed[position]}${index % 2 === 0 ? "--root=/other" : "-changed"}`;
+    expect(() => launch(changed)).toThrow();
+  }
+  expect(launches).toBe(0);
+  for (const operation of [
+    ["create", "--pull=never", "--", `sha256:${"a".repeat(64)}`],
+    ["init", "--", cid],
+    ["start", "--attach", "--", cid],
+    ["stop", "--time=1", "--", cid],
+    ["kill", "--signal=KILL", "--", cid],
+    ["rm", "--force", "--", cid],
+    ["container", "exists", "--", cid],
+  ])
+    expect(() =>
+      admitPodmanInvocationSelectors([...prefix, ...operation], store, hooks),
+    ).toThrow();
+  await f.scope.close();
+});
 afterEach(async () => {
   for (const root of roots.splice(0))
     await rm(root, { recursive: true, force: true });
@@ -1167,7 +1219,7 @@ it("preserves typed primary setup diagnostics and captured bytes after a failed 
   const f = await fixture();
   const originalCreate = PrivateRuntimeRoot.create;
   const controller = new AbortController();
-  let owned: PrivateRuntimeRoot | undefined;
+  let _owned: PrivateRuntimeRoot | undefined;
   let originalClose: (() => Promise<void>) | undefined;
   let failed = true;
   let closes = 0;
@@ -1197,7 +1249,7 @@ it("preserves typed primary setup diagnostics and captured bytes after a failed 
     .mockImplementation(async (options) => {
       const root = await originalCreate.call(PrivateRuntimeRoot, options);
       if (options?.prefix === "rea-firmware-container-") {
-        owned = root;
+        _owned = root;
         setups++;
         controller.abort(primary);
         originalClose = root.close.bind(root);
@@ -1237,4 +1289,59 @@ it("preserves typed primary setup diagnostics and captured bytes after a failed 
     failed = false;
     await f.scope.close();
   }
+});
+
+it("admits only the fixed existing-service generation projection and exact full CID without requesting unrelated configuration", async () => {
+  const f = await fixture();
+  const admitted = await admitPodmanStore(
+    f.profilePath,
+    f.profile.podman.command,
+    f.signal,
+    f.scope,
+  );
+  const {
+    podmanExistingGenerationCommand,
+    PODMAN_EXISTING_GENERATION_FORMAT,
+    podmanStoreArguments,
+  } = await import("./PodmanTransport.js");
+  const hooks = join(f.root, "hooks");
+  const prefix = podmanStoreArguments(admitted, hooks);
+  const id = "b".repeat(64);
+  const selected = podmanExistingGenerationCommand(id);
+  expect(() =>
+    admitPodmanInvocationSelectors(
+      [...prefix, ...selected],
+      admitted,
+      hooks,
+      selected,
+    ),
+  ).not.toThrow();
+  expect(selected[1]).not.toMatch(/Config|Env|Mounts/u);
+  for (const candidate of [
+    [
+      "inspect",
+      PODMAN_EXISTING_GENERATION_FORMAT.replace(".ID", ".Config.Env"),
+      "--",
+      id,
+    ],
+    ["inspect", PODMAN_EXISTING_GENERATION_FORMAT, id],
+    ["inspect", PODMAN_EXISTING_GENERATION_FORMAT, "--", "c".repeat(64)],
+    [
+      "inspect",
+      PODMAN_EXISTING_GENERATION_FORMAT,
+      "--",
+      id,
+      "--root=/unrelated",
+    ],
+  ])
+    expect(() =>
+      admitPodmanInvocationSelectors(
+        [...prefix, ...candidate],
+        admitted,
+        hooks,
+        selected,
+      ),
+    ).toThrow();
+  for (const invalid of ["--root=/unrelated", "b".repeat(63), "B".repeat(64)])
+    expect(() => podmanExistingGenerationCommand(invalid)).toThrow();
 });

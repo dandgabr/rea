@@ -15,7 +15,15 @@ import {
   type FirmwareLauncher,
 } from "../FirmwareCommand.js";
 import { FIRMWARE_LIMITS } from "../FirmwareRelease.js";
+import { consumeBinwalkNgTransfer } from "./BinwalkNgTransfer.js";
+import type { SafeOutputTree } from "../../artifacts/SafeOutputTree.js";
+import type { Readable } from "node:stream";
 import type { prepareBinwalkNgSandbox } from "./BinwalkNgSandbox.js";
+import {
+  binwalkNgCgroupGateArguments,
+  binwalkNgSystemdRunArguments,
+  readBinwalkNgSystemdEnvironmentNames,
+} from "./BinwalkNgSystemdBoundary.js";
 
 /** One owned run under the selected namespace/mount/environment policy. */
 export interface BinwalkNgCommandContext {
@@ -27,6 +35,15 @@ export interface BinwalkNgCommandContext {
   readonly launcher?: FirmwareLauncher;
   readonly reportPath?: string;
   readonly pngPath?: string;
+  readonly transfer?: {
+    readonly tree: SafeOutputTree;
+    readonly paths: readonly string[];
+    readonly maxBytes: number;
+    readonly maxFiles: number;
+    readonly maxEntries: number;
+    readonly workspaceBytes: number;
+    readonly workspaceInodes: number;
+  };
   retainCleanup(supervisor: ProviderProcessSupervisor): void;
 }
 
@@ -45,11 +62,6 @@ export const runBinwalkNgCommand = async (
     cwd: sandbox.work_root,
     environment: {},
     signal: context.signal,
-    outputBudget: {
-      root: sandbox.work_root,
-      bytes: context.maxOutputBytes,
-      entries: context.maxOutputFiles,
-    },
     boundedOutputFiles: [
       ...(context.reportPath === undefined
         ? []
@@ -60,6 +72,17 @@ export const runBinwalkNgCommand = async (
         ? []
         : [{ path: context.pngPath, maxBytes: FIRMWARE_LIMITS.reportBytes }]),
     ],
+    ...(context.transfer === undefined
+      ? {}
+      : {
+          protocolStdout: (stdout: Readable) =>
+            consumeBinwalkNgTransfer(stdout, context.transfer!.tree, {
+              maxBytes: context.transfer!.maxBytes,
+              maxFiles: context.transfer!.maxFiles,
+              maxEntries: context.transfer!.maxEntries,
+              signal: context.signal,
+            }).then(() => undefined),
+        }),
     retainCleanup: context.retainCleanup,
     launcher: async (options) => {
       const boundary = options.arguments.lastIndexOf("--");
@@ -72,16 +95,81 @@ export const runBinwalkNgCommand = async (
           context.operation,
           "Owned descendant supervision requires a prelaunch process identity baseline",
         );
-      const spawned = await (context.launcher ?? spawnOwnedProviderProcess)({
+      const providerArguments = [
+        ...options.arguments.slice(0, boundary),
+        "--setenv",
+        "REA_PROCESS_RUN_ID",
+        options.runId,
+        ...options.arguments.slice(boundary),
+      ];
+      const uid = process.getuid?.();
+      const gid = process.getgid?.();
+      if (
+        uid === undefined ||
+        (context.transfer !== undefined && gid === undefined)
+      )
+        throw firmwareToolUnavailable(
+          "binwalk-ng",
+          context.operation,
+          "A verified Linux user systemd manager is required for aggregate resource limits",
+        );
+      const runtimeDirectory = `/run/user/${uid}`;
+      const serviceEnvironment = {
+        PATH: "/usr/bin:/bin",
+        XDG_RUNTIME_DIR: runtimeDirectory,
+        DBUS_SESSION_BUS_ADDRESS: `unix:path=${runtimeDirectory}/bus`,
+      };
+      const inheritedEnvironmentNames =
+        context.launcher === undefined
+          ? (
+              await readBinwalkNgSystemdEnvironmentNames(uid, options.signal)
+            ).filter((name) => name !== "REA_PROCESS_RUN_ID")
+          : [];
+      const spawnOptions = {
         ...options,
-        arguments: [
-          ...options.arguments.slice(0, boundary),
-          "--setenv",
-          "REA_PROCESS_RUN_ID",
-          options.runId,
-          ...options.arguments.slice(boundary),
-        ],
-      });
+        command: sandbox.systemdRun.path,
+        expectedCommand: null,
+        arguments: binwalkNgSystemdRunArguments({
+          runId: options.runId,
+          cwd: sandbox.work_root,
+          command: process.execPath,
+          ...(context.transfer === undefined
+            ? {}
+            : {
+                workspaceQuota: {
+                  bytes: context.transfer.workspaceBytes,
+                  inodes: context.transfer.workspaceInodes,
+                  uid,
+                  gid: gid!,
+                },
+              }),
+          inheritedEnvironmentNames,
+          commandArguments: binwalkNgCgroupGateArguments({
+            workRoot: sandbox.work_root,
+            command: options.command,
+            commandArguments: providerArguments,
+            ...(context.transfer === undefined
+              ? {}
+              : {
+                  workspaceQuota: {
+                    bytes: context.transfer.workspaceBytes,
+                    inodes: context.transfer.workspaceInodes,
+                  },
+                  transfer: {
+                    paths: context.transfer.paths,
+                    maxBytes: context.transfer.maxBytes,
+                    maxFiles: context.transfer.maxFiles,
+                    maxEntries: context.transfer.maxEntries,
+                  },
+                }),
+          }),
+        }),
+        hostEnvironment: {},
+        env: serviceEnvironment,
+      };
+      const spawned = await (context.launcher ?? spawnOwnedProviderProcess)(
+        spawnOptions,
+      );
       const ownership = {
         ...spawned.ownership,
         captureBaseline,

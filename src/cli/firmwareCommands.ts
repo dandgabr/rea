@@ -116,6 +116,14 @@ export const registerFirmwareCommands = (
     maxOutputBytes: extract.max_output_bytes,
     maxOutputFiles: extract.max_output_files,
   };
+  const unblobBudgetOptions = {
+    maxOutputBytes: extract.max_output_bytes.describe(
+      "Unblob only: staging file-byte budget",
+    ),
+    maxOutputFiles: extract.max_output_files.describe(
+      "Unblob only: staging entry budget",
+    ),
+  };
   cli.command(CLI_COMMANDS.inspectFirmwareRegions, {
     description:
       "Inspect default Binwalk3 or explicitly selected binwalk-ng signatures",
@@ -145,31 +153,22 @@ export const registerFirmwareCommands = (
   });
   cli.command(CLI_COMMANDS.extractFirmware, {
     description:
-      "Extract default Unblob or explicitly selected binwalk-ng bytes into a fresh directory",
+      "Extract firmware with Unblob; Binwalk-NG extraction is unavailable in this release",
     args: z.object(outputArgs),
     options: z.object({
-      provider: z.enum(["unblob", "binwalk-ng"]).default("unblob"),
+      provider: z
+        .enum(["unblob", "binwalk-ng"])
+        .default("unblob")
+        .describe(
+          "Binwalk-NG is listed for explicit selection but returns capability-unavailable for extraction",
+        ),
       ...selectionOptions,
-      ...scanOptions,
-      ...budgetOptions,
-      maxDepth: extract.max_depth,
-      carve: z
-        .boolean()
-        .optional()
-        .describe("Ng only: keep native carvings alongside extraction"),
-      recursive: z
-        .boolean()
-        .optional()
-        .describe("Ng only: bounded one-pass recursion; true by default"),
+      ...unblobBudgetOptions,
+      maxDepth: extract.max_depth.describe(
+        "Unblob only: maximum recursive extraction depth",
+      ),
     }),
     run: ({ args, options }) => {
-      const scan = {
-        ...nativeOptions(options),
-        ...(options.carve === undefined ? {} : { carve: options.carve }),
-        ...(options.recursive === undefined
-          ? {}
-          : { recursive: options.recursive }),
-      };
       return execute(CLI_COMMANDS.extractFirmware, "extract_firmware", {
         path: absoluteCallerPath(args.path),
         output_directory: absoluteCallerPath(args.outputDirectory),
@@ -178,10 +177,8 @@ export const registerFirmwareCommands = (
         max_output_bytes: options.maxOutputBytes,
         max_output_files: options.maxOutputFiles,
         ...(options.provider === "binwalk-ng"
-          ? { provider_id: "binwalk-ng", options: scan }
-          : Object.keys(scan).length === 0
-            ? {}
-            : { options: scan }),
+          ? { provider_id: "binwalk-ng" }
+          : {}),
       });
     },
   });

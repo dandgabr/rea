@@ -196,13 +196,6 @@ const installSessionToolAvailability = (
   const linuxX64 = linux && process.arch === "x64";
   const pwntools =
     linuxX64 && isAbsolute(environment.REA_PWNTOOLS_PYTHON ?? "");
-  const ngConfigured =
-    linux &&
-    [
-      environment.REA_BINWALK_NG_COMMAND,
-      environment.REA_FIRMWARE_BWRAP_COMMAND,
-      environment.REA_BINWALK_NG_RUNTIME_MANIFEST,
-    ].every((value) => value !== undefined && isAbsolute(value));
   const basePolicy = sessionAvailabilityPolicy(options.availabilityPolicy, {
     optionalProviderLoadFailures: options.optionalProviderLoadFailures,
     optionalFeatures: {
@@ -223,13 +216,22 @@ const installSessionToolAvailability = (
       binaryLayoutEnabled: options.binaryLayout !== undefined || pwntools,
       firmwareInspectionEnabled:
         options.firmwareAnalysis !== undefined ||
-        (linux && isAbsolute(environment.REA_BINWALK_COMMAND ?? "")) ||
-        ngConfigured,
+        (linux && isAbsolute(environment.REA_BINWALK_COMMAND ?? "")),
       firmwareExtractionEnabled:
         options.firmwareAnalysis !== undefined ||
-        (linux && isAbsolute(environment.REA_UNBLOB_COMMAND ?? "")) ||
-        ngConfigured,
-      firmwareNgEnabled: options.firmwareAnalysis !== undefined || ngConfigured,
+        (linux && isAbsolute(environment.REA_UNBLOB_COMMAND ?? "")),
+      binwalkNgAnalysisEnabled:
+        linux &&
+        isAbsolute(environment.REA_BINWALK_NG_COMMAND ?? "") &&
+        isAbsolute(environment.REA_BINWALK_NG_RUNTIME_MANIFEST ?? "") &&
+        isAbsolute(environment.REA_FIRMWARE_BWRAP_COMMAND ?? "") &&
+        isAbsolute(
+          environment.REA_FIRMWARE_PRLIMIT_COMMAND ?? "/usr/bin/prlimit",
+        ) &&
+        isAbsolute(
+          environment.REA_FIRMWARE_SYSTEMD_RUN_COMMAND ??
+            "/usr/bin/systemd-run",
+        ),
       browserObservationEnabled: options.browserObservation !== undefined,
       javascriptRecoveryEnabled:
         options.javascriptRecovery !== undefined ||

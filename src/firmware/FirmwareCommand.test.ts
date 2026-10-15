@@ -14,8 +14,49 @@ import {
   runFirmwareCommand,
 } from "./FirmwareCommand.js";
 import { createHash } from "node:crypto";
+import { writeFile as writeProtocolFixture } from "node:fs/promises";
+import { createHash as hashProtocol } from "node:crypto";
 
 const it = test.skipIf(process.platform !== "linux");
+
+it("streams binary protocol stdout without retaining it in diagnostic capture", async () => {
+  const root = await createTestTempDirectory("rea-firmware-protocol-");
+  const script = join(root, "protocol.py");
+  const payload = Buffer.alloc(2 * 1024 * 1024, 0xa5);
+  await writeProtocolFixture(
+    script,
+    `import sys\nsys.stdout.buffer.write(bytes([0xa5]) * (2 * 1024 * 1024))\n`,
+  );
+  let bytes = 0;
+  const hash = hashProtocol("sha256");
+  const result = await runFirmwareCommand({
+    engine: "fixture",
+    operation: "carve_firmware",
+    command: "/usr/bin/python3",
+    limiter: "/usr/bin/prlimit",
+    args: [script],
+    cwd: root,
+    environment: { PATH: "/usr/bin:/bin" },
+    signal: AbortSignal.timeout(5_000),
+    protocolStdout: async (stdout) => {
+      for await (const chunk of stdout) {
+        const data = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        bytes += data.length;
+        hash.update(data);
+      }
+    },
+    retainCleanup: (supervisor) => {
+      throw new Error(
+        `Unexpected retained process: ${supervisor.snapshot().exitCode}`,
+      );
+    },
+  });
+  expect(bytes).toBe(payload.length);
+  expect(hash.digest("hex")).toBe(
+    hashProtocol("sha256").update(payload).digest("hex"),
+  );
+  expect(result.stdout).toMatchObject({ text: "", bytes: 0, observedBytes: 0 });
+});
 
 it("retains bounded actual command bytes and malformed UTF-8 on cancellation after native output", async () => {
   const root = await createTestTempDirectory("rea-firmware-captured-");

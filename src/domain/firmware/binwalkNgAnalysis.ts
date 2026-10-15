@@ -36,7 +36,7 @@ export const binwalkNgScanFields = {
   include: z.array(signatureName).default([]),
   exclude: z.array(signatureName).default([]),
   no_mmap: z.boolean().default(false),
-  workers: bytes.positive().default(1),
+  workers: bytes.positive().max(32).default(1),
 };
 const exclusiveSignatures = (options: {
   include: string[];
