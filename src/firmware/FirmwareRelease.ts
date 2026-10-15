@@ -1,3 +1,5 @@
+import { FIRMWARE_EXTRACTION_LIMITS } from "../domain/firmware/firmwareAnalysis.js";
+
 /** Audited upstream sources; installed tool bytes are fingerprinted separately. */
 export const FIRMWARE_RELEASES = {
   binwalk: {
@@ -11,7 +13,6 @@ export const FIRMWARE_RELEASES = {
     repository: "https://github.com/onekey-sec/unblob",
   },
 } as const;
-
 /** Catalog identity for the verified Binwalk release. Evidence replaces version with the observed banner. */
 export const BINWALK_PROVIDER_IDENTITY = {
   id: "binwalk",
@@ -25,9 +26,14 @@ export const UNBLOB_PROVIDER_IDENTITY = {
   version: FIRMWARE_RELEASES.unblob.version,
 } as const;
 
-/** Resource policy for this Linux integration, not a claim of aggregate containment. */
+/** Resource policy for the admitted per-provider execution boundary. */
 export const FIRMWARE_LIMITS = {
   inputBytes: 128 * 1024 * 1024,
+  extractionMinimumBytes: FIRMWARE_EXTRACTION_LIMITS.minimumBytes,
+  extractionBytes: FIRMWARE_EXTRACTION_LIMITS.maximumBytes,
+  extractionTemporaryBytes: 8 * 1024 * 1024,
+  extractionEntries: FIRMWARE_EXTRACTION_LIMITS.maximumEntries,
+  extractionInodes: 512,
   reportBytes: 8 * 1024 * 1024,
   diagnosticBytes: 8 * 1024 * 1024,
   addressSpaceBytes: 1024 * 1024 * 1024,

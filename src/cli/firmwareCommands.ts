@@ -64,11 +64,6 @@ export const registerFirmwareCommands = (
       .array(z.string())
       .optional()
       .describe("Repeatable replacement for native skip extension defaults"),
-    pluginsPath: localPathStringSchema
-      .optional()
-      .describe(
-        "Trusted Python plugin file/tree; imported before native sandbox setup",
-      ),
   };
   const selection = (options: {
     offset?: number | undefined;
@@ -83,7 +78,6 @@ export const registerFirmwareCommands = (
     skipMagic?: string[] | undefined;
     clearSkipMagics?: boolean | undefined;
     skipExtension?: string[] | undefined;
-    pluginsPath?: string | undefined;
   }) => ({
     ...(options.workers === undefined ? {} : { workers: options.workers }),
     ...(options.randomnessDepth === undefined
@@ -100,9 +94,6 @@ export const registerFirmwareCommands = (
     ...(options.skipExtension === undefined
       ? {}
       : { skip_extensions: options.skipExtension }),
-    ...(options.pluginsPath === undefined
-      ? {}
-      : { plugins_path: resolve(options.pluginsPath) }),
   });
   const execute = (
     name: string,
@@ -144,7 +135,6 @@ export const registerFirmwareCommands = (
       "Inspect selected tool identity, dependency lookup and native documented formats",
     options: z.object({
       providerId: z.literal("unblob"),
-      pluginsPath: unblobOptions.pluginsPath,
       runtime,
     }),
     run: ({ options }) =>
@@ -156,9 +146,6 @@ export const registerFirmwareCommands = (
           ...(options.runtime === undefined
             ? {}
             : { runtime: options.runtime }),
-          ...(options.pluginsPath === undefined
-            ? {}
-            : { options: { plugins_path: resolve(options.pluginsPath) } }),
         },
       ),
   });

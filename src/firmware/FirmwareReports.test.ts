@@ -144,6 +144,36 @@ it("retains whole-file percentages without asserting recognized or complete extr
     ),
   ).toThrow();
 });
+
+it("keeps processing coverage partial when installed Unblob plugins are unverified", () => {
+  const base = root();
+  const record = {
+    ...base,
+    reports: [
+      ...base.reports.filter(
+        (item) => item.__typename__ !== "UnknownChunkReport",
+      ),
+      {
+        __typename__: "ChunkReport",
+        id: "builtin-or-plugin",
+        start_offset: 0,
+        end_offset: 20,
+        size: 20,
+        handler_name: "gzip",
+        is_encrypted: false,
+        extraction_reports: [],
+      },
+    ],
+  };
+  const normalized = normalizeUnblobReport([record], {
+    ...context,
+    pluginsUnverified: true,
+  });
+  expect(normalized.coverage).toBe("partial");
+  expect(normalized.tasks[0]?.processing_disposition).toBe(
+    "unknown_plugin_processing",
+  );
+});
 it("distinguishes native basename extension skips from examined unrecognized files", () => {
   const record = unrecognized();
   const path = "/private/image.rlib";

@@ -149,16 +149,17 @@ describe("firmware CLI advertised input schema", () => {
     expect(options({ maxDepth: 0 })).toBe(false);
     expect(options({ maxDepth: 11 })).toBe(false);
     expect(options({ maxOutputBytes: 0 })).toBe(false);
-    expect(options({ maxOutputBytes: 512 * 1024 * 1024 + 1 })).toBe(false);
-    expect(options({ maxOutputFiles: 100_001 })).toBe(false);
+    expect(options({ maxOutputBytes: 4095 })).toBe(false);
+    expect(options({ maxOutputBytes: 64 * 1024 * 1024 + 1 })).toBe(false);
+    expect(options({ maxOutputFiles: 513 })).toBe(false);
     expect(advertised.options?.properties?.["maxDepth"]).toMatchObject({
       default: 3,
     });
     expect(advertised.options?.properties?.["maxOutputBytes"]).toMatchObject({
-      default: 256 * 1024 * 1024,
+      default: 64 * 1024 * 1024,
     });
     expect(advertised.options?.properties?.["maxOutputFiles"]).toMatchObject({
-      default: 10_000,
+      default: 512,
     });
 
     const maxOffset = Number.MAX_SAFE_INTEGER;
@@ -169,8 +170,8 @@ describe("firmware CLI advertised input schema", () => {
       parserSchema(cli, "extract-firmware", "options")?.parse({}),
     ).toMatchObject({
       maxDepth: 3,
-      maxOutputBytes: 256 * 1024 * 1024,
-      maxOutputFiles: 10_000,
+      maxOutputBytes: 64 * 1024 * 1024,
+      maxOutputFiles: 512,
     });
   });
 });

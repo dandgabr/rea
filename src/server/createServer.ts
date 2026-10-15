@@ -194,6 +194,10 @@ const installSessionToolAvailability = (
   if (session === undefined) return undefined;
   const linux = process.platform === "linux";
   const linuxX64 = linux && process.arch === "x64";
+  const nativeUnblobConfigured =
+    linux &&
+    isAbsolute(environment.REA_UNBLOB_COMMAND ?? "") &&
+    isAbsolute(environment.REA_UNBLOB_RUNTIME_ROOT ?? "");
   const pwntools =
     linuxX64 && isAbsolute(environment.REA_PWNTOOLS_PYTHON ?? "");
   const basePolicy = sessionAvailabilityPolicy(options.availabilityPolicy, {
@@ -216,10 +220,10 @@ const installSessionToolAvailability = (
       binaryLayoutEnabled: options.binaryLayout !== undefined || pwntools,
       firmwareInspectionEnabled:
         options.firmwareAnalysis !== undefined ||
-        (linux && isAbsolute(environment.REA_BINWALK_COMMAND ?? "")),
+        (linux && isAbsolute(environment.REA_BINWALK_COMMAND ?? "")) ||
+        nativeUnblobConfigured,
       firmwareExtractionEnabled:
-        options.firmwareAnalysis !== undefined ||
-        (linux && isAbsolute(environment.REA_UNBLOB_COMMAND ?? "")),
+        options.firmwareAnalysis !== undefined || nativeUnblobConfigured,
       browserObservationEnabled: options.browserObservation !== undefined,
       javascriptRecoveryEnabled:
         options.javascriptRecovery !== undefined ||

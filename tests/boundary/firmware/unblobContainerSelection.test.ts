@@ -12,6 +12,14 @@ it("never falls back to native Unblob for an explicitly selected unavailable con
       existing_store_profile: `${fixture.root}/absent-store-profile.json`,
     },
   });
-  expect(outcome).toMatchObject({ ok: false });
+  expect(outcome).toMatchObject({
+    ok: false,
+    error: {
+      _tag: "AnalysisCapabilityUnavailableError",
+      reason: expect.stringContaining(
+        "caller-container runtime is unavailable",
+      ),
+    },
+  });
   expect(fixture.launches).toEqual([]);
 });

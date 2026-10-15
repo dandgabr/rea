@@ -86,6 +86,7 @@ const EXECUTION_WORDING_EXCEPTIONS: Readonly<Record<string, string>> = {
   inspect_adb_package: "reports install times without changing the device",
   list_adb_processes: "lists running processes without changing the device",
   inspect_web_event_listeners: "states it does not evaluate JavaScript",
+  inspect_firmware_regions: "runs the caller-supplied Binwalk tool only",
 };
 
 const declaresForeignAuthority = (name: string): boolean => {
@@ -97,12 +98,49 @@ const declaresForeignAuthority = (name: string): boolean => {
 };
 
 describe("tool effects", () => {
-  it("declares native Unblob plugin import authority for inspection and extraction", () => {
-    for (const name of ["inspect_firmware_regions", "extract_firmware"]) {
+  it("marks unavailable Unblob operations as pre-launch refusals", () => {
+    for (const name of ["inspect_firmware_provider", "extract_firmware"]) {
       expect(TOOL_EFFECTS[name]).toMatchObject({
-        executesForeignCode: true,
-        accessesNetwork: true,
+        launchesProcess: false,
+        executesForeignCode: false,
+        accessesNetwork: false,
       });
+    }
+    expect(TOOL_EFFECTS.inspect_firmware_regions).toMatchObject({
+      launchesProcess: true,
+      executesForeignCode: false,
+      accessesNetwork: false,
+    });
+  });
+  it("keeps firmware tools observational/extraction-only with no device authority", () => {
+    const firmware = TOOL_CONTRACTS.filter(
+      ({ kind }) => kind === "firmware-provider",
+    );
+    expect(firmware.map(({ name }) => name).sort()).toEqual([
+      "extract_firmware",
+      "inspect_firmware_provider",
+      "inspect_firmware_regions",
+    ]);
+    for (const { name } of firmware)
+      expect(TOOL_EFFECTS[name], name).not.toHaveProperty(
+        "mutatesDevice",
+        true,
+      );
+  });
+  it("excludes hardware control actions from every firmware contract", () => {
+    const firmware = TOOL_CONTRACTS.filter(
+      ({ kind }) => kind === "firmware-provider",
+    );
+    const hardwareAction =
+      /\b(?:flash(?:ing)?|update|boot|emulat(?:e|es|ing|ion)|JTAG|UART|glitch(?:ing)?|control)\b/iu;
+    for (const contract of firmware) {
+      expect(`${contract.name} ${contract.description}`).not.toMatch(
+        hardwareAction,
+      );
+      expect(TOOL_EFFECTS[contract.name], contract.name).not.toHaveProperty(
+        "mutatesDevice",
+        true,
+      );
     }
   });
   it("audits every public tool exactly once", () => {

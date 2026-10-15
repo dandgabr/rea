@@ -2,7 +2,12 @@ import { Cli } from "incur";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import pino from "pino";
 import { expect, it, onTestFinished } from "vitest";
+import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { join } from "node:path";
 import { registerFirmwareCommands } from "../../../src/cli/firmwareCommands.js";
+import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
+import { parseEvidence } from "../../../src/domain/evidence.js";
 
 const selected = {
   kind: "container",
@@ -11,13 +16,16 @@ const selected = {
   existing_store_profile: "/tmp/operator-store.json",
 };
 
-const invoke = async (args: string[]) => {
+const invoke = async (
+  args: string[],
+  environment: Readonly<Record<string, string | undefined>> = {},
+) => {
   const exitCode = process.exitCode;
   onTestFinished(() => {
     process.exitCode = exitCode;
   });
   const cli = Cli.create("firmware-test", { version: "1" });
-  registerFirmwareCommands(cli, pino({ level: "silent" }), {});
+  registerFirmwareCommands(cli, pino({ level: "silent" }), environment);
   let output = "";
   await cli.serve([...args, "--json"], {
     stdout: (text) => {
@@ -39,7 +47,9 @@ it.each([
       await invoke([...args, "--runtime", JSON.stringify(selected)]),
     ).toMatchObject({
       code: "capability_unavailable",
-      message: expect.stringContaining("native fallback is refused"),
+      message: expect.stringContaining(
+        "caller-container runtime is unavailable",
+      ),
     });
   },
 );
@@ -116,11 +126,51 @@ it("advertises the actual inline string representation and preserves native omis
       '{"kind":"native"}',
     ]),
   ).toMatchObject({
-    message: expect.stringContaining("REA_UNBLOB_COMMAND"),
+    message: expect.stringContaining("absolute REA_UNBLOB_COMMAND"),
   });
   expect(
     await invoke(["inspect-firmware-provider", "--provider-id", "unblob"]),
   ).toMatchObject({
-    message: expect.stringContaining("REA_UNBLOB_COMMAND"),
+    message: expect.stringContaining("absolute REA_UNBLOB_COMMAND"),
   });
+});
+
+it.skipIf(
+  process.env.REA_UNBLOB_ACCEPTANCE_ROOT === undefined ||
+    process.env.REA_UNBLOB_ACCEPTANCE_COMMAND === undefined,
+)("extracts with pinned Unblob through the public REA CLI", async () => {
+  const workspace = await createTestTempDirectory("rea-unblob-cli-");
+  const output = join(workspace, "published");
+  const evidence = parseEvidence(
+    await invoke(
+      [
+        "extract-firmware",
+        process.env.REA_UNBLOB_ACCEPTANCE_INPUT ?? "/tmp/rea-unblob-input.gz",
+        output,
+        "--workers",
+        "3",
+      ],
+      {
+        ...process.env,
+        REA_UNBLOB_RUNTIME_ROOT: process.env.REA_UNBLOB_ACCEPTANCE_ROOT,
+        REA_UNBLOB_COMMAND: process.env.REA_UNBLOB_ACCEPTANCE_COMMAND,
+      },
+    ),
+  );
+  expect(evidence.provider).toMatchObject({ id: "unblob", version: "26.6.4" });
+  expect(evidence.operation).toBe("extract_firmware");
+  expect(evidence.normalized_result).toMatchObject({
+    engine: { worker_count: 3 },
+    coverage: "partial",
+  });
+  const result = evidence.normalized_result as unknown as {
+    files: readonly { relative_path: string; sha256: string }[];
+    published_bytes: number;
+  };
+  expect(result.files.length).toBeGreaterThan(0);
+  expect(result.published_bytes).toBeGreaterThan(0);
+  for (const file of result.files) {
+    const bytes = await readFile(join(output, file.relative_path));
+    expect(createHash("sha256").update(bytes).digest("hex")).toBe(file.sha256);
+  }
 });

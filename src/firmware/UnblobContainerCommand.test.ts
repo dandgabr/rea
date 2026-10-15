@@ -12,16 +12,13 @@ it("places the actual producer limits inside the container while preserving call
       output_directory: "/caller/output",
       options: {
         workers: 9,
-        plugins_path: "/caller/trusted/plugin.py",
         skip_magic: { mode: "replace", values: ["--force", "two words"] },
         keep_extracted_chunks: true,
         delete_extracted_files: { mode: "selected", handlers: ["gzip"] },
       },
     },
   });
-  const native = unblobExecutionOptions(request, {
-    pluginsPath: "/rea-plugins/plugin.py",
-  });
+  const native = unblobExecutionOptions(request);
   const argv = unblobContainerCommand(
     [...native.args, "--report", "/rea-work/report.json", "/rea-input/fw.bin"],
     1234567,
@@ -40,7 +37,6 @@ it("places the actual producer limits inside the container while preserving call
     "9",
     "--randomness-depth",
     "0",
-    "--plugins-path=/rea-plugins/plugin.py",
     "--clear-skip-magics",
     "--skip-magic=--force",
     "--skip-magic=two words",
@@ -54,8 +50,8 @@ it("places the actual producer limits inside the container while preserving call
     "/rea-work/report.json",
     "/rea-input/fw.bin",
   ]);
-  expect(unblobExecutionOptions(request).args).toContain(
-    "--plugins-path=/caller/trusted/plugin.py",
+  expect(native.args).not.toContainEqual(
+    expect.stringContaining("--plugins-path"),
   );
 });
 

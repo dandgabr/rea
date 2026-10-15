@@ -114,6 +114,7 @@ it("advertises the complete currently available inventory with a session", async
     name: "integration-test",
     version: "1.0.0",
   });
+
   const [clientTransport, serverTransport] =
     InMemoryTransport.createLinkedPair();
   resources.push(client, server);
@@ -169,3 +170,47 @@ it("advertises the complete currently available inventory with a session", async
     expect(tool.outputSchema, tool.name).toBeDefined();
   }
 }, 10_000);
+
+it("requires a systemd-admitted runtime root before advertising Unblob extraction", async () => {
+  const session = createTestBinarySession(
+    () =>
+      ({
+        execute: () => Promise.resolve(ok(null)),
+        close: () => Promise.resolve(resultOk(null)),
+      }) satisfies AnalysisClient,
+  );
+  const server = createServer(
+    { kind: "session", session },
+    { environment: { REA_UNBLOB_COMMAND: "/tools/unblob" } },
+  );
+  const client = new Client({ name: "unblob-availability", version: "1" });
+  const [clientTransport, serverTransport] =
+    InMemoryTransport.createLinkedPair();
+  resources.push(client, server);
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+
+  const sessionTool = (await client.listTools()).tools.find(
+    ({ name }) => name === "binary_session",
+  );
+  if (sessionTool === undefined)
+    throw new Error("Missing advertised binary_session tool");
+  const status = structured(
+    await client.callTool(
+      { name: "binary_session", arguments: {} },
+      { toolDefinition: sessionTool },
+    ),
+  );
+  const inventory = expandToolAvailability(
+    toolContract("binary_session").outputSchema.parse(status).result
+      .tool_availability,
+  );
+  const extraction = inventory.find(({ name }) => name === "extract_firmware");
+  expect(extraction).toMatchObject({
+    available: false,
+    reason: "provider_missing",
+  });
+  expect(extraction?.remediation).toContain(
+    "REA_UNBLOB_COMMAND inside REA_UNBLOB_RUNTIME_ROOT",
+  );
+});

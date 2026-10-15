@@ -1,11 +1,13 @@
 # Firmware analysis
 
-REA accepts **Binwalk 3.1.x** for default region inspection and **Unblob 26.6.x**
-for explicit Unblob inspection, provider inventory and extraction. Omitted
-provider selection preserves Binwalk inspection and Unblob extraction. The report parsers are verified with Binwalk 3.1.0 and
-Unblob 26.6.4. Another build on those lines is accepted, the observed version
-is reported, and a limitation records that the parser was not verified against
-that build. This first firmware milestone is verified on Linux x64.
+REA supports **Binwalk 3.1.x** region inspection and **native Unblob 26.6.x**
+inventory, scan and bounded extraction on Linux with an explicitly supplied
+runtime root and an active user-systemd manager. Caller-container Unblob remains
+unavailable. The systemd boundary is verified inside each transient unit before
+Python or installed `unblob_v1` entrypoints start; it applies fixed cgroup,
+filesystem, network and device controls. Extraction stays in a private 64 MiB,
+512-inode tmpfs and streams framed files into `SafeOutputTree` before verified
+publication. This firmware work is verified on Linux x64.
 No device, root privilege, mount, emulation or execution of extracted programs
 is needed. Arbitrary firmware bytes do not pass native executable admission;
 select a returned ELF separately for supported Ghidra analysis.
@@ -20,15 +22,28 @@ Provide existing tools using absolute executable paths, scoped to your shell:
 
 ```sh
 export REA_BINWALK_COMMAND=/absolute/path/to/binwalk
-export REA_UNBLOB_COMMAND=/absolute/path/to/unblob
+export REA_UNBLOB_COMMAND=/absolute/runtime/root/usr/local/bin/unblob
+export REA_UNBLOB_RUNTIME_ROOT=/absolute/runtime/root
 ```
 
 REA does not install these tools, their dependencies or system packages. It
-checks the tool's `--version` banner when executing a request. Binwalk must
-print `binwalk <version>` and Unblob must print the version alone. Inspection and
-extraction have independent prerequisites; one does not require the other.
-Both require util-linux `prlimit`, normally `/usr/bin/prlimit`; override its
-absolute path with `REA_FIRMWARE_PRLIMIT_COMMAND` if needed.
+checks Binwalk's `--version` banner when executing a request. Binwalk must print
+`binwalk <version>`. The Unblob executable, interpreter, package and runtime
+dependencies must all be available inside `REA_UNBLOB_RUNTIME_ROOT`; the
+configured executable must resolve inside that root. REA requires Linux user
+systemd, cgroup v2, and `/usr/bin/systemd-run`. The service uses
+`PrivatePIDs=yes`; systemd applies this and the other fixed unit properties
+before executing a minimal Python interpreter with `-I -S`. The bootstrap then
+proves `/proc/self/ns/pid` differs from the host namespace identity passed by
+REA and checks effective cgroup and private tmpfs limits before execing Unblob.
+An ignored or unsupported PID namespace fails closed. Interpreter ELF loading
+precedes in-process checks; static `UnsetEnvironment` entries remove documented
+glibc loader controls and Python startup variables before interpreter exec. A
+missing bus, cgroup controller, mount control or policy check fails closed.
+Caller-provided
+container runtimes remain unavailable. Binwalk requires util-linux `prlimit`,
+normally `/usr/bin/prlimit`; override its absolute path with
+`REA_FIRMWARE_PRLIMIT_COMMAND` if needed.
 
 REA retains at most 8 MiB of combined stdout and stderr per command. Exceeding
 that diagnostic budget stops analysis with an explicit truncated-output error;
@@ -36,12 +51,16 @@ child process limits do not bound parent-side pipe retention. Completed commands
 drain their output streams before recording diagnostics. Failed worker cleanup
 retains the worker and workspace for retry before another request or at shutdown.
 
-Unblob needs the external extractor for the selected format on its inherited
-`PATH`: for example, `debugfs` for ext2/ext3/ext4. Native sandbox setup and default skip rules stay enabled. Landlock can silently
-fall back in the native producer; REA reports isolation as unverified. Reported
-sandbox startup failures remain actionable errors;
-REA does not retry with `--no-sandbox`. Missing extractors reported in a valid
-analysis report retain partial results and dependency names inline.
+Unblob inventory and inspection report the selected runtime version and the
+lookup status of external extractors such as `debugfs`; a dependency lookup
+does not prove an extractor works. Extraction reports verified published file
+hashes and retains producer report lineage. The caller's `max_output_bytes` is
+limited to 64 MiB and `max_output_files` to 512 filesystem entries (including
+directories, symlinks and special entries); exceeding either budget fails
+before any output is published. The service tmpfs reserves up to 8 MiB for
+upstream helper temporaries, but its hard aggregate size never exceeds 64 MiB.
+Its inode ceiling also counts directories and service files, so a deeply nested
+extraction can fail below the entry-count ceiling.
 
 Upstream sources are preserved unmodified as optional pinned submodules:
 
@@ -56,13 +75,16 @@ engine binaries. See [upstream provenance](https://github.com/morluto/rea/blob/m
 
 ```sh
 rea inspect-firmware-regions /path/to/firmware.bin
-rea inspect-firmware-provider --provider-id unblob
-rea inspect-firmware-regions /path/to/firmware.bin --provider-id unblob \
-  --offset 64 --length 82 --workers 2 --randomness-depth 1
-rea extract-firmware /path/to/firmware.bin /path/to/new-output
-rea extract-firmware /path/to/firmware.bin /path/to/selected-output \
-  --offset 64 --length 4096 --max-depth 3
 ```
+
+The Unblob CLI and MCP contracts include provider inventory, scan-only
+inspection and extraction when both runtime variables are configured.
+`inspect_firmware_regions` uses native `--skip-extraction`; `extract_firmware`
+uses the service-local tmpfs transfer protocol and publishes only verified
+files. An explicitly selected caller container returns
+`AnalysisCapabilityUnavailableError` before starting a container or falling
+back to native execution. Binwalk region inspection remains available by
+default.
 
 The corresponding MCP tools accept the same intent:
 
@@ -85,26 +107,35 @@ The corresponding MCP tools accept the same intent:
 }
 ```
 
-Both return Evidence with the original path and SHA-256, raw producer reports,
-actual executable path/digest, version and limitations. Binwalk signature UUIDs
-and Unblob blob IDs are producer-local identities; compare content hashes and
-source ranges across runs. A matching version does not attest an installed
-build's source revision, so that field remains unknown.
+Successful Binwalk calls return Evidence with the original path and SHA-256,
+raw producer reports, actual executable path/digest, version and limitations.
+Binwalk signature UUIDs and the planned Unblob blob IDs are producer-local
+identities; compare content hashes and source ranges across runs. A matching
+version does not attest an installed build's source revision, so that field
+remains unknown.
 
 ### Unblob selection and recovery
 
-`inspect_firmware_provider` accepts `{ "provider_id": "unblob" }`, optionally
-with `options.plugins_path`. Its Evidence subject is null because no firmware
-file is examined. It reports the selected executable and digest, native version,
-external executable lookup marks and the native public handler documentation.
-Missing dependencies produce a useful partial inventory even when the native
-callback exits 1. A PATH lookup does not prove an extractor works. Public DOC
-entries omit private handlers and handlers without documentation; installed
-entrypoint inventory and source revision remain unknown.
+`inspect_firmware_provider` accepts `{ "provider_id": "unblob" }` and runs
+inside the same systemd profile. The pinned CLI imports installed `unblob_v1`
+entrypoints before its internal sandbox; REA contains this import inside the
+transient service rather than attempting to enumerate or disable caller-installed
+entrypoints. The unit applies `MemoryMax=1 GiB`, `MemorySwapMax=0`,
+`TasksMax=128`, `CPUQuota=100%`, `RuntimeMaxSec=120s`, private network/devices,
+read-only system paths, and a 64 MiB/512-inode `/tmp`. Each invocation verifies
+the effective namespace, cgroup and tmpfs controls in-unit in a minimal Python
+bootstrap, then execs Unblob. The input snapshot is exposed read-only. Scan
+reports use an individually bounded report
+file; logs remain on service-local tmpfs. REA does not create or manage a
+container runtime.
 
-For explicit Unblob inspection, use `provider_id: "unblob"` and optional
-`options`: `workers`, `randomness_depth`, `skip_magic`, `skip_extensions` and
-`plugins_path`. `skip_magic` is `{ "mode": "append" | "replace", "values": [] }`;
+The Unblob inspection input uses `provider_id: "unblob"` and optional
+`options`: `workers`, `randomness_depth`, `skip_magic`, and `skip_extensions`.
+Caller-selected runtime plugins are unsupported. Installed entrypoint plugins
+are not enumerated or attested, so Unblob assigns `unknown_plugin_processing`
+to per-task processing and always reports overall `partial` coverage. This
+uncertainty remains even when every observed report row is well-formed.
+`skip_magic` is `{ "mode": "append" | "replace", "values": [] }`;
 CLI `--clear-skip-magics` chooses replacement and repeatable `--skip-magic`
 adds literal prefixes. Repeatable `--skip-extension` replaces native defaults
 when supplied. Native argv values stay single tokens, including flag-like text.
@@ -120,7 +151,7 @@ means. The window is `clamp(floor(length / 80), 1024, 1048576)`; both vectors
 must cover `ceil(length / window)` blocks, including a final short block.
 They establish neither encryption nor compression.
 
-Extraction additionally accepts `keep_extracted_chunks`,
+The extraction input additionally accepts `keep_extracted_chunks`,
 `delete_extracted_files: { "mode": "none" | "all" | "selected", "handlers": [] }`
 (`handlers` only for selected mode), `carve_suffix` and `extract_suffix`.
 CLI equivalents are `--keep-extracted-chunks`, `--delete-extracted-files`,
@@ -142,27 +173,25 @@ stat/hash/magic/randomness/multifile/deletion and gap observations in the typed
 error without describing uncommitted paths as published. REA installs nothing,
 chooses no alternate extractor and never automatically retries analysis.
 
-### Trusted plugins
+### Plugin execution boundary
 
-`--plugins-path /absolute/file.py` or a directory explicitly selects trusted
-Python code. REA fingerprints every regular file in that selection, rejects
-links and special entries, and checks identity before and after producer
-commands. Python bytecode cache writes are disabled in the child environment
-so importing a package does not mutate the selected source tree. Hashes and
-sizes refer to the same admitted descriptor. Rechecks observe attribution;
-they cannot prevent changes between checking and import. Native handler,
-directory-handler and report hooks can execute before Landlock setup.
-Unselected installed entrypoints can also import with unknown inventory.
-Fingerprinting does not establish isolation.
+REA does not expose Unblob's `--plugins-path`; caller-selected runtime plugins
+are outside the supported contract. The pinned CLI's dependency and handler
+inventory callbacks call `plugin_manager.import_plugins()`, which loads the
+`unblob_v1` setuptools entrypoint group; the scan path does the same before
+processing. REA therefore starts Python only after systemd has established and
+the in-unit gate has checked the service boundary. Installed entrypoints and
+external helper descendants remain caller-provided code inside that boundary.
+If user systemd, cgroup v2 or the required tmpfs controls are unavailable, native
+execution fails closed. A version banner alone is not admission evidence.
 
 Custom reports remain inline raw diagnostics, including caller evidence that
 looks like a password. An informational custom report alone does not establish
 an extractor failure. An explicit `ERROR` inside a chunk or multifile extraction
 report identifies a problem at that producing stage even when its report type
 is unfamiliar; REA retains the original report and invents no dependency names.
-Uninterpreted plugin processing remains explicitly
-unknown. Identity drift fails with retained producer observations and unknown
-plugin attribution; cleanup ownership remains available for retry.
+Handler inventory remains partial: public documentation omits handlers without
+public DOC metadata, and installed entrypoint inventory is unknown.
 
 See the [Unblob capability ledger](unblob-capabilities.md) for every native CLI
 option, source pin, acceptance scope and excluded authority.
@@ -237,25 +266,35 @@ tree semantics, vulnerability scanning, emulation or hardware runtime capture.
   a private workspace before analysis. No in-place source modification.
 - One outstanding heavy operation per provider instance in total. Concurrent
   admission fails busy; there is no additional waiter. Binwalk uses one thread;
-  Unblob `options.workers` / CLI `--workers` accepts a positive integer, defaults
-  to 1 and appears as the actual selected `engine.worker_count`. Resource limits
-  can prevent large worker selections from completing.
-- **120-second** deadline; inherited **1 GiB per-process address-space** limit,
-  120 CPU seconds and zero core-dump allowance through `prlimit`.
+  Unblob `options.workers` / CLI `--workers` accepts a positive integer,
+  defaults to 1 and appears as the selected `engine.worker_count`. Resource
+  limits can prevent large worker selections from completing.
+- **120-second** deadline. Binwalk uses `prlimit` address-space, CPU and file
+  limits. Unblob runs in an exact transient systemd unit with 1 GiB aggregate
+  `MemoryMax`, zero swap, at most 128 tasks, one CPU quota, 120 seconds,
+  64 MiB `LimitFSIZE`, private network/devices, and `/tmp` tmpfs limited to
+  64 MiB and 512 inodes. The in-unit gate verifies effective cgroup-v2 and
+  tmpfs values before starting Python.
 - JSON reports: at most **8 MiB** and valid UTF-8; malformed encoding and
   oversized reports fail without repairing or truncating producer data.
   Diagnostic output is bounded with exact captured byte counts.
-- Default staging budget: **256 MiB** and **10,000 entries**, configurable using
+- Extraction allows **4 KiB–64 MiB** and at most **512 filesystem entries** via
   `max_output_bytes` / `max_output_files` (CLI `--max-output-bytes` /
-  `--max-output-files`). Depth defaults to 3, allowed range 1–10.
+  `--max-output-files`); the schema rejects larger values. Depth defaults to 3,
+  allowed range 1–10. The hard tmpfs inode ceiling includes directories, the
+  report and service files, so actual extraction may stop earlier.
 
-Staging budgets are polled and rechecked after exit; short-lived overshoot is
-possible. The inherited file-size limit bounds each file, not total storage;
-address-space limits are per process, not an aggregate memory quota. Worker
-count is not CPU affinity for every external extractor. These limits do not
-claim cgroup/container containment. Cancellation cleans the owned process group
-before removing its workspace; uncertain cleanup retains resources and blocks
-further operations in that provider instance.
+Unblob output is first staged inside the service-local tmpfs; the kernel enforces
+aggregate storage and inode ceilings before REA consumes the framed stream. The
+adapter rejects an aggregate output frame above the caller byte budget before
+streaming any file, and enforces the requested entry count while walking the
+service tree. `SafeOutputTree` verifies every streamed file's size and digest
+before caller publication. Worker count remains a requested Unblob setting, not a CPU affinity
+guarantee. Cancellation stops the exact transient unit and verifies cleanup;
+uncertain cleanup retains resources and blocks further operations in that
+provider instance. Caller-container Unblob is refused because the current
+existing-container profile cannot prove an inode ceiling or exact lifecycle
+ownership.
 
 ## Verification
 
@@ -268,9 +307,13 @@ npm run verify:firmware
 
 Fixture generation requires existing Python 3 and a host C compiler (`cc`);
 override with `REA_FIRMWARE_PYTHON` / `REA_FIRMWARE_CC`. The independent oracle
-records gzip offset/length and extracted file hashes. Real verification checks
-CLI/MCP, full-file and selected-range extraction, unknown chunks, depth limits,
-content parity and unchanged source bytes. No binary fixture is committed.
+records gzip offset/length and extracted file hashes. Public CLI and MCP
+acceptance currently exercise pinned Unblob 26.6.4 native inspection and gzip
+extraction through the transient service, verify published SHA-256 values
+against the report, and preserve the source digest in Evidence. Historical runs
+additionally covered selected-range extraction, unknown chunks, depth limits,
+content parity, suffixes and intermediate deletion; those formats/options still
+need rerunning against the admitted profile. No binary fixture is committed.
 
 The optional missing-extractor lane asserts dependency names and the owning
 handler in `extraction_gaps`. Those assertions must be run against the pinned

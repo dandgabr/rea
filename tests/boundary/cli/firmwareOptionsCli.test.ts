@@ -43,7 +43,7 @@ it("selects explicit Unblob inspection through real CLI parsing rather than the 
   ]);
   expect(result).toMatchObject({
     code: "capability_unavailable",
-    message: expect.stringContaining("REA_UNBLOB_COMMAND"),
+    message: expect.stringContaining("installed unblob_v1 entrypoints"),
   });
 });
 
@@ -65,6 +65,18 @@ it("exposes named provider inventory without a firmware positional argument", as
     await invoke(["inspect-firmware-provider", "--provider-id", "unblob"]),
   ).toMatchObject({
     code: "capability_unavailable",
-    message: expect.stringContaining("REA_UNBLOB_COMMAND"),
+    message: expect.stringContaining("installed unblob_v1 entrypoints"),
   });
+});
+
+it("does not expose Unblob's caller-selected plugin path in the CLI", async () => {
+  const result = await invoke([
+    "inspect-firmware-provider",
+    "--provider-id",
+    "unblob",
+    "--plugins-path",
+    "/tmp/plugin.py",
+  ]);
+  expect(result).toMatchObject({ code: "UNKNOWN" });
+  expect(JSON.stringify(result)).not.toContain("plugin.py");
 });

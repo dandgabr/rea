@@ -1,6 +1,9 @@
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import { expect, it as test, onTestFinished } from "vitest";
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { FIRMWARE_TOOL_CONTRACTS } from "../../../src/contracts/firmware/firmwareToolContracts.js";
 import { parseEvidence } from "../../../src/domain/evidence.js";
 import { firmwareInputSchemas } from "../../../src/domain/firmware/firmwareAnalysis.js";
@@ -10,8 +13,156 @@ import {
   firmwareFixture,
   assertFirmwareCleanup,
 } from "../../fixtures/firmware/provider.js";
+import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
 
 const it = test.skipIf(process.platform !== "linux");
+
+test.skipIf(
+  process.platform !== "linux" ||
+    process.env.REA_UNBLOB_ACCEPTANCE_ROOT === undefined ||
+    process.env.REA_UNBLOB_ACCEPTANCE_COMMAND === undefined,
+)(
+  "executes real Unblob inspection through the public MCP contract",
+  async () => {
+    const root = process.env.REA_UNBLOB_ACCEPTANCE_ROOT!;
+    const command = process.env.REA_UNBLOB_ACCEPTANCE_COMMAND!;
+    const session = createTestBinarySession(() => {
+      throw new Error("Firmware inspection must not acquire a native provider");
+    });
+    const server = createServer(
+      { kind: "session", session },
+      {
+        environment: {
+          ...process.env,
+          REA_UNBLOB_RUNTIME_ROOT: root,
+          REA_UNBLOB_COMMAND: command,
+        },
+      },
+    );
+    const client = new Client({ name: "real-unblob-acceptance", version: "1" });
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    onTestFinished(async () => {
+      await client.close();
+      await server.close();
+      await session.close();
+    });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    const path =
+      process.env.REA_UNBLOB_ACCEPTANCE_INPUT ?? "/tmp/rea-unblob-input.gz";
+    const response = await client.callTool({
+      name: "inspect_firmware_regions",
+      arguments: { provider_id: "unblob", path, options: { workers: 3 } },
+    });
+    expect(response.isError, JSON.stringify(response)).not.toBe(true);
+    const result = FIRMWARE_TOOL_CONTRACTS.find(
+      ({ name }) => name === "inspect_firmware_regions",
+    )!.outputSchema.parse(response.structuredContent);
+    const evidence = parseEvidence(result);
+    expect(evidence.provider).toMatchObject({
+      id: "unblob",
+      version: "26.6.4",
+    });
+    expect(evidence.operation).toBe("inspect_firmware_regions");
+    expect(evidence.subject?.digest.sha256).toMatch(/^[a-f0-9]{64}$/u);
+    expect(evidence.normalized_result).toMatchObject({
+      engine: { worker_count: 3 },
+      coverage: "partial",
+    });
+    const inventoryResponse = await client.callTool({
+      name: "inspect_firmware_provider",
+      arguments: { provider_id: "unblob" },
+    });
+    expect(
+      inventoryResponse.isError,
+      JSON.stringify(inventoryResponse),
+    ).not.toBe(true);
+    const inventory = FIRMWARE_TOOL_CONTRACTS.find(
+      ({ name }) => name === "inspect_firmware_provider",
+    )!.outputSchema.parse(inventoryResponse.structuredContent);
+    expect(parseEvidence(inventory).provider).toMatchObject({
+      id: "unblob",
+      version: "26.6.4",
+    });
+  },
+);
+
+test.skipIf(
+  process.platform !== "linux" ||
+    process.env.REA_UNBLOB_ACCEPTANCE_ROOT === undefined ||
+    process.env.REA_UNBLOB_ACCEPTANCE_COMMAND === undefined,
+)(
+  "publishes real Unblob extraction through the public MCP contract",
+  async () => {
+    const workspace = await createTestTempDirectory("rea-unblob-mcp-");
+    const output = join(workspace, "published");
+    const session = createTestBinarySession(() => {
+      throw new Error("Firmware extraction must not acquire a native provider");
+    });
+    const server = createServer(
+      { kind: "session", session },
+      {
+        environment: {
+          ...process.env,
+          REA_UNBLOB_RUNTIME_ROOT: process.env.REA_UNBLOB_ACCEPTANCE_ROOT,
+          REA_UNBLOB_COMMAND: process.env.REA_UNBLOB_ACCEPTANCE_COMMAND,
+        },
+      },
+    );
+    const client = new Client({
+      name: "real-unblob-extraction-acceptance",
+      version: "1",
+    });
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    onTestFinished(async () => {
+      await client.close();
+      await server.close();
+      await session.close();
+    });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    const response = await client.callTool({
+      name: "extract_firmware",
+      arguments: {
+        provider_id: "unblob",
+        path:
+          process.env.REA_UNBLOB_ACCEPTANCE_INPUT ?? "/tmp/rea-unblob-input.gz",
+        output_directory: output,
+        options: { workers: 3 },
+      },
+    });
+    expect(response.isError, JSON.stringify(response)).not.toBe(true);
+    const contract = FIRMWARE_TOOL_CONTRACTS.find(
+      ({ name }) => name === "extract_firmware",
+    )!;
+    const evidence = parseEvidence(
+      contract.outputSchema.parse(response.structuredContent),
+    );
+    expect(evidence.provider).toMatchObject({
+      id: "unblob",
+      version: "26.6.4",
+    });
+    expect(evidence.operation).toBe("extract_firmware");
+    expect(evidence.normalized_result).toMatchObject({
+      engine: { worker_count: 3 },
+      coverage: "partial",
+    });
+    const result = evidence.normalized_result as unknown as {
+      files: readonly { relative_path: string; sha256: string }[];
+      published_bytes: number;
+    };
+    expect(result.files.length).toBeGreaterThan(0);
+    expect(result.published_bytes).toBeGreaterThan(0);
+    for (const file of result.files) {
+      const bytes = await readFile(join(output, file.relative_path));
+      expect(createHash("sha256").update(bytes).digest("hex")).toBe(
+        file.sha256,
+      );
+    }
+  },
+);
 
 it("executes named firmware contracts with inline Evidence and no native binary admission", async () => {
   const fixture = await firmwareFixture();
@@ -101,17 +252,35 @@ it("executes named firmware contracts with inline Evidence and no native binary 
           ? { provider_id: "unblob" }
           : {
               path: fixture.path,
+              provider_id:
+                contract.name === "inspect_firmware_regions"
+                  ? "binwalk"
+                  : "unblob",
               ...(contract.name === "extract_firmware"
                 ? { output_directory: fixture.output }
                 : {}),
             },
     });
+    if (contract.name !== "inspect_firmware_regions") {
+      expect(response.isError, JSON.stringify(response)).toBe(true);
+      expect(JSON.stringify(response)).toContain(
+        contract.name === "extract_firmware"
+          ? "absolute REA_UNBLOB_RUNTIME_ROOT"
+          : "absolute REA_UNBLOB_RUNTIME_ROOT",
+      );
+      continue;
+    }
     expect(response.isError, JSON.stringify(response)).not.toBe(true);
     const result = contract.outputSchema.parse(response.structuredContent);
     const evidence = parseEvidence(result);
     expect(evidence.operation).toBe(contract.name);
     expect(evidence.raw_result).not.toBeNull();
   }
+  expect(
+    fixture.launches.filter((launch) =>
+      launch.args.some((arg) => arg.includes("unblob")),
+    ),
+  ).toEqual([]);
   await assertFirmwareCleanup(fixture.launches);
 });
 
@@ -142,11 +311,10 @@ it("advertises and executes provider inventory by its exact MCP contract", async
     name: "inspect_firmware_provider",
     arguments: { provider_id: "unblob" },
   });
-  expect(response.isError, JSON.stringify(response)).not.toBe(true);
-  expect(parseEvidence(response.structuredContent)).toMatchObject({
-    subject: null,
-    operation: "inspect_firmware_provider",
-    normalized_result: { dependency_readiness: "reported_missing" },
-  });
+  expect(response.isError, JSON.stringify(response)).toBe(true);
+  expect(JSON.stringify(response)).toContain(
+    "absolute REA_UNBLOB_RUNTIME_ROOT",
+  );
+  expect(fixture.launches).toEqual([]);
   await assertFirmwareCleanup(fixture.launches);
 });

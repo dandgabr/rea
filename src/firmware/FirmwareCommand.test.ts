@@ -12,19 +12,28 @@ const it = test.skipIf(process.platform !== "linux");
 
 it("preserves a caller-selected executable invocation path separately from resolved identity", async () => {
   const root = await createTestTempDirectory("rea-firmware-invocation-");
-  const actual = await executableFixture(root, "actual-tool");
-  const selected = join(root, "selected-entrypoint");
+  const runtimeRoot = join(root, "runtime");
+  const binDirectory = join(runtimeRoot, "usr", "local", "bin");
+  await mkdir(binDirectory, { recursive: true });
+  const actual = await executableFixture(binDirectory, "actual-tool");
+  const python = await executableFixture(binDirectory, "python3");
+  const selected = join(binDirectory, "selected-entrypoint");
   await symlink("actual-tool", selected);
   const admitted = await resolveFirmwareCommand(
-    { REA_UNBLOB_COMMAND: selected },
+    {
+      REA_UNBLOB_COMMAND: selected,
+      REA_UNBLOB_RUNTIME_ROOT: runtimeRoot,
+    },
     "unblob",
     "inspect_firmware_regions",
   );
   expect(admitted.command).toBe(selected);
   expect(admitted).toMatchObject({
     resolvedCommand: actual,
+    rootDirectory: runtimeRoot,
     sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
   });
+  expect(python).toContain(runtimeRoot);
 });
 
 test("names the host and tool requirement of an unconfigured engine", async () => {

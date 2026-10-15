@@ -58,6 +58,28 @@ it.each(["draft-2020-12", "draft-07"] as const)(
   },
 );
 
+it("describes configured native Unblob inventory, inspection, and extraction as supported", () => {
+  const descriptions = new Map(
+    FIRMWARE_TOOL_CONTRACTS.map(({ name, description }) => [name, description]),
+  );
+  for (const name of [
+    "inspect_firmware_provider",
+    "inspect_firmware_regions",
+    "extract_firmware",
+  ] as const) {
+    const description = descriptions.get(name);
+    expect(description, name).toBeDefined();
+    expect(description, name).not.toMatch(
+      /planned capabilities only|unavailable: rea refuses/iu,
+    );
+    expect(description, name).toMatch(/user systemd and cgroup v2/iu);
+  }
+  expect(descriptions.get("extract_firmware")).toMatch(/64 MiB\/512-inode/iu);
+  expect(descriptions.get("extract_firmware")).toMatch(
+    /caller-container.*unavailable/iu,
+  );
+});
+
 it.each(["draft-2020-12", "draft-07"] as const)(
   "seed0x43545231 checks 288 runtime/provider requests against independent admission oracles in %s",
   (target) => {

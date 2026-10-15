@@ -120,7 +120,7 @@ const taskDisposition = (context: {
   maxDepth: number;
   magicSkipped: boolean;
   extensionSkipped: boolean;
-  explicitPlugins: boolean;
+  pluginsUnverified: boolean;
   directoryProcessingFailed: boolean;
 }): Pick<
   z.infer<typeof firmwareTaskSchema>,
@@ -137,25 +137,17 @@ const taskDisposition = (context: {
   );
   if (context.task.depth >= context.maxDepth)
     return decision("unexamined_depth_limit");
+  if (context.pluginsUnverified) return decision("unknown_plugin_processing");
   if (context.stat.is_dir) {
     if (context.task.is_multi_file) return decision("multifile_consumed");
     if (context.directoryProcessingFailed)
       return decision("directory_enumeration_incomplete");
     if (hasProcessingProblem) return decision("unknown_processing");
-    return decision(
-      context.explicitPlugins
-        ? "unknown_plugin_processing"
-        : "directory_enumerated",
-    );
+    return decision("directory_enumerated");
   }
   if (!context.stat.is_file || context.stat.is_link)
     return decision("nonregular");
-  if (hasProcessingProblem)
-    return decision(
-      context.explicitPlugins
-        ? "unknown_plugin_processing"
-        : "unknown_processing",
-    );
+  if (hasProcessingProblem) return decision("unknown_processing");
   if (context.reportKinds.includes("ChunkReport"))
     return decision("examined_recognized");
   if (context.reportKinds.includes("UnknownChunkReport"))
@@ -163,7 +155,6 @@ const taskDisposition = (context: {
   if (!context.hasHashAndMagic) return decision("unknown_processing");
   if (context.task.is_multi_file) return decision("multifile_consumed");
   if (context.stat.size === 0) return decision("empty");
-  if (context.explicitPlugins) return decision("unknown_plugin_processing");
   const reasons: ("magic" | "extension")[] = [];
   if (context.magicSkipped) reasons.push("magic");
   if (context.extensionSkipped) reasons.push("extension");
@@ -286,7 +277,7 @@ export const normalizeUnblobReport = (
     maxDepth: number;
     skipMagic?: readonly string[];
     skipExtensions?: readonly string[];
-    explicitPlugins?: boolean;
+    pluginsUnverified?: boolean;
   },
 ) => {
   const records = extraction.parse(raw);
@@ -566,7 +557,7 @@ export const normalizeUnblobReport = (
       maxDepth: context.maxDepth,
       magicSkipped,
       extensionSkipped,
-      explicitPlugins: context.explicitPlugins === true,
+      pluginsUnverified: context.pluginsUnverified === true,
       directoryProcessingFailed: record.reports.some(
         (item) =>
           item.__typename__ === "UnknownError" ||
@@ -937,6 +928,7 @@ export const normalizeUnblobReport = (
       dependencies: [...problem.dependencies].sort(),
     })),
     coverage:
+      context.pluginsUnverified === true ||
       depths.length > 0 ||
       diagnostics.length > 0 ||
       multifiles.some((item) =>

@@ -7,7 +7,8 @@ import { projectAnalysisError } from "../domain/analysisErrorProjection.js";
 import { randomUUID } from "node:crypto";
 import { access, realpath, stat } from "node:fs/promises";
 import { constants } from "node:fs";
-import { isAbsolute } from "node:path";
+import type { Readable } from "node:stream";
+import { isAbsolute, relative, sep } from "node:path";
 import {
   AnalysisCapabilityUnavailableError,
   AnalysisCancelledError,
@@ -24,6 +25,10 @@ import {
 } from "../process/ProviderProcess.js";
 import { cleanupOwnedProcessGroup } from "../process/ProcessOwnership.js";
 import { FIRMWARE_LIMITS } from "./FirmwareRelease.js";
+import {
+  spawnUnblobSystemdProcess,
+  type UnblobSystemdProfile,
+} from "./UnblobSystemd.js";
 import {
   hashFirmwareFile,
   inventoryFirmwareOutput,
@@ -95,13 +100,46 @@ export const resolveFirmwareCommand = async (
       `${variable} is not a readable executable regular file: ${command}: ${cause instanceof Error ? cause.message : String(cause)}`,
     );
   }
+  let rootDirectory: string | undefined;
+  if (engine === "unblob") {
+    const configuredRoot = environment.REA_UNBLOB_RUNTIME_ROOT;
+    if (configuredRoot === undefined || !isAbsolute(configuredRoot))
+      throw firmwareToolUnavailable(
+        engine,
+        operation,
+        "Native Unblob requires an absolute REA_UNBLOB_RUNTIME_ROOT containing the caller-supplied interpreter, package, and dependencies",
+      );
+    rootDirectory = await realpath(configuredRoot).catch((cause: unknown) => {
+      signal?.throwIfAborted();
+      throw firmwareToolUnavailable(
+        engine,
+        operation,
+        `REA_UNBLOB_RUNTIME_ROOT is unavailable: ${cause instanceof Error ? cause.message : String(cause)}`,
+      );
+    });
+    const relativeExecutable = relative(rootDirectory, command);
+    if (
+      relativeExecutable === ".." ||
+      relativeExecutable.startsWith(`..${sep}`) ||
+      isAbsolute(relativeExecutable)
+    )
+      throw firmwareToolUnavailable(
+        engine,
+        operation,
+        "REA_UNBLOB_COMMAND must resolve inside REA_UNBLOB_RUNTIME_ROOT",
+      );
+  }
   const limiter =
-    environment.REA_FIRMWARE_PRLIMIT_COMMAND ?? "/usr/bin/prlimit";
+    engine === "unblob"
+      ? "/usr/bin/systemd-run"
+      : (environment.REA_FIRMWARE_PRLIMIT_COMMAND ?? "/usr/bin/prlimit");
   if (!isAbsolute(limiter))
     throw firmwareToolUnavailable(
       engine,
       operation,
-      "REA_FIRMWARE_PRLIMIT_COMMAND must be absolute",
+      engine === "unblob"
+        ? "user systemd systemd-run must be available at /usr/bin/systemd-run"
+        : "REA_FIRMWARE_PRLIMIT_COMMAND must be absolute",
     );
   try {
     await access(limiter, constants.X_OK);
@@ -115,10 +153,18 @@ export const resolveFirmwareCommand = async (
     throw firmwareToolUnavailable(
       engine,
       operation,
-      `Resource limiter is not an executable regular file: ${limiter}: ${cause instanceof Error ? cause.message : String(cause)}; provide util-linux prlimit`,
+      engine === "unblob"
+        ? `Native Unblob requires /usr/bin/systemd-run and the user-systemd manager: ${cause instanceof Error ? cause.message : String(cause)}`
+        : `Resource limiter is not an executable regular file: ${limiter}: ${cause instanceof Error ? cause.message : String(cause)}; provide util-linux prlimit`,
     );
   }
-  return { command: configured, resolvedCommand: command, limiter, sha256 };
+  return {
+    command: configured,
+    resolvedCommand: command,
+    limiter,
+    sha256,
+    ...(rootDirectory === undefined ? {} : { rootDirectory }),
+  };
 };
 
 /** Execute one bounded provider command and verify its owned descendants have stopped. */
@@ -133,13 +179,15 @@ export const runFirmwareCommand = async (context: {
   signal: AbortSignal;
   launcher?: FirmwareLauncher;
   outputBudget?: { root: string; bytes: number; entries: number };
+  systemdProfile?: UnblobSystemdProfile;
+  consumeStdout?: (stream: Readable) => Promise<unknown>;
   acceptReportedExtractionFailure?: boolean;
   retainCleanup(supervisor: ProviderProcessSupervisor): void;
 }) => {
   const { engine, operation, signal } = context;
   signal.throwIfAborted();
   const runId = `rea-firmware-${randomUUID()}`;
-  const spawned = await (context.launcher ?? spawnOwnedProviderProcess)({
+  const launchOptions: OwnedProviderProcessSpawnOptions = {
     command: context.limiter,
     arguments: [
       `--as=${FIRMWARE_LIMITS.addressSpaceBytes}`,
@@ -162,7 +210,15 @@ export const runFirmwareCommand = async (context: {
       RAYON_NUM_THREADS: "1",
       NO_COLOR: "1",
     },
-  });
+  };
+  const spawned =
+    engine === "unblob" && context.systemdProfile !== undefined
+      ? await spawnUnblobSystemdProcess(
+          context.systemdProfile,
+          context.args,
+          launchOptions,
+        )
+      : await (context.launcher ?? spawnOwnedProviderProcess)(launchOptions);
   let diagnosticTruncated = false;
   const supervisor = new ProviderProcessSupervisor(
     {
@@ -172,6 +228,7 @@ export const runFirmwareCommand = async (context: {
         spawned.cleanup ?? (() => cleanupOwnedProcessGroup(spawned.ownership)),
     },
     {
+      captureStdout: context.consumeStdout === undefined,
       maxDiagnosticBytes: FIRMWARE_LIMITS.diagnosticBytes,
       onDiagnostic: (event) => {
         if (event.type === "output" && event.truncated === true)
@@ -208,6 +265,19 @@ export const runFirmwareCommand = async (context: {
       resource_limiter: context.limiter,
     };
   };
+  let stdoutResult: unknown;
+  let stdoutFailure: unknown;
+  const stdoutResultPromise =
+    context.consumeStdout === undefined
+      ? undefined
+      : context.consumeStdout(supervisor.launch.process.stdout!).then(
+          (value) => {
+            stdoutResult = value;
+          },
+          (cause: unknown) => {
+            stdoutFailure = cause;
+          },
+        );
   const checkDiagnostics = () => {
     if (diagnosticTruncated) {
       throw new AnalysisOutputError(
@@ -223,6 +293,7 @@ export const runFirmwareCommand = async (context: {
   try {
     const deadline = performance.now() + FIRMWARE_LIMITS.timeoutMs;
     while (!(await supervisor.waitForOutputClose(100))) {
+      if (stdoutFailure !== undefined) throw stdoutFailure;
       checkDiagnostics();
       if (signal.aborted) throw new AnalysisCancelledError(operation);
       if (performance.now() >= deadline)
@@ -236,12 +307,15 @@ export const runFirmwareCommand = async (context: {
           signal,
         );
     }
+    await stdoutResultPromise;
+    if (stdoutFailure !== undefined) throw stdoutFailure;
     checkDiagnostics();
     if (signal.aborted) throw new AnalysisCancelledError(operation);
   } catch (cause: unknown) {
     failure = cause;
   }
   const stopped = await supervisor.stop();
+  await stdoutResultPromise;
   const snapshot = supervisor.snapshot();
   const captured = capture();
   if (failure instanceof AnalysisError) failure.retainCapturedOutput(captured);
@@ -298,6 +372,7 @@ export const runFirmwareCommand = async (context: {
     command: context.command,
     args: [...context.args],
     resource_limiter: context.limiter,
+    ...(context.consumeStdout === undefined ? {} : { stdoutResult }),
   };
 };
 

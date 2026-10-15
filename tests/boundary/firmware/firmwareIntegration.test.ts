@@ -117,8 +117,13 @@ const delivery = new ToolResultDelivery(STDIO_DEFAULT_MAX_BUFFER_SIZE);
 
 const it = test.skipIf(process.platform !== "linux");
 
-it.each([false, true])(
-  "binds firmware publication to actual directory durability cancellation: abort=%s",
+// Historical provider-level Unblob success paths remain as skipped regression
+// scenarios while native Unblob is fail-closed. The active no-launch contract
+// is asserted in unblobExecution.test.ts; source-only report, publication,
+// file and output-tree safety coverage remains in their owning test suites.
+
+it.skip.each([false, true])(
+  "blocked: Unblob publication durability cancellation: abort=%s",
   async (abort) => {
     const fixture = await firmwareFixture("observation-facts");
     const controller = new AbortController();
@@ -202,13 +207,13 @@ it.each([false, true])(
   },
 );
 
-it.each([
+it.skip.each([
   "existing-output",
   "missing-file",
   "write-failure",
   "cancelled-write",
 ])(
-  "retains native facts and raw provenance through ordinary publication failure: %s",
+  "blocked: Unblob publication failure retains native facts: %s",
   async (failure) => {
     const fixture = await firmwareFixture(
       failure === "missing-file"
@@ -399,7 +404,7 @@ it.each(["wrong-input", "bounds"])(
   },
 );
 
-it("retains native intermediate deletion without publishing a nonexistent file", async () => {
+it.skip("blocked: Unblob intermediate deletion publication", async () => {
   const fixture = await firmwareFixture("deleted");
   const result = await fixture.service.execute("extract_firmware", {
     path: fixture.path,
@@ -426,7 +431,7 @@ it("retains native intermediate deletion without publishing a nonexistent file",
   await assertFirmwareCleanup(fixture.launches);
 });
 
-it("extracts a selected interval with verified file identity and parent-byte lineage", async () => {
+it.skip("blocked: Unblob selected interval publication and lineage", async () => {
   const fixture = await firmwareFixture();
   const result = await fixture.service.execute("extract_firmware", {
     path: fixture.path,
@@ -464,7 +469,7 @@ it("extracts a selected interval with verified file identity and parent-byte lin
   await assertFirmwareCleanup(fixture.launches);
 });
 
-it("retains a setup-failed publication tree for provider cleanup retry", async () => {
+it.skip("blocked: Unblob setup-failed publication cleanup retry", async () => {
   const fixture = await firmwareFixture();
   const createTree = SafeOutputTree.create.bind(SafeOutputTree);
   let cleanupAttempts = 0;
@@ -524,7 +529,7 @@ it("retains a setup-failed publication tree for provider cleanup retry", async (
   });
 });
 
-it("returns firmware output after a transient published-directory close failure", async () => {
+it.skip("blocked: Unblob output after transient directory close failure", async () => {
   const fixture = await firmwareFixture();
   const closeFailure = injectPublishedDirectoryCloseFailure(false);
   try {
@@ -547,7 +552,7 @@ it("returns firmware output after a transient published-directory close failure"
   }
 });
 
-it("retains the complete firmware result when published output cleanup stays uncertain", async () => {
+it.skip("blocked: Unblob result when output cleanup stays uncertain", async () => {
   const fixture = await firmwareFixture();
   const closeFailure = injectPublishedDirectoryCloseFailure(true);
   try {
@@ -857,8 +862,8 @@ const injectPublishedDirectoryCloseFailure = (persistent: boolean) => {
   };
 };
 
-it.each(["depth", "dependency", "link"])(
-  "reports partial extraction for %s without losing inline results",
+it.skip.each(["depth", "dependency", "link"])(
+  "blocked: Unblob partial extraction report for %s",
   async (mode) => {
     const fixture = await firmwareFixture(mode);
     const result = await fixture.service.execute("extract_firmware", {
@@ -945,7 +950,7 @@ it.each(["depth", "dependency", "link"])(
   },
 );
 
-it("distinguishes a real output file named $input from the selected original", async () => {
+it.skip("blocked: Unblob output identity for a file named $input", async () => {
   const fixture = await firmwareFixture("reserved-name");
   const outcome = await fixture.service.execute("extract_firmware", {
     path: fixture.path,
@@ -983,7 +988,7 @@ it.each(["hash", "malformed", "budget", "missing-file", "deleted-and-missing"])(
   },
 );
 
-it("preserves existing output and rejects invalid intervals before invoking extraction", async () => {
+it.skip("blocked: Unblob output preservation and interval admission", async () => {
   const fixture = await firmwareFixture();
   await mkdir(fixture.output);
   await writeFile(`${fixture.output}/existing`, "keep");
@@ -1007,7 +1012,7 @@ it("preserves existing output and rejects invalid intervals before invoking extr
   await assertFirmwareCleanup(fixture.launches);
 });
 
-it("retains startup stderr when Unblob exits 1 without a report", async () => {
+it.skip("blocked: Unblob startup stderr without a report", async () => {
   const fixture = await firmwareFixture("startup");
   const result = await fixture.service.execute("extract_firmware", {
     path: fixture.path,
@@ -1042,7 +1047,7 @@ it("retains startup stderr when Unblob exits 1 without a report", async () => {
   await assertFirmwareCleanup(fixture.launches);
 });
 
-it("distinguishes a successful process with missing output from startup failure", async () => {
+it.skip("blocked: Unblob missing output after successful process", async () => {
   const fixture = await firmwareFixture("missing-report");
   const result = await fixture.service.execute("extract_firmware", {
     path: fixture.path,
@@ -1254,7 +1259,7 @@ it("rejects native inspection hits outside the selected bytes even when inside t
   await assertFirmwareCleanup(fixture.launches);
 });
 
-it("selects real Unblob skip-extraction inspection without invoking Binwalk", async () => {
+it.skip("blocked: Unblob skip-extraction inspection", async () => {
   const fixture = await firmwareFixture();
   const unsupported = await fixture.service.execute(
     "inspect_firmware_regions",
@@ -1365,8 +1370,8 @@ const expectRetainedFirmwareWorkspace = async (
   );
 };
 
-it.each(["none", "caller", "deadline"] as const)(
-  "retains the descriptor owner when publication rollback also fails: %s",
+it.skip.each(["none", "caller", "deadline"] as const)(
+  "blocked: Unblob publication rollback descriptor ownership: %s",
   async (lateAbort) => {
     const fixture = await firmwareFixture();
     const disjoint = await retainSettledFirmwareWorkspace(

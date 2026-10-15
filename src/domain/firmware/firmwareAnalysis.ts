@@ -12,6 +12,11 @@ import {
 } from "./firmwareObservations.js";
 
 const bytes = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
+export const FIRMWARE_EXTRACTION_LIMITS = {
+  minimumBytes: 4096,
+  maximumBytes: 64 * 1024 * 1024,
+  maximumEntries: 512,
+} as const;
 const range = z.strictObject({ offset: bytes, length: bytes.positive() });
 const target = {
   path: localPathStringSchema
@@ -35,10 +40,15 @@ export const firmwareExtractionFields = {
   max_output_bytes: z
     .number()
     .int()
+    .min(FIRMWARE_EXTRACTION_LIMITS.minimumBytes)
+    .max(FIRMWARE_EXTRACTION_LIMITS.maximumBytes)
+    .default(FIRMWARE_EXTRACTION_LIMITS.maximumBytes),
+  max_output_files: z
+    .number()
+    .int()
     .min(1)
-    .max(512 * 1024 * 1024)
-    .default(256 * 1024 * 1024),
-  max_output_files: z.number().int().min(1).max(100_000).default(10_000),
+    .max(FIRMWARE_EXTRACTION_LIMITS.maximumEntries)
+    .default(FIRMWARE_EXTRACTION_LIMITS.maximumEntries),
 };
 const optionText = z
   .string()
@@ -67,7 +77,6 @@ const deletion = z.discriminatedUnion("mode", [
       .min(1),
   }),
 ]);
-/** Explicit plugin paths execute trusted Python code before native sandbox setup. */
 export const unblobOptionsSchema = z.strictObject({
   workers: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).default(1),
   randomness_depth: bytes.default(0),
@@ -78,12 +87,6 @@ export const unblobOptionsSchema = z.strictObject({
     })
     .optional(),
   skip_extensions: z.array(optionText).min(1).optional(),
-  plugins_path: localPathStringSchema
-    .refine(isAbsolute)
-    .optional()
-    .describe(
-      "Trusted Python plugin file/tree; imported before Landlock. Installed entrypoints may also execute with unknown inventory.",
-    ),
 });
 export const unblobExtractionOptionsSchema = unblobOptionsSchema.extend({
   keep_extracted_chunks: z.boolean().default(false),
@@ -139,7 +142,6 @@ export const firmwareInputSchemas = {
   extract_firmware: unblobExtractionInputSchema,
   inspect_firmware_provider: z.strictObject({
     provider_id: z.literal("unblob"),
-    options: unblobOptionsSchema.pick({ plugins_path: true }).optional(),
     runtime: firmwareRuntimeSchema.optional(),
   }),
 } as const;
@@ -169,21 +171,6 @@ export const firmwareRequestSchema = z.discriminatedUnion("operation", [
   }),
 ]);
 
-export const firmwareTrustedPluginsSchema = z.strictObject({
-  selected_path: z.string(),
-  resolved_path: z.string(),
-  kind: z.enum(["file", "tree"]),
-  files: z.array(
-    z.strictObject({
-      relative_path: z.string(),
-      size: bytes,
-      sha256: digestSchema,
-    }),
-  ),
-  identity_sha256: digestSchema,
-  recheck: z.enum(["unchanged", "changed", "unverified"]),
-  attribution: z.enum(["pre_and_post_fingerprint", "unknown"]),
-});
 export const firmwareEngineSchema = z.strictObject({
   name: z.string(),
   version: z.string(),
@@ -197,7 +184,6 @@ export const firmwareEngineSchema = z.strictObject({
   executable_sha256: digestSchema,
   source_revision: z.null(),
   worker_count: z.number().int().positive(),
-  trusted_plugins: firmwareTrustedPluginsSchema.optional(),
 });
 export const firmwareSelectionSchema = z.strictObject({
   ...range.shape,

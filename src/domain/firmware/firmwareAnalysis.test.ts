@@ -75,6 +75,29 @@ it("validates real Unblob option grammars without silently dropping caller choic
     ).toBe(false);
 });
 
+it("rejects caller-supplied Unblob plugin paths in every public input contract", () => {
+  const firmware = {
+    path: "/tmp/fw.bin",
+    provider_id: "unblob",
+    options: { plugins_path: "/tmp/trusted.py" },
+  };
+  expect(
+    firmwareInputSchemas.inspect_firmware_regions.safeParse(firmware).success,
+  ).toBe(false);
+  expect(
+    firmwareInputSchemas.extract_firmware.safeParse({
+      ...firmware,
+      output_directory: "/tmp/new-output",
+    }).success,
+  ).toBe(false);
+  expect(
+    firmwareInputSchemas.inspect_firmware_provider.safeParse({
+      provider_id: "unblob",
+      options: { plugins_path: "/tmp/trusted.py" },
+    }).success,
+  ).toBe(false);
+});
+
 it("accepts legacy inspection payloads without fabricating selected coordinates or digest", () => {
   const legacy = {
     engine: {

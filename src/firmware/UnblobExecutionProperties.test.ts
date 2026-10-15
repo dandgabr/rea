@@ -93,19 +93,20 @@ it("bounded seed0x51a71 preserves caller values, native modes and strict provide
       carve_suffix: `.carved-${index}`,
       extract_suffix: `.expanded-${index}`,
     };
+    const requestOptions = {
+      workers,
+      randomness_depth,
+      skip_magic: { mode, values: [magic] },
+      skip_extensions: [extension],
+      ...(inspection ? {} : extractionOptions),
+    };
     const request = firmwareRequestSchema.parse({
       operation: inspection ? "inspect_firmware_regions" : "extract_firmware",
       input: {
         path: input.path,
         provider_id: input.provider_id,
         ...(inspection ? {} : { output_directory: input.output_directory }),
-        options: {
-          workers,
-          randomness_depth,
-          skip_magic: { mode, values: [magic] },
-          skip_extensions: [extension],
-          ...(inspection ? {} : extractionOptions),
-        },
+        options: requestOptions,
       },
     });
     if (request.input.provider_id !== "unblob")
@@ -145,7 +146,7 @@ it("bounded seed0x51a71 preserves caller values, native modes and strict provide
         input: {
           ...request.input,
           provider_id: "binwalk",
-          options: request.input.options,
+          options: requestOptions,
         },
       }).success,
     ).toBe(false);

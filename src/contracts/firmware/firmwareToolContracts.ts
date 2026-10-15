@@ -13,7 +13,7 @@ export const FIRMWARE_TOOL_CONTRACTS = [
     ...toolContractMetadata("inspect_firmware_provider"),
     kind: "firmware-provider",
     description:
-      "Inspect the caller-selected Unblob 26.6.x tool with native version, external dependency lookup and generated public handler documentation. Dependency exit 1 is retained as reported missing, not startup failure. Documentation lists only public DOC entries, not every installed handler. No firmware input or fabricated artifact subject. Trusted explicit plugins and installed entrypoints may execute before sandbox setup; identity fingerprints do not attest isolation. Linux and caller-supplied util-linux prlimit required; one outstanding provider operation and 120-second deadline.",
+      "Inspect a caller-supplied Unblob installation for its observed version, external dependency readiness and public handler documentation. Native execution requires an absolute REA_UNBLOB_RUNTIME_ROOT and REA_UNBLOB_COMMAND inside it, user systemd and cgroup v2; installed unblob_v1 entrypoints run only after the service boundary is verified. The installed plugin set remains unknown. Caller-container execution is unavailable. No firmware input or fabricated artifact subject.",
     inputSchema: firmwareInputSchemas.inspect_firmware_provider,
     outputSchema: evidenceResultOf(
       firmwareResultSchemas.inspect_firmware_provider,
@@ -30,7 +30,7 @@ export const FIRMWARE_TOOL_CONTRACTS = [
     ...toolContractMetadata("inspect_firmware_regions"),
     kind: "firmware-provider",
     description:
-      "Inspect caller-selected firmware bytes with default Binwalk 3.1.x or explicit Unblob 26.6.x (verified with 3.1.0 and 26.6.4). Binwalk returns signature candidates and reported confidence; Unblob skip-extraction returns chunks, stat/hash/magic, scoped native randomness when measured, and processing diagnostics. No published extraction or automatic target execution. Linux, caller-supplied tool and util-linux prlimit required; 128 MiB input, one outstanding operation per provider and 120-second deadline. Unblob installed trusted plugin entrypoints may execute code and access the network before sandbox setup; native Landlock fallback means isolation is not attested.",
+      "Inspect firmware bytes with caller-supplied Binwalk 3.1.x for signature candidates and reported confidence, or explicitly selected native Unblob for chunks, stat/hash/magic, randomness and processing diagnostics. Unblob requires an absolute REA_UNBLOB_RUNTIME_ROOT with REA_UNBLOB_COMMAND inside it, user systemd and cgroup v2; installed unblob_v1 entrypoints run only after the service boundary is verified. REA cannot attest the installed plugin set, so Unblob processing and overall coverage remain unknown/partial. Caller-container Unblob is unavailable. This operation does not publish extracted files or execute target code.",
     inputSchema: firmwareInputSchemas.inspect_firmware_regions,
     outputSchema: evidenceResultOf(
       firmwareResultSchemas.inspect_firmware_regions,
@@ -47,12 +47,12 @@ export const FIRMWARE_TOOL_CONTRACTS = [
     ...toolContractMetadata("extract_firmware"),
     kind: "firmware-provider",
     description:
-      "Extract caller-selected firmware bytes with Unblob 26.6.x (verified with 26.6.4) into an absent output directory. Named options preserve workers, skip policies, randomness, native carvings, intermediate deletion and suffix layout. Returns verified regular-file paths/digests, native task facts, derivations, unknown chunks, extraction diagnostics, explicit extraction_gaps and a continuation_id referencing shared extraction_continuations recovery instructions. Linux, caller-supplied tool, format-specific extractors and util-linux prlimit required. One outstanding operation per provider; extracted code is never automatically executed. Installed trusted plugin entrypoints may execute code and access the network before sandbox setup; native Landlock fallback means isolation is not attested. Select a returned native file with open_binary for Ghidra analysis; decompressed offsets remain unknown and are not original-file addresses.",
+      "Extract caller-selected firmware bytes with Unblob 26.6.x (verified with 26.6.4) into an absent output directory using an admitted user systemd and cgroup v2 service. Named options preserve workers, skip policies, randomness, native carvings, intermediate deletion and suffix layout. The producer uses a private 64 MiB/512-inode tmpfs; hash-checked regular files stream into SafeOutputTree before publication, within caller-selected byte/entry ceilings. Returns native task facts, derivations, extraction diagnostics, explicit extraction gaps and continuation references. Configure an absolute REA_UNBLOB_RUNTIME_ROOT and REA_UNBLOB_COMMAND inside it. Caller-container execution is unavailable; installed entrypoints are caller-provided and not attested, so per-task processing and coverage remain partial. Extracted code is never automatically executed; decompressed offsets remain unknown and are not original-file addresses.",
     inputSchema: firmwareInputSchemas.extract_firmware,
     outputSchema: evidenceResultOf(firmwareResultSchemas.extract_firmware),
     examples: [
       {
-        title: "Extract selected firmware",
+        title: "Extract selected firmware with Unblob",
         input: {
           path: "/tmp/firmware.bin",
           output_directory: "/tmp/firmware-output",
