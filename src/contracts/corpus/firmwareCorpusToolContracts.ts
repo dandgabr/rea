@@ -64,46 +64,9 @@ export const FIRMWARE_CORPUS_TOOL_CONTRACTS = [
     { connection, uid, plugin: "file_system_metadata" },
   ),
   contract(
-    "upload_corpus_firmware",
-    "Upload immutable local firmware bytes and required metadata to FACT with exact plugin selection. Accepted means externally queued, not analyzed. Selected trusted plugins can execute code and permit egress; unpacker is a producer dependency. No automatic retry or external cancellation.",
-    {
-      connection,
-      path: "/tmp/firmware.bin",
-      metadata: {
-        device_name: "device",
-        device_part: "part",
-        device_class: "class",
-        file_name: "firmware.bin",
-        version: "1",
-        vendor: "vendor",
-      },
-      plugins: ["file_type"],
-    },
-  ),
-  contract(
-    "reanalyze_corpus_firmware",
-    "Queue FACT firmware analysis with exact plugins and separate re_unpack choice. Trusted plugins may execute and permit egress; prior analyses may be replaced. Accepted is external-job delivery, not completion; canceling REA does not cancel that job.",
-    { connection, uid, plugins: ["file_type"], re_unpack: false },
-  ),
-  contract(
-    "enqueue_corpus_analysis",
-    "Queue one FACT file/plugin analysis with explicit force. Supported by source-54aed90b; release-4.4.1 refuses this route before HTTP. Trusted plugins may execute/egress and force may replace analysis. No retry or job cancellation.",
-    { connection, uid, plugin: "file_type", force: false },
-  ),
-  contract(
-    "start_corpus_comparison",
-    "Queue comparison of distinct FACT firmware UIDs with explicit redo. External comparison plugins can execute/egress and redo can replace prior comparison data. Acknowledged delivery is distinct from completed comparison.",
-    { connection, uids: [uid, other], redo: false },
-  ),
-  contract(
     "inspect_corpus_comparison",
     "Inspect the native comparison for selected distinct FACT UIDs. Native HTTP202 may contain a completed comparison; status codes alone never establish completion.",
     { connection, uids: [uid, other] },
-  ),
-  contract(
-    "start_corpus_yara",
-    "Queue an asynchronous FACT YARA search from raw YARA source text in rule_file and optional UID. Preserve the returned search ID; no automatic polling, retry or server cancellation.",
-    { connection, rule_file: "rule test { condition: true }" },
   ),
   contract(
     "collect_corpus_yara",
@@ -126,18 +89,8 @@ export const FIRMWARE_CORPUS_TOOL_CONTRACTS = [
     { connection, uid, repacked: false, output_path: "/tmp/download.bin" },
   ),
   contract(
-    "delete_corpus_firmware",
-    "Delete selected FACT firmware through explicit producer delete authority. Shared child UIDs may remain; retain the actual deleted-files report and ambiguous delivery. No compensating deletion or retry.",
-    { connection, uid },
-  ),
-  contract(
     "export_corpus_firmware",
-    "Export selected FACT UIDs through the official native CLI/default checkout config into fresh verified ZIP outputs. Interpreter/critical sources/config are fingerprinted; native DB authority is independent of REST. Existing local DB/admin/storage prerequisites are caller-provided; no config rewrite or role setup.",
+    "This planned FACT native export request is currently unavailable for omitted, native and podman-existing runtimes. REA has no enforceable filesystem, network and device isolation boundary before producer identity or process launch. The schema remains for planning and the provider returns capability-unavailable until that boundary exists.",
     { ...native, uids: [uid], output_directory: "/tmp/fact-export" },
-  ),
-  contract(
-    "import_corpus_firmware",
-    "Import selected FACT ZIPs through official native CLI/default config after all-input CRC/header/member/UID/graph/resource preflight. Preserve caller order, strict revision, skips and partial writes; DB objects precede files. Exit0 alone is not import, and no force, rollback or retry is performed.",
-    { ...native, archives: ["/tmp/FACT_export.zip"] },
   ),
 ] as const satisfies readonly ToolContract[];

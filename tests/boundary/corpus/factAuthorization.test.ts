@@ -158,7 +158,7 @@ cliTest(
         schemas++;
         ajv.removeSchema();
       }
-      expect(schemas).toBe(16);
+      expect(schemas).toBe(10);
       for (const authorization of invalid) {
         const result = await cli.run({
           arguments: [
@@ -220,4 +220,5 @@ cliTest(
       await new Promise<void>((resolve) => api.close(() => resolve()));
     }
   },
+  60_000,
 );

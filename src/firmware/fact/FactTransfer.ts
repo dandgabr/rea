@@ -50,33 +50,3 @@ function factStringBytes(value: string): number {
   }
   return bytes;
 }
-
-/** Metadata and the actual binary expansion have independent allocation bounds. */
-export function factUploadBody(
-  metadata: Record<string, JsonValue>,
-  bytes: Buffer,
-) {
-  const metadataBytes = factJsonBytes({ ...metadata, binary: "" });
-  if (bytes.length > FACT_LIMITS.rawBytes)
-    throw Error("FACT upload exceeds its raw byte budget");
-  const envelope = JSON.stringify({ ...metadata, binary: "" });
-  function* chunks() {
-    yield Buffer.from(envelope.slice(0, -2));
-    // Divisible by three: each bounded chunk is an independent canonical quartet sequence.
-    for (let at = 0; at < bytes.length; at += 65535)
-      yield Buffer.from(bytes.subarray(at, at + 65535).toString("base64"));
-    yield Buffer.from('"}');
-  }
-  const producer = chunks();
-  const body = new ReadableStream<Uint8Array>({
-    pull(controller) {
-      const next = producer.next();
-      if (next.done) controller.close();
-      else controller.enqueue(next.value);
-    },
-    cancel() {
-      producer.return(undefined);
-    },
-  });
-  return { body, wireBytes: metadataBytes + 4 * Math.ceil(bytes.length / 3) };
-}

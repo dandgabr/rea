@@ -1,237 +1,210 @@
 # FACT Core corpus boundaries
 
-The corpus adapter uses the caller's literal loopback HTTP(S) origin and declared
-source profile. It does not discover a running instance, read a credential store,
-or attest a service version from `/rest/status`. Corpus UIDs and virtual paths
-belong to the external service; an observation has no local executable subject.
+REA uses a caller-selected literal loopback HTTP(S) origin and a declared
+protocol profile. It does not discover a running instance, read a credential
+store, or attest a service version from `/rest/status`. Corpus UIDs and virtual
+paths belong to the external service; corpus Evidence has no local executable
+subject.
 
-The profiles are pinned to [release 4.4.1](https://github.com/fkie-cad/FACT_core/tree/9ac65997a2b0fdaabd61bca2280fa22c441b1f92)
+The profiles describe upstream source at [release 4.4.1](https://github.com/fkie-cad/FACT_core/tree/9ac65997a2b0fdaabd61bca2280fa22c441b1f92)
 and [source 54aed90b](https://github.com/fkie-cad/FACT_core/tree/54aed90bacb13c484404018101527c72d0bff6c5).
-Release 4.4.1 has no single-file analysis PUT. Every enqueue request using that
-profile is refused before HTTP, including omitted or false `force`. Source-profile
-PUT sends the caller's `force` selection. Neither profile admits arbitrary routes.
+They are declarations, not proof that the selected service runs either
+revision. `enqueue_corpus_analysis` is not part of the public REA contract;
+neither profile permits arbitrary routes.
 
-HTTP success alone does not establish an object, analysis or acknowledgement.
-The adapter checks the selected producer envelope and native fields, including
-analysis metadata, object metadata, comparison identity and mutation acknowledgements.
-Available native request echoes are bound to the selected UID, plugin, query,
-paging, comparison and binary representation. Reanalysis compares effective plugin
-selection and `re_unpack`, respecting native unpacker removal/reappend semantics
-without imposing plugin ordering. Contradictory echoes remain unknown with partial
-producer values and digest; mutations and consuming reads are never retried or
-compensated. Upload UID echoes are checked against the owned byte snapshot.
-Statistics use the producer's raw category dictionaries rather than a status envelope.
-Malformed responses remain unknown with their raw SHA-256 and available partial
-producer values. Malformed UTF-8, duplicate members and nonfinite JSON numbers are
-rejected without repairing the source representation.
+HTTP success alone does not establish an object, analysis, or acknowledgement.
+The adapter validates producer envelopes and requires the pinned upstream
+request echoes on successful firmware/file-object searches (query and paging,
+plus firmware recursion flags), object detail (UID), analysis (UID and plugin),
+parent analysis (UID), comparison (normalized selection), and binary download
+(UID and `tar` selection). Firmware summary detail is selected by the exact
+[`summary` URL query](https://github.com/fkie-cad/FACT_core/blob/54aed90bacb13c484404018101527c72d0bff6c5/src/web_interface/rest/rest_firmware.py#L173-L187): pinned FACT reads it to select the returned representation
+but echoes only the UID, so REA binds that boolean to its non-redirected
+request and treats any returned contradictory `request.summary` as unknown.
+Missing or contradictory required producer echoes keep the observation
+unknown. Error responses may contain only partial echoes and are not required
+to repeat the full selection. `/rest/statistics` is a raw dictionary, and
+successful [YARA result retrieval](https://github.com/fkie-cad/FACT_core/blob/54aed90bacb13c484404018101527c72d0bff6c5/src/web_interface/rest/rest_binary_search.py#L65-L84) also has no request echo in either pinned
+revision. REA binds its one-shot result to the exact caller-selected literal
+`/rest/binary_search/<search_id>` request path, refuses redirects, and does not
+fabricate a producer echo; a present contradictory `request.search_id` keeps
+the observation unknown. YARA start is excluded and is not used to create or
+attest the caller's search ID. Contradictory or malformed responses remain
+unknown with available partial facts and digests. REA does not retry consuming
+reads or compensate for ambiguous delivery. Statistics retain the producer's
+raw category dictionaries.
+
+The status plugin inventory deliberately mirrors upstream: `/rest/status`
+removes `unpacker` from its plugin map. Its absence from the returned inventory
+does not establish that the service has no unpacker implementation.
 
 ## Consuming YARA collection
 
-Collection identity includes canonical URL origin, declared profile, exact search
-ID and private authentication context. Credentials and their private cache digest
-are never exported. Equivalent trailing-slash and default-port spellings join the
-same consumption while Evidence preserves the first caller's display endpoint.
-The first caller owns the fetch and its cancellation signal. Concurrent callers
-join its observation; canceling a joining caller does not cancel that shared fetch.
-A captured observation survives subsequent delivery cancellation.
+Collection identity includes canonical URL origin, declared profile, exact
+search ID, and private authentication context. Credentials and their private
+cache digest are not exported. Equivalent trailing-slash and default-port
+spellings join the same collection while Evidence preserves the first caller's
+display endpoint. The first caller owns fetch cancellation; concurrent callers
+join its observation, and canceling a joining caller does not cancel the fetch.
 
-Successful collections and ambiguous delivery, socket loss or malformed-response
-observations stay cached. A producer status-1 error is a failed observation, never
-an absence claim. The exact HTTP-400 [not-ready-or-already-fetched error](https://github.com/fkie-cad/FACT_core/blob/54aed90bacb13c484404018101527c72d0bff6c5/src/web_interface/rest/rest_binary_search.py)
-returns no result: a later explicit collect may make another attempt. Proven
-not-delivery and admission refusal also permit a later explicit attempt. There is
-no automatic retry, polling, compensation or producer job cancellation.
+Successful, ambiguous, socket-loss, and malformed-response observations stay
+cached. A producer status-1 response is a failed observation, never an absence
+claim. The exact HTTP-400
+[not-ready-or-already-fetched response](https://github.com/fkie-cad/FACT_core/blob/54aed90bacb13c484404018101527c72d0bff6c5/src/web_interface/rest/rest_binary_search.py)
+contains no result; a later explicit collect may try again. Proven
+not-delivery and admission refusal also permit a later explicit attempt. There
+is no automatic retry, polling, compensation, or producer-job cancellation.
 
 ## Transfer and resource ownership
 
-Raw binary is limited to 128 MiB and nonbinary JSON to 8 MiB. Base64 has its own
-actual `4 * ceil(rawBytes / 3)` allowance. Upload metadata is measured with JSON
-escaping and UTF-8 before serialization; the binary body streams in bounded
-chunks. Download and upload error-echo parsing measure encoded characters,
-decoded bytes and original wire overhead separately. Unicode escapes and whitespace
-consume the nonbinary wire budget. Retained Evidence omits binary representations,
-preserving response SHA-256 and verified binary size/digest instead.
+Raw binary is limited to 128 MiB and nonbinary JSON to 8 MiB. Base64 has a
+separate actual `4 * ceil(rawBytes / 3)` allowance. Download parsing accounts
+for wire bytes and decoded bytes separately and omits binary representations
+from retained Evidence. JSON escaping and UTF-8 are measured before payload
+serialization.
 
-Token validation runs in an owned worker using the existing pinned `stream-json`
-and `stream-chain` dependencies. Download binary types, duplicate members and
-unexpected nested download structures are checked before generic metadata object
-assembly. The worker has a 64 MiB old-generation and 8 MiB young-generation V8
-heap ceiling. These limits apply to V8 heap, **not** Buffer/ArrayBuffer allocations
-or total operating-system memory. Raw response chunks and their final buffer are
-separately bounded; the final buffer transfers to the worker without another
-large input copy. Decoded chunks and their final buffer each have the raw-byte
-ceiling. Upload echoes hash decoded chunks without retaining another full binary.
-The normalized metadata graph is redacted once under exclusive ownership and
-sealed for immutable reuse through AnalysisExecution and Evidence, avoiding full
-payload clones. These controls do not assert a fixed JSON-to-heap expansion factor
-or protection against every system-wide memory failure.
+The response parser uses an owned worker with V8 heap limits. These limits
+apply to V8 heap, not Buffer/ArrayBuffer allocations or total operating-system
+memory. Raw response chunks and their final buffer are separately bounded; the
+final buffer transfers to the worker without another large input copy. The
+normalized metadata graph is redacted once and sealed for immutable reuse
+through AnalysisExecution and Evidence.
 
-The provider reuses `ArtifactAnalysisResources`: one outstanding heavy operation
-per provider instance, with tagged capacity refusal for additional operations.
-Identical-authority YARA callers join the existing collection before admission.
-Cancellation terminates the owned parser worker. Failed termination retains its
-owner and an observable cleanup uncertainty for explicit close/retry.
+The provider admits one outstanding heavy operation per instance. Identical
+authority YARA callers join before admission. Cancellation terminates the
+owned parser worker; failed termination retains its owner and reports cleanup
+uncertainty for explicit close/retry. HTTP readers are owned before header
+admission. Oversized declared or streaming bodies are canceled; failed cleanup
+retains the exact reader and lock without repeating the request.
 
-HTTP response readers are owned before header admission. An oversized declared
-body is canceled even if it never finishes; streaming overflow also cancels its
-reader. Failed cancellation retains the exact reader and lock for explicit close,
-with cleanup uncertainty in the observation. Cleanup does not replace useful
-admitted bytes or the original response failure and never repeats the request.
+Downloads require a fresh output path and publish through an owned file. A
+write failure removes only its uncommitted output; failed rollback remains
+owned for close. Partial Evidence retains independently verified response
+size, digest, selected UID, written-byte count, and cleanup uncertainty.
+Publication is not claimed atomic, and a preexisting caller file is never
+overwritten or removed.
 
-Snapshot roots are owned from creation, including failed acquisitions. Input
-handles open nonblocking with no symlink following, then their actual descriptors
-must identify regular files; a FIFO needs no writer to be rejected. Descriptor
-and root cleanup failures retain owners. A failed post-observation cleanup does
-not discard the producer observation.
+## Native interchange
 
-Downloads create fresh outputs exclusively. The publication owner retains device
-and inode identity from creation until commit or rollback. A write failure removes
-only that uncommitted owned artifact; failed rollback remains owned for close.
-The partial observation preserves independently verified response size, SHA-256
-and selected UID plus written-byte count and cleanup uncertainty. Publication is
-not claimed atomic, and a preexisting caller file is never overwritten or removed.
+Native import is not exposed. `export_corpus_firmware` remains a planned
+contract but the native provider refuses every runtime before checking
+producer identity or invoking a process, container session, or Podman. No
+native import or export support is currently implemented.
 
-## Native interchange boundary
+## Verification status
 
-The native adapter has independent caller-declared interpreter/checkout/default
-configuration authority. It does not infer a binding to the REST endpoint.
-It checks twelve critical source files against the selected source/release pin,
-observes resolved executable identities while invoking the original selected
-venv path, and fingerprints the exact default `src/config/fact-core-config.toml`.
-Only PostgreSQL source/effective socket directory, port, database and storage root
-leave configuration parsing. Users and passwords are excluded from that
-projection; actual password/API-secret values are privately retained only for
-output redaction. Ordinary `postgres` role text and socket paths remain evidence.
+The active REST tests use source-derived protocol expectations, controlled
+loopback HTTP responses, and disposable files. They exercise adapter behavior,
+including request construction, response normalization, malformed and
+oversized bodies, cancellation, capacity, cleanup, credential redaction, and
+public CLI/MCP contracts. Those fixtures alone do not establish compatibility
+with a running FACT service.
 
-The pinned producer maps literal localhost/127.0.0.1/::1 to
-`/var/run/postgresql`; an explicit absolute Unix socket directory remains exact.
-Remote/unresolved database selectors and relative storage roots are rejected.
-Existing admin DB/storage privileges are prerequisites. REA never creates roles,
-rewrites configuration or supplies `--force`. Python usersite/bytecode and libpq
-ambient credential/service fallback are disabled through the owned command
-environment; HOME/XDG and PostgreSQL fallback paths belong to private staging.
-No ambient environment is persisted. Native storage-directory creation remains
-an upstream effect. Configuration, critical source, interpreter and limiter
-identity checks detect pre/post drift; they do not prevent races or attest every
-installed imported dependency.
+A disposable live service was assembled with Podman on an internal-only network:
+PostgreSQL 18.6 and Valkey 9.1.2 had no published ports, and the FACT frontend
+was bound to host loopback. FACT Core source was checked out at
+`54aed90bacb13c484404018101527c72d0bff6c5` and mounted read-only over the local
+Python runtime image. The image's dependency layer is not source-attested. The
+database schema was initialized from that checkout, and an upstream FACT test
+fixture was inserted directly into this disposable database and its private
+container storage. No Docker/runtime socket was mounted; the FACT backend was
+not started because upstream imports `docker.from_env()` during backend startup
+and exits when the socket is absent. No firmware upload or analysis task was
+submitted.
 
-Archive preflight uses the locked zip.js reader with CRC32, overlap and explicit
-local-header/central-directory identity checks,
-actual streamed expansion accounting and the bounded owned JSON parser. It never
-extracts archive paths. Duplicate member paths, traversal, links/special members,
-encryption, missing/undeclared binaries, mismatched UID/SHA/size and unsafe
-hierarchies are rejected before any selected import starts. Native object
-metadata can repeat a UID: preserve all ordered occurrences, validate each
-against actual binary bytes, and record the final occurrence selected by the
-pinned importer's dictionary comprehension. Parent graph validation uses those
-effective native objects. Simple native orphans remain explicit; cycles and
-unresolved descendants after one-pass orphan pruning are rejected. Failed
-preflight retains already verified binary hashes, metadata digest and the raw
-producer metadata as partial source evidence.
+The observation can be reproduced without any saved credential: check out the
+pinned FACT revision, start PostgreSQL and Valkey on a Podman `--internal`
+network, mount the checkout read-only into the pre-existing FACT Python runtime
+image, initialize the schema with that checkout's `init_postgres.py`, and
+publish only the frontend port on `127.0.0.1`. For the observed run, the network
+was `rea-fact-acceptance-54aed`; temporary containers were
+`rea-fact-pg-54aed`, `rea-fact-redis-54aed`, and `rea-fact-app-54aed`. The
+fixture was upstream's `dummy` firmware test object, UID
+`418a54d78550e8584291c96e5d6168133621f352bfc1d43cf84e81187fef4962_787`.
+The image dependency layer is local and must be reviewed independently before
+using this as a supply-chain-attested deployment test.
 
-All selected import archives are preflighted first, then official single-archive
-calls run in caller order under one shared 120s deadline/admission. Exact native
-import counts, existing-target skips and revision refusals are distinct
-observations. Cancellation before the next invocation preserves its
-`not_started` state and prior reported effect bounds. A skip/refusal continues;
-an ambiguous exception/cancel during an issued invocation stops the
-remaining archives as `not_started`. Exit0 never establishes import. DB object
-writes precede native file writes and can partially fail or collide with a shared
-UID; no retry, rollback or compensating delete is attempted. Reported counts do
-not independently verify DB/storage commits. Rich diagnostics are interpreted
-only as exact whole acknowledgement rows; wrapped/unrecognized or invalid UTF-8
-output remains unknown. Original diagnostics, retained/observed byte counts,
-retained-byte digests and UTF-8 validity remain explicit after provider redaction.
-The diagnostic-limit error captures rich provenance when first raised; later
-capture cannot replace its authoritative text or byte identity.
+With the frontend mapped to local port `34937` in that run and the fixture
+present, these safe calls reproduce the five successful REST checks (the CLI
+binary must be built from this branch):
 
-Exports run official multi-UID selection into private staging, monitor actual
-output growth, verify each selected ZIP and publish verified archives only into
-a fresh absent caller directory. Uncommitted publication is rolled back by the
-owned tree; failed cleanup retains that exact owner for explicit close. Verified
-archive facts survive publication or cleanup failure. Actual durable tree
-publication establishes matching global and per-archive committed facts before
-cleanup retries; later close failure preserves published bytes and records
-cleanup uncertainty. Prepared metadata alone cannot establish publication.
-Native export uses BytesIO;
-the existing producer limiter applies AS1GiB, CPU120s, file size and zero core
-before launch. Compressed staging and actual expanded bytes have separate
-budgets. Metadata and aggregate retained native diagnostics each have an 8MiB
-budget; crossing the aggregate diagnostic bound can transiently hold one more
-bounded command capture before rejection. This is not a global OOM prevention
-claim. Archive-member digests describe exact bytes; native capture representation
-digest describes serialized command observations before redaction, not a raw
-protocol stream.
+```sh
+FACT='{"endpoint":"http://127.0.0.1:34937","profile":"source-54aed90b"}'
+FACT_UID='418a54d78550e8584291c96e5d6168133621f352bfc1d43cf84e81187fef4962_787'
+rea inspect-corpus-statistics "{\"connection\":$FACT}" --json
+rea search-corpus-objects "{\"connection\":$FACT,\"kind\":\"firmware\",\"query\":{},\"offset\":0,\"limit\":10}" --json
+rea inspect-corpus-gaps "{\"connection\":$FACT}" --json
+rea inspect-corpus-object "{\"connection\":$FACT,\"kind\":\"firmware\",\"uid\":\"$FACT_UID\"}" --json
+rea inspect-corpus-analysis "{\"connection\":$FACT,\"uid\":\"$FACT_UID\",\"plugin\":\"dummy\"}" --json
+```
 
-Pinned native producer: [source CLI](https://github.com/fkie-cad/FACT_core/blob/54aed90bacb13c484404018101527c72d0bff6c5/src/firmware_import_export.py),
-[source configuration](https://github.com/fkie-cad/FACT_core/blob/54aed90bacb13c484404018101527c72d0bff6c5/src/config.py),
-[source object conversion](https://github.com/fkie-cad/FACT_core/blob/54aed90bacb13c484404018101527c72d0bff6c5/src/objects/file.py),
-[release CLI](https://github.com/fkie-cad/FACT_core/blob/9ac65997a2b0fdaabd61bca2280fa22c441b1f92/src/firmware_import_export.py).
+The production stdio MCP adapter was separately invoked with the equivalent five
+named operations and returned the same completed HTTP observations. Cleanup for
+that run removed the three named containers and the `rea-fact-acceptance-54aed`
+network; the temporary checkout (including its synthetic local-only test
+configuration) was deleted. These names are run-specific and can be reused only
+after confirming no matching user-owned container/network exists.
 
-| Native choice       | Adapter disposition                                                    | Verification                                                                    |
-| ------------------- | ---------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
-| `export UID...`     | Exact official selection; selected namespace has existing DB authority | Real host-native plain export and malformed producer export partial evidence    |
-| `-o/--output`       | Private staging, then fresh verified caller output                     | Actual ZIP byte/hash readback; publication cleanup faults                       |
-| `import ARCHIVE...` | Preflight all; ordered per-archive official calls with shared deadline | Real host-native import, shared-UID exception, skip and strict revision refusal |
-| `-f/--force`        | Excluded; strict producer revision check retained                      | Real zero-exit incompatible-revision refusal                                    |
-| `-h/--help`         | Presentation/developer; no raw CLI proxy                               | Root's direct producer help prerequisite check; not an analyst operation        |
+The compiled REA CLI was also invoked natively on the host with Node `22.23.1`
+(within the declared `^22.19.0` engine range) against an ephemeral loopback HTTP
+fixture for `inspect-corpus-statistics`; it exited 0 with completed Evidence and
+one request. This supplements the Node `24.18.0` Podman CLI/MCP acceptance. It
+does not enable FACT native export, which remains refused for every runtime.
 
-## Verification scope
+### Admission mutation and fuzz evidence
 
-Production-boundary tests use actual loopback HTTP and disposable files, including
-real socket disconnection, FIFO admission, exact metadata maxima, malformed
-compact download JSON, contradictory native request echoes, unfinished oversized
-HTTP bodies, cancellation, capacity and cleanup failures. Native tests include
-actual supervised fixture processes, malformed byte digests, CRC-only corruption,
-last-occurrence graph semantics, all-input preflight and failed fresh publication.
-Fixture boundaries do not establish actual FACT conformance. Bounded seeded
-archive/config/acknowledgement properties and ten specific consequential
-mutants validate these owning rules; no global fuzz/mutation score is claimed.
+Scoped mutation checks ran the full `FactRestProvider.test.ts` source suite in
+Node `24.18.0` using a disposable Podman container. They contacted no FACT
+service and mounted no runtime socket (the container used its normal Podman
+network). Each mutant was a one-occurrence temporary source replacement,
+restored byte-for-byte in a `finally` block before the next run. The test
+command inside each container was:
 
-A supplied disposable source54aed service and host-native checkout/venv/socket DB
-were separately exercised with the compiled adapters. Host-native plain export
-was verified/published; original gzip imported with a producer acknowledgement,
-then a real shared-UID exception retained partial uncertainty and stopped the
-third selection. Explicit later calls confirmed native existing-target skip and
-strict revision refusal, both exit0. Another real host export omitted an effective
-object for a binary and was rejected; present verified facts remain partial.
-These checks concern supplied disposable resources only. Release native runtime, full optional-plugin inventory and native-container
-composition remain unverified. Public host-native and REST CLI/MCP acceptance
-is recorded below and remains subject to independent phase review. No existing human corpus,
-configuration rewrite, DB-role installation, push or publication is part of this
-checkpoint.
+```sh
+npm run test:local -- src/firmware/fact/FactRestProvider.test.ts
+```
 
-## Public native and REST acceptance
+The three targeted mutations were all killed:
 
-The shared corpus service is registered through 18 exact named contracts on MCP
-and dedicated hyphenated CLI commands. Both use the same strict inputs and
-Evidence output schemas. The CLI accepts JSON or a JSON file, preserves all
-selected options, and returns exit 1 for failed, unknown or undelivered outcomes
-without replacing their Evidence. One-shot cleanup failures retain completed
-Evidence as a typed partial observation. Service availability means the contract
-can be called with selected prerequisites, not that a service or native DB is
-ready. REST and native producers have separate resource and authority owners.
+| Boundary               | Temporary mutant                                                                                                                              | Result                                                                                                                                                     |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| REST admission         | Changed `if (excluded.has(operation as string))` to `if (false && excluded.has(operation as string))` in `FactRestProvider.ts`.               | Exit 1: `denies FACT mutation and plugin-triggering REST operations before HTTP` failed because `upload_corpus_firmware` was admitted; 23/24 tests passed. |
+| Evidence redaction     | Changed the redactor's `const output = apply(inputText, retainedBytes);` to `const output = inputText;` in `knownSensitiveValueRedaction.ts`. | Exit 1: 3/24 tests failed, including encoded-key redaction and Unicode redaction; 21/24 passed.                                                            |
+| Producer normalization | Changed `valid = schema.safeParse(data).success;` to `valid = true;` in `FactProducerResponse.ts`.                                            | Exit 1: 2/24 tests failed, including malformed successful envelopes and missing native analysis metadata; 22/24 passed.                                    |
 
-Real public source and independently installed npm-package CLI/stdio MCP lanes
-used the pinned source profile. REST ran in an owned disposable container;
-interchange Python ran on the HOST against separate owned PostgreSQL socket,
-database and storage selections. Each fresh lane performed one ordered import
-campaign: gzip producer-reported import, plain shared-child failure with possible
-partial writes, then a third archive not_started, with exactly two native calls.
-Later explicit existing-target skips and strict revision refusals preserve the
-producer's exit-zero semantics. CLI reports revision refusal as failed/exit1.
-Plain exports and original downloads were independently SHA/size/CRC checked.
-Raw YARA source starts, explicit result collection and retained same-session
-reads were exercised without automatic polling or retry. Raw source is the
-native rule_file format; a base64 source-text input produced a retained HTTP400
-syntax error and did not establish a successful search.
+These mutations establish that the named tests detect these specific regressions;
+they are not a full mutation score for the FACT implementation. Source state was
+restored and `git diff --check` passed afterward. Property-based coverage in the
+same branch exercises generated connection strings against literal-loopback
+admission and generated arbitrary response bytes through the bounded JSON worker,
+asserting no leaked worker ownership. The authorization boundary suite also runs
+128 deterministic invalid-header cases across schema, CLI and MCP. These tests
+do not constitute a coverage-guided native fuzzer run against FACT Core itself.
 
-Public tests also validate the installed SDK-converted draft2020 schemas, all
-18 named handlers and examples, malformed literal-loopback selections with
-zero provider delivery, raw Authorization redaction, accepted/failed/unknown
-states, release enqueue refusal and cleanup partial facts. Boundary fixtures
-establish those semantics, not real optional plugin readiness. Full optional
-plugin/release live coverage, every fault/race/resource extreme and product
-container-native interchange execution remain unverified. The existing-service
-container runtime has a separate proposed design/review gate; no service
-lifecycle ownership is implied by the current native provider.
+The focused public boundary run also checks that the seven excluded CLI names
+(`upload-corpus-firmware`, `reanalyze-corpus-firmware`,
+`enqueue-corpus-analysis`, `start-corpus-comparison`, `start-corpus-yara`,
+`delete-corpus-firmware`, and `import-corpus-firmware`) return
+`COMMAND_NOT_FOUND` without making an HTTP request. This replaces a stale test
+that expected the removed `enqueue-corpus-analysis` command to submit a PUT.
+The final focused run passed 13 tests in six files; the source provider run
+passed 51 tests in six files; `check:fast` passed two tasks; and `docs:check`
+passed six tasks plus both README consistency tests. These are branch checks,
+not a full `check:pr` run.
+
+Against that service, real HTTP 200 responses were observed for statistics,
+firmware search, missing-analysis lookup, fixture object detail, and its
+`dummy` analysis result. REA's compiled CLI and production stdio MCP each
+returned `state=completed` and `http_status=200` for statistics, firmware
+search, missing-analysis lookup, object detail, and analysis lookup. These are
+live upstream REST observations; the empty database/search results and the
+single seeded fixture limit their breadth. `/rest/status` returned HTTP 500
+because it requires the backend's plugin inventory. A direct binary-retrieval
+request did not complete within a 15-second probe because the frontend routes
+file access through backend intercom. Backend-dependent binary retrieval,
+one-shot YARA collection, comparisons with stored results, release-profile
+behavior, and native export were not verified against the live deployment.
+The caller-selected profile remains a declaration; it is not service-side
+revision attestation. Plugin-triggering endpoints were not called, and no
+container authority is inferred for other FACT deployments. Native import and
+export acceptance are not claimed.

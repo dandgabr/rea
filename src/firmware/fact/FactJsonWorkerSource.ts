@@ -41,7 +41,6 @@ const { createHash } = require("node:crypto");
       throw Error("FACT decoded binary exceeds its raw byte budget");
     decodedBytes += bytes.length;
     binaryHash.update(bytes);
-    if (workerData.binaryMode === "upload-echo") return;
     let at = 0;
     while (at < bytes.length) {
       if (block === null)
@@ -101,13 +100,9 @@ const { createHash } = require("node:crypto");
         )
           throw Error("FACT producer response JSON root must be an object");
         if (
-          (workerData.binaryMode === "download" &&
-            stack.length === 1 &&
-            frame.key === "binary") ||
-          (workerData.binaryMode === "upload-echo" &&
-            stack.length === 2 &&
-            stack[0].key === "request" &&
-            frame.key === "binary")
+          workerData.binaryMode === "download" &&
+          stack.length === 1 &&
+          frame.key === "binary"
         )
           throw Error("FACT binary must be a base64 string");
         if (
@@ -140,13 +135,9 @@ const { createHash } = require("node:crypto");
       case "startString":
         value();
         binary =
-          (workerData.binaryMode === "download" &&
-            stack.length === 1 &&
-            frame.key === "binary") ||
-          (workerData.binaryMode === "upload-echo" &&
-            stack.length === 2 &&
-            stack[0].key === "request" &&
-            frame.key === "binary");
+          workerData.binaryMode === "download" &&
+          stack.length === 1 &&
+          frame.key === "binary";
         if (binary) binarySeen = true;
         append(binary ? '""' : '"');
         break;
@@ -184,13 +175,9 @@ const { createHash } = require("node:crypto");
         )
           throw Error("FACT JSON numbers must be finite");
         if (
-          (workerData.binaryMode === "download" &&
-            stack.length === 1 &&
-            frame.key === "binary") ||
-          (workerData.binaryMode === "upload-echo" &&
-            stack.length === 2 &&
-            stack[0].key === "request" &&
-            frame.key === "binary")
+          workerData.binaryMode === "download" &&
+          stack.length === 1 &&
+          frame.key === "binary"
         )
           throw Error("FACT binary must be a base64 string");
         if (
@@ -253,9 +240,7 @@ const { createHash } = require("node:crypto");
   text += parts.join("");
   parts = [];
   const data = JSON.parse(text);
-  const decoded = Buffer.allocUnsafeSlow(
-    workerData.binaryMode === "upload-echo" ? 0 : decodedBytes,
-  );
+  const decoded = Buffer.allocUnsafeSlow(decodedBytes);
   let at = 0;
   for (const part of blocks) {
     part.copy(decoded, at);

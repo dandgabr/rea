@@ -123,7 +123,13 @@ cliTest(
           timestamp: 42,
           request_resource: "/rest/firmware",
           uids: [],
-          request: { query },
+          request: {
+            query,
+            offset: 0,
+            limit: 0,
+            recursive: false,
+            inverted: false,
+          },
           echoed: query,
         }),
       );

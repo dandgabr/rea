@@ -1,5 +1,6 @@
 import { Worker } from "node:worker_threads";
-import { expect, it, vi } from "vitest";
+import { fc, it } from "@fast-check/vitest";
+import { expect, vi } from "vitest";
 import { FactJsonParser } from "./FactJsonParser.js";
 import { FACT_LIMITS, factHash } from "./FactProtocol.js";
 
@@ -15,6 +16,21 @@ it("separates actual binary expansion from metadata and preserves escaped Unicod
   expect(parsed.data).toMatchObject({ status: 0, file_name: "é🚀" });
   expect(parsed.metadataBytes).toBe(raw.length - 4);
   expect(parsed.binaryEncodedChars).toBe(4);
+  await parser.close();
+});
+it("parses a REST status response without enabling binary transfer handling", async () => {
+  const parser = new FactJsonParser();
+  const parsed = await parser.parse(
+    Buffer.from('{"status":500,"message":"backend unavailable"}'),
+    false,
+    new AbortController().signal,
+  );
+  expect(parsed.data).toEqual({
+    status: 500,
+    message: "backend unavailable",
+  });
+  expect(parsed.binary).toBeUndefined();
+  expect(parsed.binaryDecodedBytes).toBe(0);
   await parser.close();
 });
 it("rejects duplicate binary fields, malformed encoding and malformed base64 before object assembly", async () => {
@@ -148,3 +164,24 @@ it("allows large metadata before the binary member without imposing JSON member 
   ).toBe("abc");
   await parser.close();
 });
+
+it.prop([fc.uint8Array({ maxLength: 512 })])(
+  "contains arbitrary response bytes to a bounded parse outcome without leaking workers",
+  async (bytes) => {
+    const parser = new FactJsonParser({ rawBytes: 1024, jsonBytes: 1024 });
+    try {
+      try {
+        await parser.parse(
+          Buffer.from(bytes),
+          false,
+          new AbortController().signal,
+        );
+      } catch (cause) {
+        expect(cause).toBeInstanceOf(Error);
+      }
+      expect(parser.pendingResources).toEqual([]);
+    } finally {
+      await parser.close();
+    }
+  },
+);

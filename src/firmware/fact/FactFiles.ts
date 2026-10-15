@@ -1,60 +1,32 @@
-import { constants, createWriteStream } from "node:fs";
+import { constants } from "node:fs";
 import { open, chmod, lstat, realpath, unlink } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { dirname } from "node:path";
 import type { FileHandle } from "node:fs/promises";
-import { PrivateRuntimeRoot } from "../../process/PrivateRuntimeRoot.js";
 import { OwnedFileHandle } from "../../filesystem/OwnedFileHandle.js";
 import { ok, err } from "../../domain/result.js";
-import { pipeline } from "node:stream/promises";
-import { Transform } from "node:stream";
-import { readBoundedFileBytes } from "../../process/BoundedFileBytes.js";
-import { FACT_LIMITS, factHash } from "./FactProtocol.js";
 
 interface FactOwnedResource {
   readonly path: string;
   close(): Promise<void>;
 }
-/** Lifetime owner exists before any fallible acquisition or publication step. */
+
+/** Tracks ownership of caller-selected output files across failed publication. */
 export class FactFileResources {
   private readonly pending = new Set<FactOwnedResource>();
-  readonly createRuntime: () => Promise<
-    Pick<PrivateRuntimeRoot, "path" | "close">
-  >;
   readonly writeBytes: (handle: FileHandle, bytes: Buffer) => Promise<void>;
   readonly removeFile: (path: string) => Promise<void>;
   constructor(
     dependencies: {
-      createRuntime?: () => Promise<Pick<PrivateRuntimeRoot, "path" | "close">>;
       writeBytes?: (handle: FileHandle, bytes: Buffer) => Promise<void>;
       removeFile?: (path: string) => Promise<void>;
     } = {},
   ) {
-    this.createRuntime =
-      dependencies.createRuntime ??
-      (() => PrivateRuntimeRoot.create({ prefix: "rea-fact-" }));
     this.writeBytes =
       dependencies.writeBytes ?? ((handle, bytes) => handle.writeFile(bytes));
     this.removeFile = dependencies.removeFile ?? unlink;
   }
   get pendingResources(): string[] {
     return [...this.pending].map((owner) => owner.path);
-  }
-  async runtime() {
-    const root = await this.createRuntime();
-    this.pending.add(root);
-    return root;
-  }
-  descriptor(handle: FileHandle, path: string): FactOwnedResource {
-    const descriptor = new OwnedFileHandle(handle);
-    const owner = { path, close: () => descriptor.close() };
-    this.retain(owner);
-    return owner;
-  }
-  retain(owner: FactOwnedResource): void {
-    this.pending.add(owner);
-  }
-  forget(owner: FactOwnedResource): void {
-    this.pending.delete(owner);
   }
   async release(owner: FactOwnedResource) {
     try {
@@ -65,6 +37,12 @@ export class FactFileResources {
       this.pending.add(owner);
       return err(cause);
     }
+  }
+  retain(owner: FactOwnedResource): void {
+    this.pending.add(owner);
+  }
+  forget(owner: FactOwnedResource): void {
+    this.pending.delete(owner);
   }
   async close(): Promise<void> {
     const failures: unknown[] = [];
@@ -79,6 +57,7 @@ export class FactFileResources {
       );
   }
 }
+
 export class FactPublicationFailure extends Error {
   constructor(
     readonly publication: {
@@ -95,84 +74,6 @@ export class FactPublicationFailure extends Error {
   }
 }
 
-/** Owned immutable snapshot with original basename and SHA-256 readback. */
-export async function snapshotFactFile(
-  path: string,
-  signal: AbortSignal,
-  resources: FactFileResources,
-  maxBytes: number = FACT_LIMITS.rawBytes,
-) {
-  const runtime = await resources.runtime();
-  const root = runtime.path;
-  const selected = join(root, basename(path));
-  try {
-    signal.throwIfAborted();
-    const source = await open(
-      path,
-      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
-    );
-    const sourceOwner = resources.descriptor(source, path);
-    let size = 0;
-    try {
-      const info = await source.stat();
-      if (!info.isFile() || info.size === 0 || info.size > maxBytes)
-        throw Error(
-          "FACT input must be a nonempty regular file within the byte budget",
-        );
-      await pipeline(
-        source.createReadStream({ autoClose: false }),
-        new Transform({
-          transform(chunk: Buffer, _enc, cb) {
-            size += chunk.length;
-            cb(
-              size > maxBytes
-                ? Error("FACT input grew beyond the byte budget")
-                : null,
-              chunk,
-            );
-          },
-        }),
-        createWriteStream(selected, { flags: "wx", mode: 0o600 }),
-        { signal },
-      );
-    } finally {
-      const closed = await resources.release(sourceOwner);
-      if (!closed.ok) throw closed.error;
-    }
-    await chmod(selected, 0o400);
-    const handle = await open(
-      selected,
-      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
-    );
-    const snapshotOwner = resources.descriptor(handle, selected);
-    let bytes: Buffer;
-    try {
-      const data = await readBoundedFileBytes(handle, maxBytes, signal);
-      if (data === undefined || data.length !== size)
-        throw Error("Snapshot readback mismatch");
-      bytes = data;
-    } finally {
-      const closed = await resources.release(snapshotOwner);
-      if (!closed.ok) throw closed.error;
-    }
-    return {
-      root,
-      runtime,
-      path: selected,
-      bytes,
-      sha256: factHash(bytes),
-      original_path: path,
-    };
-  } catch (cause) {
-    const cleaned = await resources.release(runtime);
-    if (!cleaned.ok)
-      throw new AggregateError(
-        [cause, cleaned.error],
-        `FACT snapshot acquisition failed; cleanup ownership retained at ${root}`,
-      );
-    throw cause;
-  }
-}
 export async function requireFreshFactOutput(path: string): Promise<void> {
   if (!(await lstat(dirname(path))).isDirectory())
     throw Error("Output parent must be an existing directory");
@@ -192,6 +93,7 @@ export async function requireFreshFactOutput(path: string): Promise<void> {
   }
   throw Error("FACT output must be absent; overwriting is unsupported");
 }
+
 export async function publishFactFile(
   path: string,
   bytes: Buffer,

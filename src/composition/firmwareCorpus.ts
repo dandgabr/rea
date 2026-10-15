@@ -10,8 +10,7 @@ export const createFirmwareCorpusProvider = (): FirmwareCorpusPort => {
     native = new FactNativeProvider();
   return {
     execute(operation, input, options) {
-      return operation === "export_corpus_firmware" ||
-        operation === "import_corpus_firmware"
+      return operation === "export_corpus_firmware"
         ? native.execute(operation, input, options)
         : rest.execute(operation, input, options);
     },

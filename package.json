@@ -53,6 +53,7 @@
     "bridge/native/NativeUIChildren.swift",
     "bridge/native/ReaNativeUI.swift",
     "bridge/native/rea_lldb_tracer.py",
+    "bridge/firmware/podman_db_config.mjs",
     "bridge/process/ProcessRunTokenReader.swift",
     "bridge/process/ProcessRunTokenReaderMain.swift",
     "bridge/ghidra/ReaGhidraBridge.java",

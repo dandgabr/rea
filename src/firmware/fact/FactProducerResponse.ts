@@ -72,20 +72,10 @@ const schemas = {
   }),
   search_corpus_objects: envelope.extend({ uids: z.array(corpusUidSchema) }),
   inspect_corpus_analysis: envelope.extend({ analysis: nativeAnalysis }),
-  upload_corpus_firmware: envelope.extend({ uid: corpusUidSchema }),
-  reanalyze_corpus_firmware: envelope.extend({
-    request: z.object({ uid: corpusUidSchema, update: z.array(z.string()) }),
-  }),
-  enqueue_corpus_analysis: envelope.extend({ success: z.literal(true) }),
-  start_corpus_comparison: envelope.extend({ message: z.string().min(1) }),
   inspect_corpus_comparison: envelope.extend({
     general: z.object({ hid: z.record(corpusUidSchema, z.string()) }),
     _id: z.string(),
     submission_date: z.number().finite(),
-  }),
-  start_corpus_yara: envelope.extend({
-    message: z.string().min(1),
-    request: z.object({ search_id: z.string().min(1) }),
   }),
   collect_corpus_yara: envelope.extend({ binary_search_results: uidLists }),
   inspect_corpus_gaps: envelope.extend({
@@ -97,9 +87,6 @@ const schemas = {
     file_name: z.string(),
     SHA256: z.string().regex(/^[a-f0-9]{64}$/u),
   }),
-  delete_corpus_firmware: envelope.extend({
-    deleted_files: z.number().int().nonnegative(),
-  }),
 };
 
 /** Native echoes describe the selection, never an independent target authority. */
@@ -109,18 +96,21 @@ function contradictoryRequest(
   data: JsonValue,
 ): string | undefined {
   // Statistics are a raw data dictionary, without an envelope/request namespace.
-  if (
-    operation === "inspect_corpus_statistics" ||
-    !isObject(data) ||
-    !isObject(data.request)
-  )
+  if (operation === "inspect_corpus_statistics" || !isObject(data))
     return undefined;
-  const request = data.request;
+  const request = isObject(data.request) ? data.request : {};
   const expected: Record<string, JsonValue> = {};
   if ("uid" in input && input.uid !== undefined) expected.uid = input.uid;
   if ("plugin" in input) expected.plugin = input.plugin;
   if ("repacked" in input) expected.tar = input.repacked;
   if ("search_id" in input) expected.search_id = input.search_id;
+  if (
+    operation === "inspect_corpus_object" &&
+    "kind" in input &&
+    input.kind === "firmware" &&
+    "summary" in input
+  )
+    expected.summary = input.summary;
   if (operation === "search_corpus_objects" && "query" in input) {
     expected.query = input.query;
     expected.offset = input.offset;
@@ -130,51 +120,34 @@ function contradictoryRequest(
       expected.inverted = input.inverted;
     }
   }
-  if (
-    operation === "start_corpus_comparison" &&
-    "uids" in input &&
-    "redo" in input
-  ) {
-    expected.uid_list = input.uids;
-    expected.redo = input.redo;
-  }
   if (operation === "inspect_corpus_comparison" && "uids" in input)
     expected.compare_id = [...input.uids].sort().join(";");
-  if (
-    operation === "upload_corpus_firmware" &&
-    "metadata" in input &&
-    "plugins" in input
-  ) {
-    Object.assign(expected, input.metadata);
-    expected.requested_analysis_systems = input.plugins;
-    // The returned UID and any binary echo are checked against the snapshot by
-    // the adapter that owns it, rather than reconstructed from a local path.
-  }
-  for (const key of Object.keys(expected))
+  const echoedOperations = new Set<FirmwareCorpusOperation>([
+    "search_corpus_objects",
+    "inspect_corpus_object",
+    "inspect_corpus_analysis",
+    "inspect_corpus_parent_analysis",
+    "inspect_corpus_comparison",
+    "download_corpus_binary",
+  ]);
+  const requiresEcho = data.status === 0 && echoedOperations.has(operation);
+  if (requiresEcho && Object.keys(expected).length === 0)
+    return `Native response omitted the expected request selection for ${operation}`;
+  for (const key of Object.keys(expected)) {
+    const transportBoundSelection =
+      (operation === "collect_corpus_yara" && key === "search_id") ||
+      (operation === "inspect_corpus_object" && key === "summary");
+    if (
+      requiresEcho &&
+      !transportBoundSelection &&
+      !Object.hasOwn(request, key)
+    )
+      return `Native response omitted request.${key} for ${operation}`;
     if (
       Object.hasOwn(request, key) &&
       !isDeepStrictEqual(request[key], expected[key])
     )
       return `Native request.${key} contradicts the caller's selected ${operation}`;
-  if (
-    operation === "reanalyze_corpus_firmware" &&
-    "plugins" in input &&
-    "re_unpack" in input &&
-    Object.hasOwn(request, "update")
-  ) {
-    const actual = request.update;
-    const effective = [
-      ...input.plugins,
-      ...(input.re_unpack && data.status === 0 ? ["unpacker"] : []),
-    ];
-    // FACT removes every unpacker occurrence, schedules plugins, and appends one
-    // unpacker on successful unpack requests. Plugin-validation errors precede
-    // that append. Compare selection/multiplicity, not ordering.
-    if (
-      !Array.isArray(actual) ||
-      !isDeepStrictEqual([...actual].sort(), effective.sort())
-    )
-      return "Native request.update contradicts the selected plugins/re_unpack";
   }
   return undefined;
 }
@@ -194,26 +167,19 @@ export function validateFactProducerResponse(
         ? "kind" in input && input.kind === "file"
           ? "/rest/file_object"
           : "/rest/firmware"
-        : operation === "upload_corpus_firmware" ||
-            operation === "reanalyze_corpus_firmware" ||
-            operation === "delete_corpus_firmware"
-          ? "/rest/firmware"
-          : operation === "inspect_corpus_analysis" ||
-              operation === "enqueue_corpus_analysis"
-            ? "/rest/analysis"
-            : operation === "inspect_corpus_comparison" ||
-                operation === "start_corpus_comparison"
-              ? "/rest/compare"
-              : operation === "collect_corpus_yara" ||
-                  operation === "start_corpus_yara"
-                ? "/rest/binary_search"
-                : operation === "inspect_firmware_corpus"
-                  ? "/rest/status"
-                  : operation === "inspect_corpus_gaps"
-                    ? "/rest/missing"
-                    : operation === "inspect_corpus_statistics"
-                      ? "/rest/statistics"
-                      : "/rest/binary";
+        : operation === "inspect_corpus_analysis"
+          ? "/rest/analysis"
+          : operation === "inspect_corpus_comparison"
+            ? "/rest/compare"
+            : operation === "collect_corpus_yara"
+              ? "/rest/binary_search"
+              : operation === "inspect_firmware_corpus"
+                ? "/rest/status"
+                : operation === "inspect_corpus_gaps"
+                  ? "/rest/missing"
+                  : operation === "inspect_corpus_statistics"
+                    ? "/rest/statistics"
+                    : "/rest/binary";
   const error = errorEnvelope.safeParse(data);
   const contradiction = contradictoryRequest(operation, input, data);
   if (contradiction !== undefined)
@@ -308,17 +274,7 @@ export function validateFactProducerResponse(
   )
     valid = data._id === [...input.uids].sort().join(";");
   return {
-    state: valid
-      ? [
-          "upload_corpus_firmware",
-          "reanalyze_corpus_firmware",
-          "enqueue_corpus_analysis",
-          "start_corpus_comparison",
-          "start_corpus_yara",
-        ].includes(operation)
-        ? ("accepted" as const)
-        : ("completed" as const)
-      : ("unknown" as const),
+    state: valid ? ("completed" as const) : ("unknown" as const),
     diagnostics: valid
       ? []
       : [

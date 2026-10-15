@@ -59,12 +59,12 @@ export class FactJsonParser {
   }
   async parse(
     raw: Buffer,
-    binaryKind: boolean | "upload-echo",
+    binaryKind: boolean,
     signal: AbortSignal,
   ): Promise<FactParsedEnvelope> {
     signal.throwIfAborted();
     const binaryAllowed = binaryKind !== false;
-    const binaryMode = binaryKind === true ? "download" : binaryKind;
+    const binaryMode = binaryKind ? "download" : false;
     const wireLimit =
       this.byteBudget.jsonBytes +
       (binaryAllowed ? 4 * Math.ceil(this.byteBudget.rawBytes / 3) : 0);

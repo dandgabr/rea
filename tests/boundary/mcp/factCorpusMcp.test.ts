@@ -7,7 +7,6 @@ import { expect, it } from "vitest";
 import { createServer } from "../../../src/server/createServer.js";
 import { createTestBinarySession } from "../../fixtures/binarySession.js";
 import { TOOL_CONTRACTS } from "../../../src/contracts/toolContracts.js";
-import { firmwareCorpusInputs } from "../../../src/domain/corpus/firmwareCorpus.js";
 import { createCli } from "../../../src/cli.js";
 import { createCliInventory } from "../../../scripts/lib/catalog-cli.mjs";
 import { parseEvidence } from "../../../src/domain/evidence.js";
@@ -29,7 +28,10 @@ it("advertises all named corpus workflows with SDK-valid schemas and dedicated C
       validateFormats: false,
       addUsedSchema: false,
     });
-    for (const name of Object.keys(firmwareCorpusInputs)) {
+    const publicNames = TOOL_CONTRACTS.filter(
+      (contract) => contract.kind === "corpus-provider",
+    ).map(({ name }) => name);
+    for (const name of publicNames) {
       const contract = TOOL_CONTRACTS.find(
           (contract) => contract.name === name,
         ),
@@ -61,15 +63,22 @@ it("advertises all named corpus workflows with SDK-valid schemas and dedicated C
         ajv.removeSchema();
       }
     }
-    expect(Object.keys(firmwareCorpusInputs)).toHaveLength(18);
-    expect(
-      advertised.tools.find((tool) => tool.name === "delete_corpus_firmware")
-        ?.annotations,
-    ).toMatchObject({
-      readOnlyHint: false,
-      destructiveHint: true,
-      idempotentHint: false,
-    });
+    expect(publicNames).toHaveLength(11);
+    for (const name of [
+      "import_corpus_firmware",
+      "delete_corpus_firmware",
+      "upload_corpus_firmware",
+      "reanalyze_corpus_firmware",
+      "enqueue_corpus_analysis",
+      "start_corpus_comparison",
+      "start_corpus_yara",
+    ]) {
+      expect(
+        advertised.tools.some((tool) => tool.name === name),
+        name,
+      ).toBe(false);
+      expect(cli.primary, name).not.toContain(name.replaceAll("_", "-"));
+    }
     expect(
       advertised.tools.find((tool) => tool.name === "collect_corpus_yara")
         ?.annotations,
@@ -89,7 +98,11 @@ it("advertises all named corpus workflows with SDK-valid schemas and dedicated C
     expect(
       advertised.tools.find((tool) => tool.name === "export_corpus_firmware")
         ?.annotations,
-    ).toMatchObject({ readOnlyHint: false, idempotentHint: false });
+    ).toMatchObject({
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+    });
   } finally {
     await client.close();
     await server.close();
@@ -240,7 +253,10 @@ it("binds every MCP handler to its named workflow and preserves selected inputs"
     const [c, s] = InMemoryTransport.createLinkedPair();
     await server.connect(s);
     await client.connect(c);
-    for (const name of Object.keys(firmwareCorpusInputs).reverse()) {
+    const publicNames = TOOL_CONTRACTS.filter(
+      (contract) => contract.kind === "corpus-provider",
+    ).map(({ name }) => name);
+    for (const name of publicNames.reverse()) {
       const contract = TOOL_CONTRACTS.find((item) => item.name === name);
       if (!contract) throw Error(name);
       const input = contract.examples[0]!.input;

@@ -24,7 +24,7 @@ import {
   factResult,
 } from "./FactProtocol.js";
 import { FactJsonParser } from "./FactJsonParser.js";
-import { factJsonBytes, factUploadBody } from "./FactTransfer.js";
+import { factJsonBytes } from "./FactTransfer.js";
 import { ArtifactAnalysisResources } from "../../process/ArtifactAnalysisResources.js";
 import { readStableArtifact } from "../../artifacts/readStableArtifact.js";
 import { readLinuxResourceLimits } from "../../process/LinuxResourceLimits.js";
@@ -37,7 +37,6 @@ import { validateFactProducerResponse } from "./FactProducerResponse.js";
 import {
   FactFileResources,
   FactPublicationFailure,
-  snapshotFactFile,
   requireFreshFactOutput,
   publishFactFile,
 } from "./FactFiles.js";
@@ -81,6 +80,24 @@ export class FactRestProvider implements FirmwareCorpusPort {
     input: FirmwareCorpusInput<Name>,
     options?: ExecutionOptions,
   ) {
+    const excluded = new Set([
+      "upload_corpus_firmware",
+      "reanalyze_corpus_firmware",
+      "enqueue_corpus_analysis",
+      "start_corpus_yara",
+      "delete_corpus_firmware",
+      "start_corpus_comparison",
+    ]);
+    if (excluded.has(operation as string))
+      return Promise.resolve(
+        err(
+          new AnalysisCapabilityUnavailableError(
+            "fact-core",
+            operation,
+            "Operation is outside the verified FACT REST scope.",
+          ),
+        ),
+      );
     if (options?.signal?.aborted)
       return this.executeOwned(operation, input, options);
     return this.admission.run(
@@ -102,17 +119,6 @@ export class FactRestProvider implements FirmwareCorpusPort {
         ),
       );
     const connection = corpusConnectionSchema.parse(input.connection);
-    if (
-      operation === "enqueue_corpus_analysis" &&
-      connection.profile === "release-4.4.1"
-    )
-      return err(
-        new AnalysisCapabilityUnavailableError(
-          "fact-core",
-          operation,
-          "Single-file analysis PUT is unavailable in release 4.4.1; select the source profile only for the matching supplied service",
-        ),
-      );
     const signal = AbortSignal.any([
       options?.signal ?? new AbortController().signal,
       AbortSignal.timeout(FACT_LIMITS.deadlineMs),
@@ -126,8 +132,6 @@ export class FactRestProvider implements FirmwareCorpusPort {
       method = "GET",
       payload: JsonValue | undefined;
     const query = new URLSearchParams();
-    let upload: ReturnType<typeof factUploadBody> | undefined;
-    let snapshot: Awaited<ReturnType<typeof snapshotFactFile>> | undefined;
     let collectionDisposition: "retain" | "explicit-reattempt" = "retain";
     let observedData: JsonValue = null;
     let delivered = false,
@@ -137,18 +141,6 @@ export class FactRestProvider implements FirmwareCorpusPort {
       "Caller-selected FACT source profile is a declaration; status does not attest service version or commit.",
       "Provider-local UIDs and virtual paths are external-service evidence; they are not host paths.",
     ];
-    if (
-      [
-        "upload_corpus_firmware",
-        "reanalyze_corpus_firmware",
-        "enqueue_corpus_analysis",
-        "start_corpus_comparison",
-        "start_corpus_yara",
-      ].includes(operation)
-    )
-      limitations.push(
-        "External jobs may execute trusted plugins and permit egress. Canceling the REA request does not cancel, retry or compensate an external job.",
-      );
     if (operation === "collect_corpus_yara")
       limitations.push(
         "One-shot GET may consume the result even if delivery is lost. The retained local Evidence is reused; rule-to-UID results omit match offsets.",
@@ -157,23 +149,11 @@ export class FactRestProvider implements FirmwareCorpusPort {
       limitations.push(
         "Producer requires delete privilege for this non-destructive GET.",
       );
-    if (operation === "delete_corpus_firmware")
-      limitations.push(
-        "Deletes firmware, analyses and uniquely owned descendants; shared objects remain under producer ownership.",
-      );
     const finish = async (
       state: "not-delivered" | "accepted" | "completed" | "failed" | "unknown",
       data: JsonValue,
       diagnostics: string[] = [],
     ) => {
-      if (snapshot !== undefined) {
-        const cleaned = await this.files.release(snapshot.runtime);
-        if (!cleaned.ok)
-          diagnostics.push(
-            "Snapshot cleanup failed; ownership retained for close",
-          );
-        snapshot = undefined;
-      }
       if (
         this.files.pendingResources.length ||
         this.parser.pendingResources.length ||
@@ -298,67 +278,16 @@ export class FactRestProvider implements FirmwareCorpusPort {
           }
           break;
         case "inspect_corpus_analysis":
-        case "enqueue_corpus_analysis":
           if ("uid" in input && "plugin" in input) {
             path = `/rest/analysis/${input.uid}/${encodeURIComponent(input.plugin)}`;
-            if (operation === "enqueue_corpus_analysis") {
-              method = "PUT";
-              if ("force" in input && connection.profile === "source-54aed90b")
-                query.set("force", String(input.force));
-            }
           }
           break;
         case "inspect_corpus_parent_analysis":
           if ("plugin" in input && "uid" in input)
             path = `/plugins/${input.plugin}/rest/${input.uid}`;
           break;
-        case "upload_corpus_firmware":
-          if ("metadata" in input && "path" in input && "plugins" in input) {
-            snapshot = await snapshotFactFile(input.path, signal, this.files);
-            path = "/rest/firmware";
-            method = "PUT";
-            upload = factUploadBody(
-              {
-                ...input.metadata,
-                requested_analysis_systems: input.plugins,
-              },
-              snapshot.bytes,
-            );
-          }
-          break;
-        case "reanalyze_corpus_firmware":
-          if ("uid" in input && "plugins" in input && "re_unpack" in input) {
-            path = `/rest/firmware/${input.uid}`;
-            method = "PUT";
-            query.set(
-              "update",
-              JSON.stringify(
-                input.re_unpack
-                  ? [...input.plugins, "unpacker"]
-                  : input.plugins,
-              ),
-            );
-          }
-          break;
-        case "start_corpus_comparison":
-          if ("uids" in input && "redo" in input) {
-            path = "/rest/compare";
-            method = "PUT";
-            payload = { uid_list: input.uids, redo: input.redo };
-          }
-          break;
         case "inspect_corpus_comparison":
           if ("uids" in input) path = `/rest/compare/${input.uids.join(";")}`;
-          break;
-        case "start_corpus_yara":
-          if ("rule_file" in input) {
-            path = "/rest/binary_search";
-            method = "POST";
-            payload = {
-              rule_file: input.rule_file,
-              ...(input.uid === undefined ? {} : { uid: input.uid }),
-            };
-          }
           break;
         case "collect_corpus_yara":
           if ("search_id" in input)
@@ -377,12 +306,6 @@ export class FactRestProvider implements FirmwareCorpusPort {
             query.set("tar", String(input.repacked));
           }
           break;
-        case "delete_corpus_firmware":
-          if ("uid" in input) {
-            path = `/rest/firmware/${input.uid}`;
-            method = "DELETE";
-          }
-          break;
         default:
           throw Error(
             "Native interchange requires separate instance authority",
@@ -392,19 +315,14 @@ export class FactRestProvider implements FirmwareCorpusPort {
         throw Error("Operation input does not match its named contract");
       const url = new URL(path, connection.endpoint);
       url.search = query.toString();
-      if (payload !== undefined && operation !== "upload_corpus_firmware")
-        factJsonBytes(payload);
+      if (payload !== undefined) factJsonBytes(payload);
       const serialized =
         payload === undefined ? undefined : JSON.stringify(payload);
       const wireBudget =
-        (upload === undefined
-          ? undefined
-          : FACT_LIMITS.jsonBytes +
-            4 * Math.ceil(snapshot!.bytes.length / 3)) ??
         FACT_LIMITS.jsonBytes +
-          (operation === "download_corpus_binary"
-            ? 4 * Math.ceil(FACT_LIMITS.rawBytes / 3)
-            : 0);
+        (operation === "download_corpus_binary"
+          ? 4 * Math.ceil(FACT_LIMITS.rawBytes / 3)
+          : 0);
       delivered = true;
       const response = await fetch(url, {
         method,
@@ -412,15 +330,11 @@ export class FactRestProvider implements FirmwareCorpusPort {
           ...(connection.authorization === undefined
             ? {}
             : { Authorization: connection.authorization }),
-          ...(serialized === undefined && upload === undefined
+          ...(serialized === undefined
             ? {}
             : { "Content-Type": "application/json" }),
         },
-        ...(upload === undefined
-          ? serialized === undefined
-            ? {}
-            : { body: serialized }
-          : { body: upload.body, duplex: "half" }),
+        ...(serialized === undefined ? {} : { body: serialized }),
         redirect: "manual",
         signal,
       });
@@ -434,36 +348,13 @@ export class FactRestProvider implements FirmwareCorpusPort {
       rawDigest = factHash(raw);
       const parsedEnvelope = await this.parser.parse(
         raw,
-        operation === "upload_corpus_firmware"
-          ? "upload-echo"
-          : operation === "download_corpus_binary",
+        operation === "download_corpus_binary",
         signal,
       );
       if (parsedEnvelope.cleanupDiagnostic !== undefined)
         limitations.push(parsedEnvelope.cleanupDiagnostic);
       let data = parsedEnvelope.data;
       observedData = data;
-      if (
-        operation === "upload_corpus_firmware" &&
-        data !== null &&
-        typeof data === "object" &&
-        !Array.isArray(data) &&
-        data.request !== null &&
-        typeof data.request === "object" &&
-        !Array.isArray(data.request) &&
-        Object.hasOwn(data.request, "binary")
-      ) {
-        const { binary: _echo, ...request } = data.request;
-        data.request = {
-          ...request,
-          binary_observation: {
-            encoded_chars: parsedEnvelope.binaryEncodedChars,
-            decoded_bytes: parsedEnvelope.binaryDecodedBytes,
-            sha256: parsedEnvelope.binarySha256,
-            representation: "base64 omitted from retained Evidence",
-          },
-        };
-      }
       const outcome = validateFactProducerResponse(
         operation,
         input,
@@ -473,28 +364,6 @@ export class FactRestProvider implements FirmwareCorpusPort {
       collectionDisposition = outcome.collectionDisposition;
       if (outcome.state === "failed" || outcome.state === "unknown")
         return finish(outcome.state, data, outcome.diagnostics);
-      if (operation === "upload_corpus_firmware" && snapshot !== undefined) {
-        const selectedUid = factUid(snapshot.bytes);
-        if (
-          data === null ||
-          typeof data !== "object" ||
-          Array.isArray(data) ||
-          data.uid !== selectedUid
-        )
-          return finish("unknown", data, [
-            "Uploaded byte identity does not match the producer UID",
-          ]);
-        if (
-          data.request !== null &&
-          typeof data.request === "object" &&
-          !Array.isArray(data.request) &&
-          Object.hasOwn(data.request, "uid") &&
-          data.request.uid !== selectedUid
-        )
-          return finish("unknown", data, [
-            "Native request.uid contradicts the uploaded snapshot identity",
-          ]);
-      }
       if (
         operation === "download_corpus_binary" &&
         "uid" in input &&

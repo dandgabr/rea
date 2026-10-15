@@ -6,6 +6,29 @@ const absoluteLocalPathSchema = localPathStringSchema.refine(
   isAbsolute,
   "Use an absolute local path",
 );
+const namespacePath = z
+  .string()
+  .regex(
+    /^(?=[^\uD800-\uDFFF]*$)\/(?:(?!\.{1,2}(?:\/|$))[^/\x00]+(?:\/(?!\.{1,2}(?:\/|$))[^/\x00]+)*)?$/u,
+  )
+  .describe(
+    "Exact absolute scalar UTF-8 namespace path without dot or empty components",
+  );
+const nativeHostRuntime = z.strictObject({ kind: z.literal("native") });
+const nativeExistingRuntime = z.strictObject({
+  kind: z.literal("podman-existing"),
+  podman: absoluteLocalPathSchema,
+  container_id: z.string().regex(/^[a-f0-9]{64}$/u),
+  image_id: z.string().regex(/^[a-f0-9]{64}$/u),
+  existing_store_profile: absoluteLocalPathSchema,
+  staging_parent: namespacePath,
+  namespace_prlimit: namespacePath.default("/usr/bin/prlimit"),
+});
+/** Independently declared existing service authority; no container lifecycle or caller argv. */
+export const factNativeRuntimeSchema = z.discriminatedUnion("kind", [
+  nativeHostRuntime,
+  nativeExistingRuntime,
+]);
 
 /** Explicit caller declaration; status endpoints cannot attest this source identity. */
 export const corpusConnectionSchema = z.strictObject({
@@ -54,37 +77,11 @@ const plugin = z
   .string()
   .min(1)
   .regex(/^[^/\x00]+$/u);
-const plugins = z
-  .array(plugin)
-  .refine(
-    (values) => new Set(values).size === values.length,
-    "Plugin selection must not contain duplicates",
-  );
 const connection = { connection: corpusConnectionSchema };
 const object = { ...connection, uid: corpusUidSchema };
-const comparison = {
-  ...connection,
-  uids: z
-    .array(corpusUidSchema)
-    .min(2)
-    .refine(
-      (values) => new Set(values).size === values.length,
-      "Comparison UIDs must be distinct",
-    ),
-};
-const metadata = z.strictObject({
-  device_name: z.string(),
-  device_part: z.string(),
-  device_class: z.string(),
-  file_name: z.string(),
-  version: z.string(),
-  vendor: z.string(),
-  release_date: z.iso.date().default("1970-01-01"),
-  tags: z.string().default(""),
-});
 const native = {
-  interpreter: absoluteLocalPathSchema,
-  checkout: absoluteLocalPathSchema,
+  interpreter: namespacePath,
+  checkout: namespacePath,
   profile: z.enum(["release-4.4.1", "source-54aed90b"]),
   binding_declaration: z.string().optional(),
   max_output_bytes: z
@@ -94,6 +91,22 @@ const native = {
     .max(512 * 1024 * 1024)
     .default(256 * 1024 * 1024),
   max_output_files: z.number().int().min(1).max(100_000).default(10_000),
+};
+const nativeInput = <Shape extends z.ZodRawShape>(shape: Shape) =>
+  z.strictObject({
+    ...native,
+    ...shape,
+    runtime: factNativeRuntimeSchema.optional(),
+  });
+const comparison = {
+  ...connection,
+  uids: z
+    .array(corpusUidSchema)
+    .min(2)
+    .refine(
+      (values) => new Set(values).size === values.length,
+      "Comparison UIDs must be distinct",
+    ),
 };
 /** Named corpus workflows, separate from local artifact inspection and extraction. */
 export const firmwareCorpusInputs = {
@@ -143,46 +156,7 @@ export const firmwareCorpusInputs = {
     ...object,
     plugin: z.enum(["file_system_metadata", "qemu_exec"]),
   }),
-  upload_corpus_firmware: z.strictObject({
-    ...connection,
-    path: absoluteLocalPathSchema,
-    metadata,
-    plugins: plugins.refine(
-      (values) => !values.includes("unpacker"),
-      "Unpacker is a producer dependency, not an upload analysis plugin",
-    ),
-  }),
-  reanalyze_corpus_firmware: z
-    .strictObject({
-      ...object,
-      plugins: plugins.refine(
-        (values) => !values.includes("unpacker"),
-        "Select re_unpack separately",
-      ),
-      re_unpack: z.boolean().default(false),
-    })
-    .refine(
-      (input) => input.plugins.length > 0 || input.re_unpack,
-      "Select plugins or re_unpack",
-    ),
-  enqueue_corpus_analysis: z.strictObject({
-    ...object,
-    plugin,
-    force: z.boolean().default(false),
-  }),
-  start_corpus_comparison: z.strictObject({
-    ...comparison,
-    redo: z.boolean().default(false),
-  }),
   inspect_corpus_comparison: z.strictObject(comparison),
-  start_corpus_yara: z.strictObject({
-    ...connection,
-    rule_file: z
-      .string()
-      .min(1)
-      .describe("Raw YARA source text forwarded unchanged to FACT"),
-    uid: corpusUidSchema.optional(),
-  }),
   collect_corpus_yara: z.strictObject({
     ...connection,
     search_id: z
@@ -215,15 +189,9 @@ export const firmwareCorpusInputs = {
     repacked: z.boolean().default(false),
     output_path: absoluteLocalPathSchema,
   }),
-  delete_corpus_firmware: z.strictObject(object),
-  export_corpus_firmware: z.strictObject({
-    ...native,
+  export_corpus_firmware: nativeInput({
     uids: z.array(corpusUidSchema).min(1),
     output_directory: absoluteLocalPathSchema,
-  }),
-  import_corpus_firmware: z.strictObject({
-    ...native,
-    archives: z.array(absoluteLocalPathSchema).min(1),
   }),
 } as const;
 export type FirmwareCorpusOperation = keyof typeof firmwareCorpusInputs;

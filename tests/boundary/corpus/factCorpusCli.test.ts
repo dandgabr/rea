@@ -78,97 +78,34 @@ cliTest(
 );
 
 cliTest(
-  "preserves native accepted/failed/unknown facts and corresponding public exit status",
+  "keeps excluded mutation and plugin-triggering workflows out of the public CLI",
   async ({ cli }) => {
-    const uid = "a".repeat(64) + "_3";
-    let response: unknown = null,
-      calls = 0;
-    const server = createServer(async (req, res) => {
+    let calls = 0;
+    const server = createServer((_req, res) => {
       calls++;
-      const chunks: Buffer[] = [];
-      for await (const chunk of req) chunks.push(Buffer.from(chunk));
-      const body = Buffer.concat(chunks).toString();
-      expect(req.method).toBe("PUT");
-      expect(req.url).toBe(`/rest/analysis/${uid}/file_type?force=true`);
-      expect(body).toBe("");
-      res.end(JSON.stringify(response));
+      res.end("{}");
     });
     server.listen(0, "127.0.0.1");
     await once(server, "listening");
     const addr = server.address();
     if (!addr || typeof addr === "string") throw Error("address");
-    const connection = {
-      endpoint: `http://127.0.0.1:${addr.port}`,
-      profile: "source-54aed90b",
-    };
     try {
-      for (const [body, state, exit] of [
-        [
-          {
-            status: 0,
-            request_resource: "/rest/analysis",
-            timestamp: 42,
-            success: true,
-          },
-          "accepted",
-          0,
-        ],
-        [
-          {
-            status: 1,
-            request_resource: "/rest/analysis",
-            timestamp: 42,
-            error_message: "preserved postgres finding",
-          },
-          "failed",
-          1,
-        ],
-        [
-          {
-            status: 0,
-            request_resource: "/rest/analysis",
-            timestamp: 42,
-            arbitrary: true,
-          },
-          "unknown",
-          1,
-        ],
-      ] as const) {
-        response = body;
+      for (const command of [
+        "upload-corpus-firmware",
+        "reanalyze-corpus-firmware",
+        "enqueue-corpus-analysis",
+        "start-corpus-comparison",
+        "start-corpus-yara",
+        "delete-corpus-firmware",
+        "import-corpus-firmware",
+      ]) {
         const result = await cli.run({
-          arguments: [
-            "enqueue-corpus-analysis",
-            JSON.stringify({
-              connection,
-              uid,
-              plugin: "file_type",
-              force: true,
-            }),
-            "--json",
-          ],
+          arguments: [command, "{}", "--json"],
         });
-        expect(result.exitCode, result.stdout + result.stderr).toBe(exit);
-        expect(parseEvidence(result.json)).toMatchObject({
-          operation: "enqueue_corpus_analysis",
-          parameters: { uid, plugin: "file_type", force: true },
-          normalized_result: { state, data: body },
-        });
+        expect(result.exitCode, result.stdout + result.stderr).toBe(1);
+        expect(result.json).toMatchObject({ code: "COMMAND_NOT_FOUND" });
       }
-      expect(calls).toBe(3);
-      const unsupported = await cli.run({
-        arguments: [
-          "enqueue-corpus-analysis",
-          JSON.stringify({
-            connection: { ...connection, profile: "release-4.4.1" },
-            uid,
-            plugin: "file_type",
-            force: true,
-          }),
-          "--json",
-        ],
-      });
-      expect(unsupported.exitCode).toBe(1);
-      expect(calls).toBe(3);
+      expect(calls).toBe(0);
     } finally {
       server.closeAllConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));

@@ -6,6 +6,7 @@ import {
   type FirmwareCorpusOperation,
 } from "../../domain/corpus/firmwareCorpus.js";
 import {
+  AnalysisCapabilityUnavailableError,
   AnalysisInputError,
   AnalysisResourceConstraintError,
   AnalysisCancelledError,
@@ -15,6 +16,23 @@ import { createEvidence, type Evidence } from "../../domain/evidence.js";
 import { jsonObjectSchema } from "../../domain/jsonValue.js";
 import { digestCanonicalValue } from "../../domain/canonicalDigest.js";
 import { ok, err, type Result } from "../../domain/result.js";
+
+/** Operations allowed by the current FACT authority decision. */
+const FACT_PUBLIC_OPERATIONS: ReadonlySet<FirmwareCorpusOperation> = new Set([
+  "inspect_firmware_corpus",
+  "search_corpus_objects",
+  "inspect_corpus_object",
+  "inspect_corpus_analysis",
+  "inspect_corpus_parent_analysis",
+  "inspect_corpus_comparison",
+  "collect_corpus_yara",
+  "inspect_corpus_statistics",
+  "inspect_corpus_gaps",
+  "download_corpus_binary",
+  "export_corpus_firmware",
+]);
+const FACT_UNAVAILABLE_REASON =
+  "This operation is outside the recorded FACT integration scope; plugin, scheduler, egress or mutation authority has not been verified.";
 
 /** Shared named validation, external authority and one-shot Evidence retention. */
 export class FirmwareCorpusService {
@@ -31,6 +49,17 @@ export class FirmwareCorpusService {
     input: unknown,
     options?: ExecutionOptions,
   ): Promise<Result<Evidence, AnalysisError>> {
+    if (
+      !FACT_PUBLIC_OPERATIONS.has(operation) ||
+      !Object.hasOwn(firmwareCorpusInputs, operation)
+    )
+      return err(
+        new AnalysisCapabilityUnavailableError(
+          "fact-core",
+          operation,
+          FACT_UNAVAILABLE_REASON,
+        ),
+      );
     const parsed = firmwareCorpusInputs[operation].safeParse(input);
     if (!parsed.success) return err(new AnalysisInputError(operation));
     const parameters = jsonObjectSchema.parse(parsed.data);
@@ -77,7 +106,7 @@ export class FirmwareCorpusService {
       return ok(
         createEvidence(execution.subject ?? undefined, execution.provider, {
           operation,
-          parameters,
+          parameters: execution.publicParameters ?? parameters,
           result: execution.result,
           ...(execution.rawResult === null
             ? {}

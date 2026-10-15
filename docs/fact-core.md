@@ -1,12 +1,13 @@
 # FACT Core corpus workflows
 
-FACT corpus workflows use a caller-selected existing service or the official
-native interchange CLI. They do not require a local binary analysis session.
+FACT REST workflows use a caller-selected existing service. The native export
+contract is planned but currently unavailable. These workflows do not require
+a local binary analysis session.
 REST and native database authority are declared independently: matching config,
 UIDs or timestamps does not prove they address the same corpus.
 
-All 18 MCP tools below have a CLI command formed by replacing underscores with
-hyphens. The CLI takes one exact JSON object or a path to a JSON file, and
+All 11 FACT corpus MCP tools below have a CLI command formed by replacing
+underscores with hyphens. The CLI takes one exact JSON object or a path to a JSON file, and
 `--json` returns the same inline Evidence. Local artifact, checkout, interpreter,
 archive and output paths must be absolute. A malformed document beginning with
 JSON container grammar is rejected before file access, even when its text ends
@@ -49,8 +50,8 @@ rea search-corpus-objects /absolute/path/to/search.json --json
 Every REST request requires `connection`: `endpoint` is a literal loopback HTTP(S)
 origin (`127.0.0.1` or `[::1]`), with optional port and trailing slash. Paths,
 queries, userinfo, redirects and remote hosts are rejected. A service in a
-container can expose its REST port on host loopback. Container-native interchange
-execution is not yet implemented in this phase.
+container can expose its REST port on host loopback. REST endpoint selection is
+independent of the native runtime selection below.
 
 `profile` is explicitly `source-54aed90b` (upstream commit
 `54aed90bacb13c484404018101527c72d0bff6c5`) or `release-4.4.1` (commit
@@ -65,31 +66,51 @@ membership are corpus identities, never host files or native runtime addresses.
 Plugin names come from the selected service's inventory; REA does not impose a
 web form's static plugin list or choose all plugins implicitly.
 
+### Source-pinned endpoint authority matrix
+
+The operation classification below was checked against the source profile
+`54aed90bacb13c484404018101527c72d0bff6c5` and release profile
+`9ac65997a2b0fdaabd61bca2280fa22c441b1f92`. These profiles describe expected
+producer behavior; the selected REST service does not attest its own revision.
+The applicable source routes are linked by pinned revision in the
+[FACT boundary verification record](verification/fact-core-boundaries.md).
+
+| Route family                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    | Producer effect                                                                                                                                                               | Current REA exposure                                                                                                                 |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| [`/rest/status`, `/rest/statistics`, `/rest/missing`](https://github.com/fkie-cad/FACT_core/blob/54aed90bacb13c484404018101527c72d0bff6c5/src/web_interface/rest/rest_status.py) / [`rest_statistics.py`](https://github.com/fkie-cad/FACT_core/blob/54aed90bacb13c484404018101527c72d0bff6c5/src/web_interface/rest/rest_statistics.py) / [`rest_missing_analyses.py`](https://github.com/fkie-cad/FACT_core/blob/54aed90bacb13c484404018101527c72d0bff6c5/src/web_interface/rest/rest_missing_analyses.py)                                                                                                                                                                                                                                                                                                    | Read/query. `/rest/missing` additionally requires producer delete privilege.                                                                                                  | Exposed as named inspect operations.                                                                                                 |
+| [`/rest/firmware`, `/rest/file_object`](https://github.com/fkie-cad/FACT_core/blob/54aed90bacb13c484404018101527c72d0bff6c5/src/web_interface/rest/rest_firmware.py) / [`rest_file_object.py`](https://github.com/fkie-cad/FACT_core/blob/54aed90bacb13c484404018101527c72d0bff6c5/src/web_interface/rest/rest_file_object.py) and [`/rest/analysis/<uid>/<plugin>` / `/plugins/<plugin>/rest/<uid>`](https://github.com/fkie-cad/FACT_core/blob/54aed90bacb13c484404018101527c72d0bff6c5/src/web_interface/rest/rest_analysis.py) (GET)                                                                                                                                                                                                                                                                        | Read/query.                                                                                                                                                                   | Exposed as named inspect/search operations.                                                                                          |
+| [`/rest/compare/<uids>`](https://github.com/fkie-cad/FACT_core/blob/54aed90bacb13c484404018101527c72d0bff6c5/src/web_interface/rest/rest_compare.py) (GET)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | Read/query; HTTP 202 may include completed comparison data.                                                                                                                   | Exposed as `inspect_corpus_comparison`.                                                                                              |
+| [`/rest/binary/<uid>`](https://github.com/fkie-cad/FACT_core/blob/54aed90bacb13c484404018101527c72d0bff6c5/src/web_interface/rest/rest_binary.py) (GET)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | Read/query; may request a producer-repacked archive. REA writes only a fresh selected local output.                                                                           | Exposed as `download_corpus_binary`.                                                                                                 |
+| [`/rest/binary_search/<search_id>`](https://github.com/fkie-cad/FACT_core/blob/54aed90bacb13c484404018101527c72d0bff6c5/src/web_interface/rest/rest_binary_search.py) (GET)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | State-consuming: first successful read consumes producer results.                                                                                                             | Exposed only as explicit `collect_corpus_yara`; REA retains the first observation and never automatically retries an ambiguous read. |
+| [`/rest/firmware`](https://github.com/fkie-cad/FACT_core/blob/54aed90bacb13c484404018101527c72d0bff6c5/src/web_interface/rest/rest_firmware.py) (PUT), [`/rest/firmware/<uid>`](https://github.com/fkie-cad/FACT_core/blob/54aed90bacb13c484404018101527c72d0bff6c5/src/web_interface/rest/rest_firmware.py) (PUT), [`/rest/analysis/<uid>/<plugin>`](https://github.com/fkie-cad/FACT_core/blob/54aed90bacb13c484404018101527c72d0bff6c5/src/web_interface/rest/rest_analysis.py) (PUT), [`/rest/compare`](https://github.com/fkie-cad/FACT_core/blob/54aed90bacb13c484404018101527c72d0bff6c5/src/web_interface/rest/rest_compare.py) (PUT), [`/rest/binary_search`](https://github.com/fkie-cad/FACT_core/blob/54aed90bacb13c484404018101527c72d0bff6c5/src/web_interface/rest/rest_binary_search.py) (POST) | Upload/enqueue or trigger plugin/scheduler work. Installed plugins can execute code and permit egress; exact deployment isolation is not established by the current contract. | Not exposed. A future decision must prove the selected deployment's plugin, scheduler and network boundary.                          |
+| [`/rest/firmware/<uid>`](https://github.com/fkie-cad/FACT_core/blob/54aed90bacb13c484404018101527c72d0bff6c5/src/web_interface/rest/rest_firmware.py) (DELETE)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | Destructive corpus mutation.                                                                                                                                                  | Not exposed.                                                                                                                         |
+| [Native `import` CLI](https://github.com/fkie-cad/FACT_core/blob/54aed90bacb13c484404018101527c72d0bff6c5/src/firmware_import_export.py)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | Mutates FACT DB before writing files; upstream has no transaction/recovery contract covering partial import.                                                                  | Not implemented or exposed. Reconsider only after a verified transaction/recovery design.                                            |
+| [Native `export` CLI](https://github.com/fkie-cad/FACT_core/blob/54aed90bacb13c484404018101527c72d0bff6c5/src/firmware_import_export.py)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | Reads selected producer objects and writes archive outputs.                                                                                                                   | `export_corpus_firmware` is retained as a planned contract but the provider refuses every runtime until isolation is enforceable.    |
+
+The endpoint paths and methods are implementation facts, not sufficient
+authority classifications: GET of `/rest/binary_search/<search_id>` consumes
+state, while a plugin-triggering request may run code after request acceptance.
+See [issue #4110](https://github.com/morluto/rea/issues/4110) for the recorded
+scope decision.
+
 | MCP tool                         | Additional input and meaning                                                                                                                                                                                                                                                 |
 | -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `inspect_firmware_corpus`        | Status and dynamic plugin inventory; no readiness guarantee.                                                                                                                                                                                                                 |
+| `inspect_firmware_corpus`        | Status and dynamic plugin inventory; no readiness guarantee. Upstream `/rest/status` omits the `unpacker` plugin from this inventory.                                                                                                                                        |
 | `search_corpus_objects`          | `kind`: `firmware`/`file`; `query` defaults `{}`, `offset`/`limit` default 0. Limit 0 preserves producer-unbounded meaning. `recursive` requires firmware and nonempty query; `inverted` requires recursive. Returns only the requested page.                                |
-| `inspect_corpus_object`          | `kind`, `uid`; `summary` defaults false and is firmware-only.                                                                                                                                                                                                                |
+| `inspect_corpus_object`          | `kind`, `uid`; `summary` defaults false and is firmware-only. FACT selects the firmware representation from the exact `summary` query but only echoes UID; REA records the query as transport-bound selection and rejects a contradictory summary echo if present.           |
 | `inspect_corpus_analysis`        | `uid`, exact dynamic `plugin`.                                                                                                                                                                                                                                               |
 | `inspect_corpus_parent_analysis` | `uid`, `plugin`: `file_system_metadata`/`qemu_exec`; preserves native `included_files` parent-context results.                                                                                                                                                               |
-| `upload_corpus_firmware`         | `path`, `metadata`, exact `plugins` array. Metadata requires `device_name`, `device_part`, `device_class`, `file_name`, `version`, `vendor`; `release_date` defaults `1970-01-01`, `tags` defaults empty. `unpacker` is an automatic dependency, not an analysis selection.  |
-| `reanalyze_corpus_firmware`      | `uid`, `plugins`, separate `re_unpack` (default false); select plugins or re_unpack. Native unpacker removal/reappend semantics are preserved.                                                                                                                               |
-| `enqueue_corpus_analysis`        | `uid`, `plugin`, `force` (default false). Source profile only; release profile refuses before HTTP for every force choice.                                                                                                                                                   |
-| `start_corpus_comparison`        | Distinct `uids` (at least two), `redo` (default false).                                                                                                                                                                                                                      |
 | `inspect_corpus_comparison`      | Distinct `uids`; native HTTP 202 can carry a completed comparison.                                                                                                                                                                                                           |
-| `start_corpus_yara`              | Raw YARA source text in `rule_file`, optional `uid`; returns a search ID for explicit collection.                                                                                                                                                                            |
-| `collect_corpus_yara`            | `search_id`; GET consumes the producer result.                                                                                                                                                                                                                               |
+| `collect_corpus_yara`            | `search_id`; GET consumes the producer result. Pinned FACT does not echo the ID on the result response, so REA binds it to the exact non-redirected result URL and rejects a contradictory ID echo if present.                                                               |
 | `inspect_corpus_statistics`      | Optional `category`: `architecture`, `crypto_material`, `elf_executable`, `exploit_mitigations`, `file_type`, `firmware_meta`, `general`, `ips_and_uris`, `known_vulnerabilities`, `release_date`, `software_components`, `unpacking`. Raw dictionaries remain native facts. |
 | `inspect_corpus_gaps`            | Missing/failed analysis GET requires producer delete privilege despite being non-destructive.                                                                                                                                                                                |
-| `download_corpus_binary`         | `uid`, `repacked` (default false), fresh absent `output_path`. Original bytes require actual UID/SHA/size equality. Repacked ZIP has a distinct digest.                                                                                                                      |
-| `delete_corpus_firmware`         | `uid`; retain the actual deleted-files report. Shared child identities can survive.                                                                                                                                                                                          |
+| `download_corpus_binary`         | `uid`, `repacked` (default false), fresh absent `output_path`. Original bytes require actual UID/SHA/size equality. Repacked output is a tar.gz archive with a distinct digest.                                                                                              |
+| `export_corpus_firmware`         | Planning inputs only: `interpreter`, `checkout`, `profile`, selected `uids`, and a fresh absent `output_directory`. Every runtime is refused before identity or execution.                                                                                                   |
 
-Queue acknowledgements mean `accepted`, not analyzed. Trusted installed plugins
-can execute code and permit egress. Reanalysis, force and redo can replace
-analyses. Caller cancellation stops REA's transport, not an accepted external
-job. No automatic polling, retry, fallback, compensating deletion or server-side
-cancellation occurs. A lost response or malformed acknowledgement can leave
-mutation delivery unknown.
+Plugin-triggering operations, corpus deletion, redo and native import are not
+public CLI/MCP capabilities. Their input schemas are absent, the shared service
+rejects forged names before provider dispatch, and the REST provider also refuses
+them before network access. They are not enabled by plugin names or caller assertions.
 
 YARA collection shares the first observation for the same canonical origin,
 profile, private authorization context and search ID within one REA process/MCP
@@ -103,60 +124,19 @@ credential fingerprint is exported.
 
 ## Native interchange
 
-`export_corpus_firmware` requires `interpreter`, `checkout`, `profile`, `uids`,
-and fresh absent `output_directory`. `import_corpus_firmware` requires the same
-selection and ordered `archives`. Optional `binding_declaration` is a caller
-assertion, not proof of an HTTP binding. Both accept `max_output_bytes` (default
-256 MiB, maximum 512 MiB) and `max_output_files` (default 10,000, maximum 100,000).
+`export_corpus_firmware` retains its strict input schema for planning, but its
+provider currently returns `AnalysisCapabilityUnavailableError` for every
+runtime selection, including omitted runtime, `{ "kind": "native" }`, and
+`podman-existing`. The provider refuses before filesystem identity observation,
+process launch, container-session construction, or Podman access. No runtime
+mode currently performs a FACT export.
 
-```sh
-rea export-corpus-firmware /absolute/path/to/export.json --json
-rea import-corpus-firmware /absolute/path/to/import.json --json
-```
-
-```json
-{
-  "name": "export_corpus_firmware",
-  "arguments": {
-    "interpreter": "/opt/fact/venv/bin/python",
-    "checkout": "/opt/FACT_core",
-    "profile": "source-54aed90b",
-    "uids": [
-      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_3"
-    ],
-    "output_directory": "/tmp/new-fact-export"
-  }
-}
-```
-
-The checkout must contain the exact profile's `src/firmware_import_export.py`
-and required critical source files, with default config at
-`src/config/fact-core-config.toml`. REA observes exact critical source,
-interpreter and default configuration identities before/after work, including
-nonsecret effective PostgreSQL socket/port/database and storage selection.
-Installed Python dependencies remain caller-trusted. Identity observations can
-detect drift; they cannot prevent every race. Existing local admin DB/storage
-prerequisites are caller-provided. REA never initializes a database, installs
-roles, rewrites configuration, selects arbitrary argv or uses native `--force`.
-Import may create configured storage directories through the official producer.
-
-All selected import archives are snapshotted and preflighted before any native
-command: ZIP local/central headers, CRC, duplicate paths, binary UID/hash/size,
-metadata occurrences, effective native nodes, graph coverage and expansion
-budgets. Repeated metadata UIDs are preserved in source order and the official
-last occurrence is effective; every occurrence is validated. Missing effective
-binary metadata, unresolved graph edges and cycles are rejected. Malformed
-producer exports remain partial observations rather than being repaired.
-
-Imports invoke the official producer once per selected archive in caller order
-under one shared deadline. Exact existing-target skips and revision refusals
-continue; unknown producer/transport failure stops remaining archives as
-`not_started`. Exit 0 does not prove import: retain reported counts and native
-outcomes. Native objects are imported before files; a shared UID can cause a
-partially written failed archive. REA does not roll back, retry or compensate.
-Exports verify bytes independently before publication. A durable publication
-survives a later cleanup failure with its verified paths/digests and explicit
-cleanup uncertainty.
+The native export remains unavailable until REA can enforce filesystem, network
+and device isolation before examining producer identity or launching work. A
+caller-selected interpreter, checkout, `prlimit`, container ID or store profile
+does not establish that boundary. The runtime fields describe a future request;
+they do not imply support. REST read and explicit one-shot collection tools
+remain available under their recorded authority.
 
 ## Evidence and resource limits
 
@@ -168,10 +148,10 @@ process exit alone cannot establish completion. CLI failed/unknown/undelivered
 outcomes exit 1 while preserving Evidence; MCP delivers the same facts inline.
 Tool annotations distinguish network, filesystem, process and mutation effects.
 
-Each independent provider admits one outstanding heavy operation; capacity
-refuses immediately. Retained uncertain producer/parser/file cleanup can hold
-admission until explicit close/recovery. Cleanup retries never replay native
-mutations. Operations have a 120-second deadline, 128 MiB input/binary limit,
+The REST provider admits one outstanding heavy operation; capacity refuses
+immediately. Retained uncertain producer/parser/file cleanup can hold admission
+until explicit close/recovery. Cleanup retries never replay producer work.
+Operations have a 120-second deadline, 128 MiB input/binary limit,
 8 MiB nonbinary JSON/metadata and aggregate diagnostics limits, and separately
 account actual base64 expansion and decoded/staging bytes. JSON parsing has
 bounded structural admission and a V8 worker heap limit; Buffer/ArrayBuffer
@@ -188,15 +168,26 @@ interruption. A tagged refusal never exports unprojected text. Refusal after a
 producer response retains sanitized partial effects, digests, publication and
 cleanup counts; consuming observations remain cached without refetching.
 
-Native producer limits require Linux util-linux `prlimit` (default
-`/usr/bin/prlimit`, override absolute `REA_FIRMWARE_PRLIMIT_COMMAND`) with 1 GiB
-address space, CPU 120 seconds, core dumps disabled and bounded output files.
-Default PostgreSQL Unix sockets and local storage are supported; remote native
-DB configuration is unavailable. No aggregate container confinement is claimed.
+Caller-selected paths and producer-side limits do not establish filesystem, network, or device isolation. Native export remains unavailable for every runtime until REA can enforce that boundary before inspecting producer identity or starting work.
 
-Real verification used source-54aed90b REST inside an owned disposable container
-with actual `file_type`, `file_hashes`, `printable_strings` and unpacker, plus
-host-native Python interchange against separate owned PostgreSQL/socket/storage.
-Optional full-plugin readiness, release-profile live behavior and product
-container-native execution remain unverified. Producer fixtures and boundary
-fuzz/mutation tests do not establish those claims.
+Source-derived controlled HTTP tests cover request construction, response
+normalization, resource limits, errors and credential redaction. A separate
+Podman acceptance used FACT Core source commit
+`54aed90bacb13c484404018101527c72d0bff6c5`, mounted read-only over the local
+Python runtime image, plus disposable PostgreSQL 18.6 and Valkey 9.1.2 on an
+internal-only network. Real upstream statistics, firmware search, missing
+analysis, fixture object detail, and `dummy` analysis queries returned HTTP
+200 through both REA CLI and production stdio MCP. One FACT test fixture was
+seeded directly into the disposable database and private container storage.
+
+The FACT backend was not started: upstream backend initialization requires
+`docker.from_env()`, and no Docker/runtime socket was mounted. Consequently
+`/rest/status` returned HTTP 500 because plugin inventory was unavailable, and
+a direct binary retrieval probe did not complete within 15 seconds because
+file access is routed through backend intercom. Backend-dependent binary
+retrieval, one-shot YARA collection, stored comparison results, plugin
+triggering, and native export remain unverified. The runtime image's dependency
+layer is not source-attested, and the selected REST profile is still a caller
+declaration rather than service-side revision proof. Native export remains
+unavailable for every runtime until its filesystem, network, device and
+aggregate resource boundaries are enforceable.
