@@ -1,0 +1,11 @@
+{
+  "source_commit": "54aed90bacb13c484404018101527c72d0bff6c5",
+  "source_path": "src/test/data/container/test.zip",
+  "profile": "source-54aed90b",
+  "uid": "418a54d78550e8584291c96e5d6168133621f352bfc1d43cf84e81187fef4962_787",
+  "sha256": "418a54d78550e8584291c96e5d6168133621f352bfc1d43cf84e81187fef4962",
+  "size": 787,
+  "analysis_plugin": "dummy",
+  "analysis_result": { "content": "abcd" },
+  "absent_uid": "0000000000000000000000000000000000000000000000000000000000000000_0"
+}

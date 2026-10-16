@@ -5,6 +5,8 @@
 
 # REA: Her şeyi tersine mühendislikle inceleyin
 
+Firmware corpus providers: [FACT Core guide](../fact-core.md).
+
 ### İkili dosyaların, uygulamaların ve çalışma zamanı davranışının tersine mühendisliği için tek bir MCP.
 
 **Beğendiğiniz bir özellik mi gördünüz? İkili kod düzeyine kadar nasıl çalıştığını anlayın.**

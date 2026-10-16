@@ -69,6 +69,7 @@ it("advertises native export through the actual SDK and preserves exact namespac
         "/data/./caller",
         "relative",
         "/data/\ud800",
+        "/data/\udc00",
         "/data/\0",
       ]) {
         for (const input of [
@@ -83,7 +84,9 @@ it("advertises native export through the actual SDK and preserves exact namespac
             firmwareCorpusInputs[name].safeParse(input).success,
             JSON.stringify(input),
           ).toBe(false);
-          expect(validate(input)).toBe(false);
+          expect(validate(input), `SDK accepts ${JSON.stringify(input)}`).toBe(
+            false,
+          );
           expect(validateLegacy(input)).toBe(false);
         }
       }

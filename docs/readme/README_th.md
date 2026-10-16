@@ -5,6 +5,8 @@
 
 # REA: Reverse Engineer Anything
 
+Firmware corpus providers: [FACT Core guide](../fact-core.md).
+
 ### MCP เดียวสำหรับวิศวกรรมย้อนกลับ ทั้งไบนารี แอปพลิเคชัน และพฤติกรรมขณะทำงาน
 
 **เห็นฟีเจอร์ที่ชอบแล้วอยากรู้ว่าทำงานอย่างไร? เข้าใจได้ลึกถึงระดับไบนารี**

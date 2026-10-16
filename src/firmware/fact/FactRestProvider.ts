@@ -1,3 +1,4 @@
+import { MIMEType } from "node:util";
 import { knownSensitiveValueRedactor } from "../../domain/knownSensitiveValueRedaction.js";
 import { FACT_REST_PROVIDER_IDENTITY } from "./FactRelease.js";
 import { createEvidence } from "../../domain/evidence.js";
@@ -40,6 +41,8 @@ import {
   requireFreshFactOutput,
   publishFactFile,
 } from "./FactFiles.js";
+
+const MAX_FACT_SEARCH_URL_BYTES = 2 * 1024 * 1024;
 
 /** Fixed semantic operations; callers cannot select arbitrary HTTP paths or methods. */
 export class FactRestProvider implements FirmwareCorpusPort {
@@ -129,8 +132,7 @@ export class FactRestProvider implements FirmwareCorpusPort {
       { operation },
     );
     let path = "",
-      method = "GET",
-      payload: JsonValue | undefined;
+      method = "GET";
     const query = new URLSearchParams();
     let collectionDisposition: "retain" | "explicit-reattempt" = "retain";
     let observedData: JsonValue = null;
@@ -257,6 +259,15 @@ export class FactRestProvider implements FirmwareCorpusPort {
           break;
         case "search_corpus_objects":
           if ("kind" in input && "query" in input) {
+            try {
+              // Measure JSON escaping before allocating the serialized query.
+              factJsonBytes(input.query);
+            } catch (cause: unknown) {
+              throw new Error(
+                "FACT search query exceeds its JSON byte budget",
+                { cause },
+              );
+            }
             path =
               input.kind === "firmware"
                 ? "/rest/firmware"
@@ -315,9 +326,11 @@ export class FactRestProvider implements FirmwareCorpusPort {
         throw Error("Operation input does not match its named contract");
       const url = new URL(path, connection.endpoint);
       url.search = query.toString();
-      if (payload !== undefined) factJsonBytes(payload);
-      const serialized =
-        payload === undefined ? undefined : JSON.stringify(payload);
+      if (
+        operation === "search_corpus_objects" &&
+        Buffer.byteLength(url.href, "utf8") > MAX_FACT_SEARCH_URL_BYTES
+      )
+        throw new Error("FACT search URL exceeds its encoded byte budget");
       const wireBudget =
         FACT_LIMITS.jsonBytes +
         (operation === "download_corpus_binary"
@@ -326,15 +339,9 @@ export class FactRestProvider implements FirmwareCorpusPort {
       delivered = true;
       const response = await fetch(url, {
         method,
-        headers: {
-          ...(connection.authorization === undefined
+        headers: (connection.authorization === undefined
             ? {}
             : { Authorization: connection.authorization }),
-          ...(serialized === undefined
-            ? {}
-            : { "Content-Type": "application/json" }),
-        },
-        ...(serialized === undefined ? {} : { body: serialized }),
         redirect: "manual",
         signal,
       });
@@ -346,6 +353,14 @@ export class FactRestProvider implements FirmwareCorpusPort {
         this.responses,
       );
       rawDigest = factHash(raw);
+      let mediaType: MIMEType | undefined;
+      try {
+        mediaType = new MIMEType(response.headers.get("content-type") ?? "");
+      } catch {
+        // Invalid/missing producer media types cannot establish JSON facts.
+      }
+      if (mediaType?.essence !== "application/json")
+        throw Error("FACT response Content-Type must declare application/json");
       const parsedEnvelope = await this.parser.parse(
         raw,
         operation === "download_corpus_binary",

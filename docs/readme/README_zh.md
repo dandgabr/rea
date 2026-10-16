@@ -5,6 +5,8 @@
 
 # REA：逆向一切
 
+Firmware corpus providers: [FACT Core guide](../fact-core.md).
+
 ### 通过一个 MCP 服务，逆向分析二进制文件、应用程序和运行时行为。
 
 **看到喜欢的功能，弄清它的工作原理，深入到二进制层面。**

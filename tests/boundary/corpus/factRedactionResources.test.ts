@@ -16,6 +16,7 @@ cliTest(
     const query = { near, overlapping: "b" + near, ordinary: "漢字😀" };
     let calls = 0;
     const server = createServer((req, res) => {
+      res.setHeader("content-type", "application/json");
       calls++;
       expect(req.headers.authorization).toBe(authorization);
       expect(

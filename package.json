@@ -123,6 +123,8 @@
     "check:ci:tasks": "turbo run typecheck lint:built format:check knip metadata:check jscpd scan:todos",
     "ci:static-context": "node scripts/ci/static-task-context.mjs",
     "build:cached": "node scripts/check-dependency-install.mjs && node scripts/run-exclusive.mjs artifacts turbo run artifacts:skills",
+    "preverify:fact-rest": "npm run build:cached",
+    "verify:fact-rest": "node scripts/verify/fact-core/live-rest.mjs",
     "build:termux": "node scripts/run-exclusive.mjs artifacts npm run build:termux:run",
     "build:termux:run": "npm run compile:termux && npm run artifacts:skills",
     "format": "oxfmt .",

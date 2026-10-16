@@ -6,10 +6,39 @@ const absoluteLocalPathSchema = localPathStringSchema.refine(
   isAbsolute,
   "Use an absolute local path",
 );
+const isUnicodeScalarString = (value: string): boolean => {
+  for (let index = 0; index < value.length; index++) {
+    const unit = value.charCodeAt(index);
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (next < 0xdc00 || next > 0xdfff || !Number.isFinite(next))
+        return false;
+      index++;
+    } else if (unit >= 0xdc00 && unit <= 0xdfff) return false;
+  }
+  return true;
+};
+const namespacePathScalar = String.raw`(?:[^\x2f\x00\uD800-\uDFFF]|[\uD800-\uDBFF][\uDC00-\uDFFF])`;
+const namespacePathNonDotScalar = String.raw`(?:[^\x2e\x2f\x00\uD800-\uDFFF]|[\uD800-\uDBFF][\uDC00-\uDFFF])`;
+const namespacePathSegment = String.raw`(?:${namespacePathNonDotScalar}(?:${namespacePathScalar})*|\.${namespacePathNonDotScalar}(?:${namespacePathScalar})*|\.\.${namespacePathScalar}(?:${namespacePathScalar})*)`;
 const namespacePath = z
   .string()
+  // Keep path shape constraints in the advertised pattern too: Zod refinements
+  // are not represented in JSON Schema. The expression works on UTF-16 code
+  // units so it can allow valid surrogate pairs while rejecting lone ones.
   .regex(
-    /^(?=[^\uD800-\uDFFF]*$)\/(?:(?!\.{1,2}(?:\/|$))[^/\x00]+(?:\/(?!\.{1,2}(?:\/|$))[^/\x00]+)*)?$/u,
+    new RegExp(
+      String.raw`^\x2f(?:${namespacePathSegment}(?:\x2f${namespacePathSegment})*)?$`,
+    ),
+  )
+  .refine(isUnicodeScalarString, "Namespace paths must contain Unicode scalars")
+  .refine(
+    (value) =>
+      value
+        .slice(1)
+        .split("/")
+        .every((segment) => segment !== "." && segment !== ".."),
+    "Namespace paths cannot contain dot components",
   )
   .describe(
     "Exact absolute scalar UTF-8 namespace path without dot or empty components",
@@ -73,10 +102,14 @@ export const corpusConnectionSchema = z.strictObject({
 export const corpusUidSchema = z
   .string()
   .regex(/^[a-f0-9]{64}_(?:0|[1-9][0-9]*)$/u);
-const plugin = z
+const pathSegment = z
   .string()
   .min(1)
-  .regex(/^[^/\x00]+$/u);
+  .regex(/^[^\x2f\x00]+$/u)
+  .refine((value) => value !== "." && value !== "..", {
+    message: "Path segment cannot be a URL dot segment",
+  });
+const plugin = pathSegment;
 const connection = { connection: corpusConnectionSchema };
 const object = { ...connection, uid: corpusUidSchema };
 const native = {
@@ -159,10 +192,7 @@ export const firmwareCorpusInputs = {
   inspect_corpus_comparison: z.strictObject(comparison),
   collect_corpus_yara: z.strictObject({
     ...connection,
-    search_id: z
-      .string()
-      .min(1)
-      .regex(/^[^/\x00]+$/u),
+    search_id: pathSegment,
   }),
   inspect_corpus_statistics: z.strictObject({
     ...connection,

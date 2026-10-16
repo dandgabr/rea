@@ -112,3 +112,73 @@ cliTest(
     }
   },
 );
+
+cliTest(
+  "preserves unknown media-type evidence and admits JSON through compiled CLI",
+  async ({ cli }) => {
+    let selected = "text/plain";
+    const uid = `${"a".repeat(64)}_3`;
+    const api = createServer((_request, response) => {
+      response.setHeader("content-type", selected);
+      response.end(
+        JSON.stringify({
+          status: 0,
+          timestamp: 42,
+          request_resource: "/rest/analysis",
+          request: { uid, plugin: "dummy" },
+          analysis: {
+            analysis_date: 0,
+            plugin_version: "0",
+            system_version: null,
+            summary: [],
+            tags: {},
+            result: { content: "ordinary漢字😀" },
+          },
+        }),
+      );
+    });
+    api.listen(0, "127.0.0.1");
+    await once(api, "listening");
+    const address = api.address();
+    if (!address || typeof address === "string") throw Error("Missing address");
+    try {
+      for (const mediaType of [
+        "text/plain",
+        'Application/JSON; charset="UTF-8"',
+      ]) {
+        selected = mediaType;
+        const admitted = mediaType !== "text/plain";
+        const result = await cli.run({
+          arguments: [
+            "inspect-corpus-analysis",
+            JSON.stringify({
+              connection: {
+                endpoint: `http://127.0.0.1:${address.port}`,
+                profile: "source-54aed90b",
+              },
+              uid,
+              plugin: "dummy",
+            }),
+            "--json",
+          ],
+        });
+        expect(result.exitCode).toBe(admitted ? 0 : 1);
+        const evidence = parseEvidence(result.json);
+        expect(evidence.normalized_result).toMatchObject({
+          state: admitted ? "completed" : "unknown",
+          http_status: 200,
+          raw_sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+          ...(admitted
+            ? { data: { analysis: { result: { content: "ordinary漢字😀" } } } }
+            : {
+                data: null,
+                diagnostics: [expect.stringContaining("Content-Type")],
+              }),
+        });
+      }
+    } finally {
+      api.closeAllConnections();
+      await new Promise<void>((resolve) => api.close(() => resolve()));
+    }
+  },
+);

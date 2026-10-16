@@ -168,11 +168,73 @@ it("denies FACT mutation and plugin-triggering REST operations before HTTP", asy
     await provider.close();
   }
 });
+it("rejects URL dot-segment plugin and search IDs before sending any request", async () => {
+  let requests = 0;
+  const connection = await fixture(() => {
+    requests++;
+    return { body: { status: 0 } };
+  });
+  const service = new FirmwareCorpusService(new FactRestProvider());
+  try {
+    for (const segment of [".", ".."] as const) {
+      const analysis = await service.execute("inspect_corpus_analysis", {
+        connection,
+        uid,
+        plugin: segment,
+      });
+      const yara = await service.execute("collect_corpus_yara", {
+        connection,
+        search_id: segment,
+      });
+      expect(analysis.ok, `plugin ${segment}`).toBe(false);
+      expect(yara.ok, `search_id ${segment}`).toBe(false);
+    }
+    expect(requests).toBe(0);
+  } finally {
+    await service.close();
+  }
+});
+
+it.each([
+  ["JSON query bytes", { selected: "x".repeat(FACT_LIMITS.jsonBytes) }],
+  ["percent-encoded URL bytes", { selected: "%".repeat(800 * 1024) }],
+] as const)(
+  "refuses oversized %s before sending a search request",
+  async (_, query) => {
+    let requests = 0;
+    const connection = await fixture(() => {
+      requests++;
+      return { body: { status: 0, uids: [] } };
+    });
+    const service = new FirmwareCorpusService(new FactRestProvider());
+    try {
+      const result = await service.execute("search_corpus_objects", {
+        connection,
+        kind: "firmware",
+        query,
+        offset: 0,
+        limit: 10,
+      });
+      if (!result.ok) throw result.error;
+      const observation = firmwareCorpusResultSchema.parse(
+        result.value.normalized_result,
+      );
+      expect(observation.state).toBe("not-delivered");
+      expect(observation.diagnostics.join(" ")).toMatch(
+        /query|URL.*byte budget/iu,
+      );
+      expect(requests).toBe(0);
+    } finally {
+      await service.close();
+    }
+  },
+);
 it("cancels unfinished oversized response bodies without accumulating transports", async () => {
   const unfinished = new Set<import("node:net").Socket>();
   let calls = 0;
   const server = createServer((req, res) => {
     calls++;
+    res.setHeader("content-type", "application/json");
     if (calls <= 3) {
       unfinished.add(req.socket);
       req.socket.once("close", () => unfinished.delete(req.socket));
@@ -875,6 +937,7 @@ it("serializes heavy response ownership with tagged capacity and permits explici
   let calls = 0;
   const server = createServer(async (req, res) => {
     calls++;
+    res.setHeader("content-type", "application/json");
     begun();
     await held;
     res.end(
@@ -1102,6 +1165,7 @@ it("keeps first-caller fetch ownership when a concurrent YARA waiter cancels del
   let calls = 0;
   const server = createServer(async (_req, res) => {
     calls++;
+    res.setHeader("content-type", "application/json");
     begun();
     await held;
     res.end(
@@ -1301,6 +1365,43 @@ it("retains a consumed response resource refusal and its exact digest without re
       expect(JSON.stringify(first.error)).not.toContain(secret);
       expect(JSON.stringify(first.error)).not.toContain(near);
     }
+  } finally {
+    await service.close();
+  }
+});
+
+it("retains a wrong-media one-shot observation without consuming the result again", async () => {
+  let calls = 0;
+  const connection = await fixture(() => {
+    calls++;
+    return {
+      headers: { "content-type": "text/plain" },
+      body: { status: 0, binary_search_results: { ready: [uid] } },
+    };
+  });
+  const provider = new FactRestProvider();
+  const service = new FirmwareCorpusService(provider);
+  try {
+    const first = await service.execute("collect_corpus_yara", {
+      connection,
+      search_id: "wrong-media",
+    });
+    const second = await service.execute("collect_corpus_yara", {
+      connection,
+      search_id: "wrong-media",
+    });
+    if (!first.ok) throw first.error;
+    if (!second.ok) throw second.error;
+    expect(first.value.normalized_result).toMatchObject({
+      state: "unknown",
+      http_status: 200,
+      raw_sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+      data: null,
+      diagnostics: [expect.stringContaining("Content-Type")],
+    });
+    expect(second.value).toBe(first.value);
+    expect(calls).toBe(1);
+    expect(provider.responses.pendingResources).toEqual([]);
   } finally {
     await service.close();
   }

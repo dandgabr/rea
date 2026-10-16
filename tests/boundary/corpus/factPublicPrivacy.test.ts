@@ -113,6 +113,7 @@ cliTest(
     };
     let calls = 0;
     const api = httpServer((req, res) => {
+      res.setHeader("content-type", "application/json");
       calls++;
       expect(req.headers.authorization).toBe(secret);
       const url = new URL(req.url!, "http://127.0.0.1");

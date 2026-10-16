@@ -5,6 +5,8 @@
 
 # REA: Alles reverse-engineeren
 
+Firmware corpus providers: [FACT Core guide](../fact-core.md).
+
 ### Ein MCP für das Reverse Engineering von Binärdateien, Anwendungen und Laufzeitverhalten.
 
 **Eine Funktion gefällt dir? Verstehe, wie sie funktioniert – bis hinunter auf die Binärebene.**

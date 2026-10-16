@@ -33,6 +33,12 @@ const FACT_PUBLIC_OPERATIONS: ReadonlySet<FirmwareCorpusOperation> = new Set([
 ]);
 const FACT_UNAVAILABLE_REASON =
   "This operation is outside the recorded FACT integration scope; plugin, scheduler, egress or mutation authority has not been verified.";
+const MAX_RETAINED_YARA_COLLECTIONS = 8;
+// FACT REST bounds one JSON response to 8 MiB. Reserve a little extra for the
+// Evidence envelope and caller metadata, then bound the lifetime aggregate.
+const YARA_EVIDENCE_RESERVATION_BYTES = 9 * 1024 * 1024;
+const MAX_RETAINED_YARA_EVIDENCE_BYTES = 64 * 1024 * 1024;
+const MAX_YARA_SEARCH_ID_BYTES = 1024;
 
 /** Shared named validation, external authority and one-shot Evidence retention. */
 export class FirmwareCorpusService {
@@ -40,6 +46,7 @@ export class FirmwareCorpusService {
     string,
     Promise<Result<Evidence, AnalysisError>>
   >();
+  private retainedYaraEvidenceBytes = 0;
   constructor(readonly provider: FirmwareCorpusPort) {}
   close(): Promise<void> {
     return this.provider.close?.() ?? Promise.resolve();
@@ -124,6 +131,17 @@ export class FirmwareCorpusService {
     const collection = firmwareCorpusInputs.collect_corpus_yara.parse(
       parsed.data,
     );
+    if (
+      Buffer.byteLength(collection.search_id, "utf8") > MAX_YARA_SEARCH_ID_BYTES
+    )
+      return err(
+        new AnalysisResourceConstraintError(
+          operation,
+          "capacity",
+          "FACT YARA search identifier exceeds the retained Evidence budget",
+          { maximum_search_id_bytes: MAX_YARA_SEARCH_ID_BYTES },
+        ),
+      );
     // The private key binds transport authority without exporting credential fingerprints.
     const key = digestCanonicalValue(
       {
@@ -136,16 +154,46 @@ export class FirmwareCorpusService {
     );
     const previous = this.collections.get(key);
     if (previous) return previous;
-    // First caller owns the fetch and its signal. Joining waiters cannot cancel
-    // that shared consumption; the resulting observation survives delivery cancellation.
-    const pending = run();
+    if (
+      this.collections.size >= MAX_RETAINED_YARA_COLLECTIONS ||
+      this.retainedYaraEvidenceBytes + YARA_EVIDENCE_RESERVATION_BYTES >
+        MAX_RETAINED_YARA_EVIDENCE_BYTES
+    )
+      return err(
+        new AnalysisResourceConstraintError(
+          operation,
+          "capacity",
+          "Retained FACT YARA observations reached the per-service cache limit",
+          {
+            retained_collections: this.collections.size,
+            maximum_retained_collections: MAX_RETAINED_YARA_COLLECTIONS,
+            retained_evidence_bytes: this.retainedYaraEvidenceBytes,
+            reserved_evidence_bytes: YARA_EVIDENCE_RESERVATION_BYTES,
+            maximum_retained_evidence_bytes: MAX_RETAINED_YARA_EVIDENCE_BYTES,
+          },
+        ),
+      );
+    // Reserve the cache key before starting the consuming request. The first
+    // caller owns its signal; joining waiters cannot cancel shared consumption.
+    let resolvePending!: (value: Result<Evidence, AnalysisError>) => void;
+    let rejectPending!: (reason: unknown) => void;
+    const pending = new Promise<Result<Evidence, AnalysisError>>(
+      (resolve, reject) => {
+        resolvePending = resolve;
+        rejectPending = reject;
+      },
+    );
+    this.retainedYaraEvidenceBytes += YARA_EVIDENCE_RESERVATION_BYTES;
     this.collections.set(key, pending);
+    void run().then(resolvePending, rejectPending);
     const result = await pending;
     if (
       collectionState.disposition === "explicit-reattempt" &&
       this.collections.get(key) === pending
-    )
+    ) {
       this.collections.delete(key);
+      this.retainedYaraEvidenceBytes -= YARA_EVIDENCE_RESERVATION_BYTES;
+    }
     return result;
   }
 }

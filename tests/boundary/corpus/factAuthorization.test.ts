@@ -96,6 +96,7 @@ cliTest(
     const api = httpServer((req, res) => {
       calls++;
       expect(req.headers.authorization).toBe(selected);
+      res.setHeader("content-type", "application/json");
       res.end(
         JSON.stringify({
           status: 0,

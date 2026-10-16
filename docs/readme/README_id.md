@@ -5,6 +5,8 @@
 
 # REA: Rekayasa Balik Apa Pun
 
+Firmware corpus providers: [FACT Core guide](../fact-core.md).
+
 ### Satu MCP untuk rekayasa balik pada berbagai biner, aplikasi, dan perilaku saat runtime.
 
 **Melihat fitur yang Anda sukai. Pahami cara kerjanya hingga ke tingkat biner.**

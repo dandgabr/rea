@@ -2,7 +2,10 @@ import { expect, it } from "vitest";
 import { FirmwareCorpusService } from "./FirmwareCorpusService.js";
 import { createAnalysisExecution } from "../AnalysisProvider.js";
 import { ok } from "../../domain/result.js";
-import { AnalysisCapabilityUnavailableError } from "../../domain/analysisErrorCore.js";
+import {
+  AnalysisCapabilityUnavailableError,
+  AnalysisResourceConstraintError,
+} from "../../domain/analysisErrorCore.js";
 import type { FirmwareCorpusOperation } from "../../domain/corpus/firmwareCorpus.js";
 
 it("uses canonical default-port identity while retaining the first caller's display endpoint", async () => {
@@ -69,4 +72,60 @@ it("refuses excluded FACT operations before provider dispatch, including removed
   }
   expect(calls).toBe(0);
   await service.close();
+});
+
+it("reserves aggregate YARA Evidence capacity before consuming and bounds retained identifiers", async () => {
+  let calls = 0;
+  const service = new FirmwareCorpusService({
+    async execute() {
+      calls++;
+      return ok(
+        createAnalysisExecution(
+          { captured: true },
+          { id: "fact-core", name: "FACT Core", version: null },
+        ),
+      );
+    },
+  });
+  const connection = {
+    endpoint: "http://127.0.0.1:5000",
+    profile: "source-54aed90b" as const,
+  };
+  try {
+    for (let index = 0; index < 7; index++) {
+      const result = await service.execute("collect_corpus_yara", {
+        connection,
+        search_id: `search-${index}`,
+      });
+      expect(result.ok).toBe(true);
+    }
+    const full = await service.execute("collect_corpus_yara", {
+      connection,
+      search_id: "search-7",
+    });
+    expect(full.ok).toBe(false);
+    if (!full.ok) {
+      expect(full.error).toBeInstanceOf(AnalysisResourceConstraintError);
+      expect(full.error).toMatchObject({ resource: "capacity" });
+    }
+    expect(calls).toBe(7);
+
+    const retained = await service.execute("collect_corpus_yara", {
+      connection,
+      search_id: "search-0",
+    });
+    expect(retained.ok).toBe(true);
+    expect(calls).toBe(7);
+
+    const oversizedId = await service.execute("collect_corpus_yara", {
+      connection,
+      search_id: "x".repeat(1025),
+    });
+    expect(oversizedId.ok).toBe(false);
+    if (!oversizedId.ok)
+      expect(oversizedId.error).toMatchObject({ resource: "capacity" });
+    expect(calls).toBe(7);
+  } finally {
+    await service.close();
+  }
 });

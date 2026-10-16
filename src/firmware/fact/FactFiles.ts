@@ -75,10 +75,32 @@ export class FactPublicationFailure extends Error {
 }
 
 export async function requireFreshFactOutput(path: string): Promise<void> {
-  if (!(await lstat(dirname(path))).isDirectory())
+  const uid = process.getuid?.();
+  if (process.platform === "win32" || uid === undefined)
+    throw Error(
+      "FACT output publication requires POSIX ownership and permission semantics",
+    );
+  const parentPath = dirname(path);
+  const parent = await lstat(parentPath);
+  if (!parent.isDirectory() || parent.isSymbolicLink())
     throw Error("Output parent must be an existing directory");
-  if ((await realpath(dirname(path))) !== dirname(path))
+  if ((await realpath(parentPath)) !== parentPath)
     throw Error("Output parent must not traverse symlinks");
+  if (parent.uid !== uid)
+    throw Error("Output parent must be owned by the current user");
+  if ((parent.mode & 0o022) !== 0)
+    throw Error("Output parent must not be group- or world-writable");
+  let ancestor = parentPath;
+  for (;;) {
+    const info = await lstat(ancestor);
+    if (!info.isDirectory() || info.isSymbolicLink())
+      throw Error("Output parent ancestry must contain only directories");
+    if ((info.mode & 0o022) !== 0 && (info.mode & 0o1000) === 0)
+      throw Error("Writable output ancestors must have the sticky bit");
+    const next = dirname(ancestor);
+    if (next === ancestor) break;
+    ancestor = next;
+  }
   try {
     await lstat(path);
   } catch (cause) {

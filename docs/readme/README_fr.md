@@ -5,6 +5,8 @@
 
 # REA : rétro-ingénierie de tout
 
+Firmware corpus providers: [FACT Core guide](../fact-core.md).
+
 ### Un seul MCP pour la rétro-ingénierie des binaires, des applications et du comportement à l'exécution.
 
 **Repérez une fonctionnalité qui vous plaît. Comprenez son fonctionnement, jusqu'au niveau du binaire.**

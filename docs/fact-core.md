@@ -68,12 +68,14 @@ web form's static plugin list or choose all plugins implicitly.
 
 ### Source-pinned endpoint authority matrix
 
-The operation classification below was checked against the source profile
-`54aed90bacb13c484404018101527c72d0bff6c5` and release profile
-`9ac65997a2b0fdaabd61bca2280fa22c441b1f92`. These profiles describe expected
+The operation classification below follows the route implementation at source
+profile `54aed90bacb13c484404018101527c72d0bff6c5`; each route link is pinned to
+that revision. Release profile `9ac65997a2b0fdaabd61bca2280fa22c441b1f92` is
+also available as a protocol declaration, but release-specific route behavior
+has not been verified against a live service. Both profiles describe expected
 producer behavior; the selected REST service does not attest its own revision.
-The applicable source routes are linked by pinned revision in the
-[FACT boundary verification record](verification/fact-core-boundaries.md).
+See the [FACT boundary verification record](verification/fact-core-boundaries.md)
+for verification scope and limits.
 
 | Route family                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    | Producer effect                                                                                                                                                               | Current REA exposure                                                                                                                 |
 | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
@@ -106,6 +108,13 @@ scope decision.
 | `inspect_corpus_gaps`            | Missing/failed analysis GET requires producer delete privilege despite being non-destructive.                                                                                                                                                                                |
 | `download_corpus_binary`         | `uid`, `repacked` (default false), fresh absent `output_path`. Original bytes require actual UID/SHA/size equality. Repacked output is a tar.gz archive with a distinct digest.                                                                                              |
 | `export_corpus_firmware`         | Planning inputs only: `interpreter`, `checkout`, `profile`, selected `uids`, and a fresh absent `output_directory`. Every runtime is refused before identity or execution.                                                                                                   |
+
+Binary publication requires POSIX UID, permission-mode and sticky-directory
+semantics. REA fails closed where they are unavailable, including Windows.
+The selected output parent must be current-user-owned and not group/world
+writable; writable ancestors must be sticky. This boundary does not isolate
+against concurrent processes running under the same UID, which share the
+caller's filesystem authority. Publication is not atomic.
 
 Plugin-triggering operations, corpus deletion, redo and native import are not
 public CLI/MCP capabilities. Their input schemas are absent, the shared service
@@ -170,8 +179,20 @@ cleanup counts; consuming observations remain cached without refetching.
 
 Caller-selected paths and producer-side limits do not establish filesystem, network, or device isolation. Native export remains unavailable for every runtime until REA can enforce that boundary before inspecting producer identity or starting work.
 
+Responses must declare the pinned `application/json` media type. REA uses a
+format-aware media-type parser and the existing fatal UTF-8 JSON parser; it
+retains the bounded response digest but reports unknown if the media type is
+missing, malformed or different. JSON charset parameters do not override the
+JSON UTF-8 decoder.
+
+For repeatable frontend-only CLI/stdio MCP verification, use the explicit
+[read harness and readiness matrix](verification/fact-core-boundaries.md#repeatable-frontend-only-acceptance-2026-10-15).
+The backend runtime-control-plane proposal remains pending in
+[issue #4325](https://github.com/morluto/rea/issues/4325); no runtime socket is
+authorized by a REST profile.
+
 Source-derived controlled HTTP tests cover request construction, response
-normalization, resource limits, errors and credential redaction. A separate
+normalization, resource limits, errors and credential redaction. Historical
 Podman acceptance used FACT Core source commit
 `54aed90bacb13c484404018101527c72d0bff6c5`, mounted read-only over the local
 Python runtime image, plus disposable PostgreSQL 18.6 and Valkey 9.1.2 on an
@@ -180,10 +201,11 @@ analysis, fixture object detail, and `dummy` analysis queries returned HTTP
 200 through both REA CLI and production stdio MCP. One FACT test fixture was
 seeded directly into the disposable database and private container storage.
 
-The FACT backend was not started: upstream backend initialization requires
+In that historical setup the FACT backend was not started: upstream backend initialization requires
 `docker.from_env()`, and no Docker/runtime socket was mounted. Consequently
-`/rest/status` returned HTTP 500 because plugin inventory was unavailable, and
-a direct binary retrieval probe did not complete within 15 seconds because
+`/rest/status` returned HTTP 500; the separate setup/service logs attributed it
+to unavailable plugin inventory. A generic 500 alone does not establish that cause. A
+direct binary retrieval probe did not complete within 15 seconds because
 file access is routed through backend intercom. Backend-dependent binary
 retrieval, one-shot YARA collection, stored comparison results, plugin
 triggering, and native export remain unverified. The runtime image's dependency
@@ -191,3 +213,50 @@ layer is not source-attested, and the selected REST profile is still a caller
 declaration rather than service-side revision proof. Native export remains
 unavailable for every runtime until its filesystem, network, device and
 aggregate resource boundaries are enforceable.
+
+The frontend-only verification round repeats the five completed reads
+through compiled CLI and production stdio MCP, preserves status HTTP 500 and
+adds the nonexistent-UID HTTP 400 control. The prior branch gate passed 83 tests and five targeted mutants; the
+process-ownership correction now passes **88 tests in 17 files**, 256 deterministic
+response cases and **ten targeted mutants**;
+these counts supersede the earlier run counts for the current gate, while the
+historical receipts remain unchanged. The current mutant set covers HTTP-500
+normalization, forbidden method, private-file cleanup, adapter error redaction,
+and media-type admission. It is not a global mutation score. See the
+[verification ledger](verification/fact-core-boundaries.md#current-branch-checks-and-targeted-mutations)
+for exact scope and the separate historical records. Additional mutants omit the canonical manifest hash
+admission, fabricate a missing-backend cause for an unrelated HTTP 500, skip
+transport close after client close fails, discard the original operation error,
+or bypass owned-child recovery.
+The harness attempts client close, transport close and private HOME removal
+sequentially even when earlier cleanup fails, and independently settles its
+original spawned MCP child through the existing process supervisor. Original operation and cleanup
+errors remain private; its single final report names failed resources without
+printing error messages and never claims verified success after cleanup failure.
+A harness-only bridge captures the original `ChildProcess` from pinned MCP SDK
+2.3.1 during transport startup. This SDK-internal field coupling has an explicit
+version/binding regression. Recovery uses that retained direct-child handle,
+with a 250 ms TERM grace and 1 second KILL grace; it never reconstructs ownership
+from a PID or signals an unproven process group. A pre-close rejection regression
+has a watchdog and verifies runner exit, child death and private HOME removal.
+An incomplete stop retains the owner and reports uncertainty without exporting
+its raw failure reason or claiming successful cleanup.
+
+The live acceptance harness supports only the unauthenticated disposable lane.
+It accepts no private credential input and passes no authentication value to
+child-process argv. A process-level regression captures all seven CLI argv
+vectors plus the stdio MCP argv. The 256-case synthetic credential/error run
+uses the adapter boundary without spawning the CLI. The recorded live repetitions
+were unauthenticated; their provider/build and teardown receipts remain valid.
+The historical 15-second binary probe above was not repeated in this round.
+Backend-dependent binary retrieval, one-shot YARA, comparison, and native
+export acceptance remain unverified, pending the exact backend authority gate.
+
+The selected manifest must match the literal canonical file SHA-256
+`044ed40a91a0f81d94061c00d959ada2076a3639077e290318725b79a6b80d1c`;
+UID, original-byte digest and size are anchored independently of that input.
+An arbitrary internally consistent replacement is rejected before process or
+HTTP delivery. The harness labels the status observation `generic-http-500`
+with cause `unverified`; the actual missing-inventory diagnosis remains in the
+separate disposable setup/log receipt. It does not infer backend absence from
+an HTTP error or a caller-declared profile.

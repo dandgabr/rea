@@ -5,6 +5,8 @@
 
 # REA: Reverse Engineer Anything
 
+Firmware corpus providers: [FACT Core guide](../fact-core.md).
+
 ### Jeden serwer MCP do inżynierii wstecznej plików binarnych, aplikacji i zachowania w czasie wykonywania.
 
 **Widzisz funkcję, która Ci się podoba? Dowiedz się, jak działa, aż do poziomu kodu binarnego.**

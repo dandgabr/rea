@@ -79,10 +79,16 @@ retains the exact reader and lock without repeating the request.
 
 Downloads require a fresh output path and publish through an owned file. A
 write failure removes only its uncommitted output; failed rollback remains
-owned for close. Partial Evidence retains independently verified response
-size, digest, selected UID, written-byte count, and cleanup uncertainty.
-Publication is not claimed atomic, and a preexisting caller file is never
-overwritten or removed.
+owned for close. The output parent must be current-user-owned and not
+group/world-writable; writable ancestors must be sticky directories. This
+rejects shared writable publication parents before opening the selected path.
+Publication fails closed when POSIX UID, permission-mode, or sticky-directory
+semantics are unavailable, including Windows. These checks do not isolate
+against concurrent processes running under the same UID; those processes share
+the caller's filesystem authority and can modify the same private directories.
+Partial Evidence retains independently verified response size, digest,
+selected UID, written-byte count, and cleanup uncertainty. Publication is not
+claimed atomic, and a preexisting caller file is never overwritten or removed.
 
 ## Native interchange
 
@@ -151,7 +157,166 @@ fixture for `inspect-corpus-statistics`; it exited 0 with completed Evidence and
 one request. This supplements the Node `24.18.0` Podman CLI/MCP acceptance. It
 does not enable FACT native export, which remains refused for every runtime.
 
-### Admission mutation and fuzz evidence
+### Repeatable frontend-only acceptance (2026-10-15)
+
+The read-only harness takes an explicit endpoint, declared profile, and pinned
+fixture manifest. It never provisions services, discovers credentials, opens a
+runtime socket, submits firmware, or starts a search/plugin/scheduler task:
+
+```sh
+npm run build:cached
+node scripts/verify/fact-core/live-rest.mjs \
+  --endpoint http://127.0.0.1:5000 \
+  --profile source-54aed90b \
+  --fixture tests/fixtures/fact-core/manifest.json
+```
+
+Select the actual disposable frontend port. The verifier admits only bytes with
+manifest SHA-256 `044ed40a91a0f81d94061c00d959ada2076a3639077e290318725b79a6b80d1c`.
+The expected UID, binary SHA and 787-byte length are literal anchors in the
+verifier, not values derived from the selected manifest. A byte-identical copy
+at a different caller-selected path is allowed; altered UID/hash/size, source
+path, nonexistent-UID control or serialization is rejected before child launch
+or HTTP access. Updating this artifact requires explicit review of its pin.
+The canonical manifest independently pins
+`src/test/data/container/test.zip` at source
+`54aed90bacb13c484404018101527c72d0bff6c5`: SHA-256
+`418a54d78550e8584291c96e5d6168133621f352bfc1d43cf84e81187fef4962`,
+787 bytes, and its derived UID. The expected `dummy` result is `content: abcd`.
+The harness requires exactly this one firmware in the selected search page and
+a separate, explicitly nonexistent UID. It makes three independent GETs per
+selection: a bounded HTTP status/digest observation, compiled REA CLI, and the
+production stdio MCP adapter. The report distinguishes actions taken by the
+harness from unverified service backend state. `acceptance_lane` names the
+requested frontend-only test lane; `readiness: read-workflows-completed` covers
+the five successful reads. `status_diagnosis` labels only `generic-http-500`
+with `cause: unverified`. Any other JSON error returning 500 receives the same
+classification: HTTP alone does not establish a missing backend or plugin
+inventory failure. CLI/MCP Evidence retains each response's digest;
+timestamps can differ between calls. The metadata UID/size checks do not prove
+that binary retrieval works. No binary or one-shot result is requested.
+
+This harness supports only the unauthenticated disposable test lane. It accepts
+no credential option, reads no private authentication file, and sends no
+Authorization header through direct HTTP, CLI or MCP. `--entrypoint` can select
+the built package's `scripts/rea.mjs`. The removed `--authorization-file` option
+is rejected before process launch. Tests capture the actual argv of seven CLI
+children and the MCP child and assert that no credential or authorization field
+appears. Known-value redaction is exercised separately using synthetic tokens
+in the adapter boundary suite, without spawning the CLI.
+
+The 2026-10-15 repetition used fresh labeled rootless containers, PostgreSQL
+18.6 and Valkey 9.1.2 on an internal network, a loopback-only frontend, and a
+read-only checkout of the exact Git source. A separate, generated mode-0600
+configuration was mounted read-only at the producer's default path because
+upstream Alembic reloads that path during initialization. The database schema
+and single fixture were created directly as disposable test setup; no upload
+or plugin trigger was sent. The selected local runtime image was
+`6ecb291bd88a493ccc3db622f92b37412cf4feea9ed077352636ab7b5d0be77a`;
+its dependency layer remains unattested. No backend or runtime API socket was
+started or mounted.
+
+| Public REST operation            | Route/method                                            | Dependency and side effect                              | Repeated live result                                                                                            |
+| -------------------------------- | ------------------------------------------------------- | ------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `inspect_firmware_corpus`        | GET `/rest/status`                                      | Backend plugin inventory; query                         | Generic HTTP 500, failed CLI/MCP Evidence, cause unverified; no fabricated inventory                            |
+| `inspect_corpus_statistics`      | GET `/rest/statistics`                                  | Existing database; query                                | HTTP 200, completed CLI/MCP                                                                                     |
+| `search_corpus_objects`          | GET `/rest/firmware` or `/rest/file_object`             | Existing database; query                                | Firmware page: HTTP 200, exact fixture UID; file search unverified                                              |
+| `inspect_corpus_object`          | GET `/rest/firmware/<uid>` or `/rest/file_object/<uid>` | Existing database; query                                | Firmware: HTTP 200, expected UID/787 bytes; absent UID: HTTP 400, failed, no substitute; file detail unverified |
+| `inspect_corpus_analysis`        | GET `/rest/analysis/<uid>/dummy`                        | Existing seeded analysis; result read                   | HTTP 200, exact UID/plugin/result through CLI/MCP; corresponding PUT never called                               |
+| `inspect_corpus_gaps`            | GET `/rest/missing`                                     | Database and delete privilege; non-destructive query    | HTTP 200, completed CLI/MCP                                                                                     |
+| `inspect_corpus_parent_analysis` | GET `/plugins/<plugin>/rest/<uid>`                      | Existing plugin-specific parent-context result; query   | Unverified: no parent-context fixture                                                                           |
+| `inspect_corpus_comparison`      | GET `/rest/compare/<uids>`                              | Existing comparison result; query                       | Unverified: no seeded comparison                                                                                |
+| `download_corpus_binary`         | GET `/rest/binary/<uid>`                                | Backend file intercom; read and fresh local publication | Unverified: backend unavailable; no probe in this repetition                                                    |
+| `collect_corpus_yara`            | GET `/rest/binary_search/<search_id>`                   | Existing result via backend; consumes result once       | Unverified: no stable pre-seeded search result; no collect/start request                                        |
+
+Service logs confirmed the status failure originated in upstream
+`get_available_analysis_plugins()`: `No available plug-ins found. FACT backend
+might be down!`. This causal diagnosis belongs to the separate owned setup/log
+receipt, not to the harness's generic HTTP classification. The harness neither
+reads those logs nor attests backend identity. Frontend process readiness differs from inventory or
+backend readiness. All observed application requests were GET. The three exact
+owned containers and internal network were removed, absence verified, and
+private tmpfs data plus the host-generated private config removed. No unrelated
+container was modified. Local receipts retain exact IDs, mounts, network,
+state, logs, request methods, CLI/MCP observations and teardown; run-specific
+ports and names are not reusable identities.
+
+The corrected-provider repetition took 6.915 seconds in this run. It records its own CPU
+and `maxRSS`; process-family CPU/peak memory, token usage and an equivalent
+before/after baseline remain unmeasured. This is a frontend-only acceptance,
+not a claim of full FACT readiness, runtime confinement, or source-attested
+service identity.
+
+The separate backend/runtime-control-plane decision is pending in
+[issue #4325](https://github.com/morluto/rea/issues/4325). Issue #4110's route
+classifications do not grant runtime-socket authority. Backend implementation
+and its live acceptance remain held until that exact boundary is approved and
+proven. No backend `Containerfile` or runtime-control setup is included here.
+
+### Current branch checks and targeted mutations
+
+The prior frontend-only gate passed 83 tests and five scoped mutants. The
+manifest/status gate passed 84 tests and seven mutants. The cleanup correction
+passed 86 tests and nine mutants. The process-ownership correction adds two
+further tests and one recovery mutant. An earlier run recorded **88 tests in 17
+files**, including 256 deterministic bounded HTTP-response cases with seed
+`0x46414354`; its exact 17-file command was not retained, so that count is
+historical rather than the reproducible gate below. The current
+ten targeted mutations cover HTTP 500 accepted as empty completed data, a
+forbidden POST, omitted verifier-private HOME cleanup, omitted adapter error
+redaction, omitted media-type admission, omitted canonical-manifest hash
+admission, a fabricated missing-backend diagnosis, skipped transport close after
+client close failure, discarded primary operation error, and bypassed spawned-child
+recovery. All ten were killed and source
+files restored byte-for-byte. This is the scoped mutation set, not a whole-repo
+mutation score or backend-conformance claim. The 256-case credential-bearing error checks
+run against the adapter without CLI children; the live runner has no credential
+input. The separate argv regression first reproduced the old leak, then passed
+after that input path was removed.
+
+The reproducible FACT-focused gate was rerun on Node `24.18.0` and npm `11.16.0`
+with:
+
+```sh
+npm run test:focused -- src/firmware/fact/FactNativeProvider.test.ts src/firmware/fact/FactRestProvider.test.ts src/firmware/fact/FactProtocol.test.ts src/firmware/fact/FactTransfer.test.ts src/firmware/fact/FactFiles.test.ts src/firmware/fact/FactJsonParser.test.ts tests/boundary/corpus/factRestResponseCases.test.ts tests/boundary/corpus/factRestLiveAcceptance.test.ts tests/boundary/corpus/factNativeRuntimeSchema.test.ts tests/boundary/corpus/factRedactionResources.test.ts tests/boundary/corpus/factAuthorization.test.ts tests/boundary/corpus/factPublicPrivacy.test.ts tests/boundary/corpus/factCorpusCli.test.ts
+```
+
+Result: 13 files, 67 tests passed in 69.88 seconds (Vitest-reported duration).
+This run exercises synthetic loopback responses and the public REA frontend; it
+does not start a FACT backend or establish backend REST behavior. CPU time and
+peak process-family memory were not measured in this repetition.
+
+The cleanup fault injection runs the real verifier process and production stdio
+MCP child. It closes the real transport before injecting two private errors,
+both after completed reads and after an operation failure. Client, transport, direct-child supervisor and private HOME
+receive sequential cleanup attempts, the private HOME is absent, and only one
+secret-safe failure report is emitted. A separate owner test verifies exact
+original error identities, AggregateError cause/order and retained failed owners.
+
+The additional pre-close fault rejects without closing the real MCP child. Its
+watchdog first reproduced the old hang (10 seconds, exit 124). After correction,
+the verifier exits with failure without the watchdog, records the child exit,
+verifies its process is absent and removes private HOME. A separate real child
+ignores TERM and proves bounded KILL escalation. The harness captures the exact
+spawned `ChildProcess` while its newly created transport starts, before SDK close
+can discard the reference. This local bridge depends on the installed SDK 2.3.1
+`_process` field; the test asserts that version and exact object association.
+The existing `ProviderProcessSupervisor` owns recovery, with TERM grace 250 ms
+and KILL grace 1 second, stdout left protocol-owned and zero retained diagnostic
+bytes. There is no PID-only kill, process-group authority, new MCP parser or
+operation replay. The recovery bound covers its stop attempt, not all SDK calls
+or OS scheduling. Incomplete recovery retains its original owner and failure
+privately and publishes only status/exit uncertainty; it never establishes
+process death or verified cleanup from a failed signal attempt.
+
+`build:cached`, `check:fast`, `docs:check`, `format:check` and `git diff --check`
+passed. Raw live receipts retain the executed verifier/provider/build hashes,
+HTTP observations and exact cleanup identities; the later auth-option removal
+does not rewrite those receipts. Both actual live repetitions were already
+unauthenticated. The older counts and three mutations below describe earlier
+verification runs, rather than the prior 83-test/five-mutant or current 88-test/ten-mutant gate.
+
+### Historical admission mutation and fuzz evidence
 
 Scoped mutation checks ran the full `FactRestProvider.test.ts` source suite in
 Node `24.18.0` using a disposable Podman container. They contacted no FACT
@@ -164,7 +329,7 @@ command inside each container was:
 npm run test:local -- src/firmware/fact/FactRestProvider.test.ts
 ```
 
-The three targeted mutations were all killed:
+The historical three targeted mutations were all killed:
 
 | Boundary               | Temporary mutant                                                                                                                              | Result                                                                                                                                                     |
 | ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |

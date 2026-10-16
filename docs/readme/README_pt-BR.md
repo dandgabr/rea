@@ -5,6 +5,8 @@
 
 # REA: Faça engenharia reversa de qualquer coisa
 
+Firmware corpus providers: [FACT Core guide](../fact-core.md).
+
 ### Um único MCP para engenharia reversa de binários, aplicativos e comportamento em execução.
 
 **Viu uma funcionalidade de que gostou? Entenda como ela funciona, até o nível binário.**

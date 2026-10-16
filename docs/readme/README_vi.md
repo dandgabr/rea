@@ -5,6 +5,8 @@
 
 # REA: Kỹ thuật dịch ngược cho mọi thứ
 
+Firmware corpus providers: [FACT Core guide](../fact-core.md).
+
 ### Một MCP để dịch ngược tệp nhị phân, ứng dụng và hành vi khi chạy.
 
 **Thấy một tính năng bạn thích? Hiểu cách nó hoạt động, đến tận mức mã nhị phân.**
