@@ -1,11 +1,10 @@
 import { EventEmitter } from "node:events";
-import { createHash } from "node:crypto";
 import { PassThrough } from "node:stream";
 import { expect, it, vi } from "vitest";
 import { ProviderProcessSupervisor } from "./ProviderProcess.js";
 import { redactCapturedTransportCredential } from "./ProviderDiagnosticRedaction.js";
 
-it("preserves a UTF8 BOM as source text and reports the exact retained byte digest", () => {
+it("preserves a UTF8 BOM as source text", () => {
   const producer = Object.assign(new EventEmitter(), {
     stdout: new PassThrough(),
     stderr: new PassThrough(),
@@ -24,8 +23,6 @@ it("preserves a UTF8 BOM as source text and reports the exact retained byte dige
       text: "\ufeffsource-é😀",
       bytes: bytes.length,
       observedBytes: bytes.length,
-      sha256: createHash("sha256").update(bytes).digest("hex"),
-      utf8Valid: true,
     });
   } finally {
     supervisor.dispose();
@@ -54,8 +51,6 @@ it("distinguishes observed bytes from retained split UTF8 at the actual aggregat
         bytes: 3,
         observedBytes: 6,
         invalidUtf8: true,
-        utf8Valid: false,
-        sha256: createHash("sha256").update(bytes.subarray(0, 3)).digest("hex"),
       },
     });
   } finally {

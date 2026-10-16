@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
 
+import { compareUnicodeCodePoints } from "../../../src/domain/unicodeCodePointOrder.js";
 import { readStableSymlinkTarget } from "../../../src/reference/ReferenceSourceReaderEntries.js";
 import { readReferenceSource } from "../../support/referenceSourceResourceScope.js";
 
@@ -176,13 +177,12 @@ describe("readReferenceSource failures and exclusions", () => {
     });
 
     if (!result.ok) throw result.error;
-    expect(checked).toHaveLength(2);
-    expect(checked).toEqual(
-      expect.arrayContaining([
-        ["ignored", "directory"],
-        ["kept", "file"],
-      ]),
-    );
+    expect(
+      checked.sort(([left], [right]) => compareUnicodeCodePoints(left, right)),
+    ).toEqual([
+      ["ignored", "directory"],
+      ["kept", "file"],
+    ]);
     expect(result.value.entries.map(({ path }) => path)).toEqual(["kept"]);
   });
 

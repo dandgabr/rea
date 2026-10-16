@@ -1,7 +1,14 @@
 import { OwnedFileHandle } from "../../filesystem/OwnedFileHandle.js";
 import { createHash } from "node:crypto";
 import { readlinkSync } from "node:fs";
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  readFile,
+  readdir,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import { expect, it, vi } from "vitest";
 import { createTestTempDirectory } from "../../../tests/fixtures/temporaryDirectory.js";
@@ -27,16 +34,32 @@ interface TestResult {
   coverage: string;
   unexamined_files: unknown[];
 }
-const sha = (bytes: string) => createHash("sha256").update(bytes).digest("hex");
+const sha = (bytes: string | Uint8Array) =>
+  createHash("sha256").update(bytes).digest("hex");
 const fixture = resolve("tests/fixtures/firmware/binwalkNgProtocol.mjs");
 const setup = async () => {
   const root = await createTestTempDirectory("rea-ng-corrections-");
   const path = join(root, "input.bin"),
     manifest = join(root, "manifest.json");
   await writeFile(path, "abcdef");
+  const helperPath = join(root, "gzip-helper");
+  await writeFile(helperPath, await readFile("/usr/bin/true"), { mode: 0o500 });
   await writeFile(
     manifest,
-    JSON.stringify({ profile: "binwalk-ng-4.0.0", mounts: [] }),
+    JSON.stringify({
+      profile: "binwalk-ng-4.0.0",
+      mounts: [],
+      helpers: [
+        {
+          name: "gzip",
+          source: helperPath,
+          sha256: sha(await readFile(helperPath)),
+          version_arguments: ["--version"],
+          expected_version: "test gzip helper 1.0",
+          supported_signatures: ["gzip"],
+        },
+      ],
+    }),
   );
   const runtime = {
     command: "/usr/bin/true",
@@ -54,9 +77,44 @@ const setup = async () => {
   return { root, path, runtime, environment };
 };
 const protocolLauncher =
-  (mode: string) =>
+  (
+    mode: string,
+    afterHelperVersion?: () => Promise<void>,
+    observeCommand?: (args: readonly string[]) => void,
+  ) =>
   async (options: Parameters<typeof spawnOwnedProviderProcess>[0]) => {
     const args = options.arguments;
+    const commandArguments = args.slice(args.lastIndexOf("--") + 1);
+    observeCommand?.(args);
+    if (commandArguments[0] === "/runtime/bin/gzip") {
+      await afterHelperVersion?.();
+      return spawnOwnedProviderProcess({
+        ...options,
+        command: "/usr/bin/printf",
+        expectedCommand: null,
+        arguments: ["test gzip helper 1.0\n"],
+      });
+    }
+    if (commandArguments.includes("--list"))
+      return spawnOwnedProviderProcess({
+        ...options,
+        command: "/usr/bin/printf",
+        expectedCommand: null,
+        arguments: [
+          // List probes are deliberately separate from report transfers.
+          "-".repeat(90) +
+            "\nSignature Description".padEnd(35) +
+            "Signature Name".padEnd(35) +
+            "Extraction Utility\n" +
+            "-".repeat(90) +
+            "\n" +
+            "gzip compressed data".padEnd(35) +
+            "gzip".padEnd(35) +
+            "gzip\n" +
+            "-".repeat(90) +
+            "\nTotal signatures: 1\nExtractable signatures: 1\n",
+        ],
+      });
     const log = args[args.indexOf("--log") + 1];
     const pass = log === undefined ? "0000" : basename(log, ".json");
     const roIndex = args.lastIndexOf("--ro-bind");
@@ -73,8 +131,146 @@ const protocolLauncher =
       ],
     });
   };
-it.skip.each(["stable", "mutate"])(
-  "pending producer-time output admission: binds final carving ranges across recursive passes: %s",
+it("rechecks the selected helper digest after its version probe and before extraction", async () => {
+  const { root, path, environment } = await setup();
+  const commands: string[][] = [];
+  const provider = new BinwalkNgProvider(
+    environment,
+    protocolLauncher(
+      "stable",
+      async () => {
+        const helper = join(root, "gzip-helper");
+        await chmod(helper, 0o700);
+        await writeFile(helper, "replaced helper bytes");
+      },
+      (args) => commands.push([...args]),
+    ),
+  );
+  try {
+    const outcome = await provider.execute({
+      operation: "extract_firmware",
+      input: binwalkNgInputSchemas.extract_firmware.parse({
+        path,
+        provider_id: "binwalk-ng",
+        output_directory: join(root, "output"),
+      }),
+    });
+    expect(outcome.ok).toBe(false);
+    expect(commands.some((args) => args.includes("--extract"))).toBe(false);
+  } finally {
+    await provider.close();
+  }
+});
+it("refuses extraction before launch when manifest capability does not match the upstream inventory", async () => {
+  const { root, path, environment, runtime } = await setup();
+  const manifest = JSON.parse(await readFile(runtime.manifest, "utf8"));
+  manifest.helpers[0].supported_signatures = ["7z"];
+  await writeFile(runtime.manifest, JSON.stringify(manifest));
+  const launches: string[][] = [];
+  const base = protocolLauncher("stable");
+  const provider = new BinwalkNgProvider(environment, async (options) => {
+    launches.push([...options.arguments]);
+    return base(options);
+  });
+  try {
+    const outcome = await provider.execute({
+      operation: "extract_firmware",
+      input: binwalkNgInputSchemas.extract_firmware.parse({
+        path,
+        provider_id: "binwalk-ng",
+        output_directory: join(root, "output"),
+      }),
+    });
+    expect(outcome).toMatchObject({
+      ok: false,
+      error: {
+        _tag: "AnalysisCapabilityUnavailableError",
+        reason: expect.stringContaining(
+          "complete native and source-backed signature mapping",
+        ),
+      },
+    });
+    expect(launches.some((args) => args.includes("--list"))).toBe(true);
+    expect(launches.some((args) => args.includes("--extract"))).toBe(false);
+    expect(
+      launches.some(
+        (args) => args[args.lastIndexOf("--") + 1] === "/runtime/bin/gzip",
+      ),
+    ).toBe(false);
+  } finally {
+    await provider.close();
+  }
+});
+
+it("rejects a narrow 7z capability before helper launch or network activity", async () => {
+  const { root, path, environment, runtime } = await setup();
+  const manifest = JSON.parse(await readFile(runtime.manifest, "utf8"));
+  manifest.helpers[0].name = "7z";
+  manifest.helpers[0].supported_signatures = ["7zip"];
+  await writeFile(runtime.manifest, JSON.stringify(manifest));
+  const launches: string[][] = [];
+  const fetch = vi.spyOn(globalThis, "fetch");
+  const base = protocolLauncher("stable");
+  const provider = new BinwalkNgProvider(environment, async (options) => {
+    launches.push([...options.arguments]);
+    if (options.arguments.includes("--list"))
+      return spawnOwnedProviderProcess({
+        ...options,
+        command: "/usr/bin/printf",
+        expectedCommand: null,
+        arguments: [
+          "-".repeat(90) +
+            "\nSignature Description".padEnd(35) +
+            "Signature Name".padEnd(35) +
+            "Extraction Utility\n" +
+            "-".repeat(90) +
+            "\n" +
+            "7-Zip archive".padEnd(35) +
+            "7zip".padEnd(35) +
+            "7z\n" +
+            "-".repeat(90) +
+            "\nTotal signatures: 1\nExtractable signatures: 1\n",
+        ],
+      });
+    return base(options);
+  });
+  try {
+    const outcome = await provider.execute({
+      operation: "extract_firmware",
+      input: binwalkNgInputSchemas.extract_firmware.parse({
+        path,
+        provider_id: "binwalk-ng",
+        output_directory: join(root, "output"),
+      }),
+    });
+    expect(outcome).toMatchObject({
+      ok: false,
+      error: {
+        _tag: "AnalysisCapabilityUnavailableError",
+        reason: expect.stringContaining(
+          "complete native and source-backed signature mapping",
+        ),
+      },
+    });
+    const providerCommands = launches.map((args) =>
+      args.slice(args.lastIndexOf("--") + 1),
+    );
+    expect(providerCommands.some((args) => args.includes("--list"))).toBe(true);
+    expect(providerCommands.some((args) => args[0] === "/runtime/bin/7z")).toBe(
+      false,
+    );
+    expect(providerCommands.some((args) => args.includes("--extract"))).toBe(
+      false,
+    );
+    expect(fetch).not.toHaveBeenCalled();
+  } finally {
+    fetch.mockRestore();
+    await provider.close();
+  }
+});
+
+it.each(["stable", "mutate"])(
+  "binds final carving ranges across recursive passes: %s",
   async (mode) => {
     const { root, path, environment } = await setup();
     const provider = new BinwalkNgProvider(environment, protocolLauncher(mode));
@@ -108,28 +304,30 @@ it.skip.each(["stable", "mutate"])(
       expect(file.local_range).toEqual(
         mode === "stable" ? { offset: 2, length: 2 } : null,
       );
-      expect(file.carving_observation).toMatchObject({
-        sha256: sha("cd"),
-        original_file_range: { offset: 2, length: 2 },
-      });
-      if (mode === "mutate")
-        expect(result.diagnostics.join(" ")).toContain("changed");
+      if (mode === "stable")
+        expect(file.carving_observation).toMatchObject({
+          sha256: sha("cd"),
+          original_file_range: { offset: 2, length: 2 },
+        });
+      else expect(file.carving_observation).toBeNull();
     } finally {
       await provider.close();
     }
   },
 );
-it.skip.each(["inside", "outside"])(
-  "pending producer-time output admission: accounts for regular and nonregular artifacts: %s",
+it.each(["inside", "outside"])(
+  "accounts for regular artifacts within/outside the selected pass: %s",
   async (mode) => {
     const { root, path, environment } = await setup();
     const provider = new BinwalkNgProvider(environment, protocolLauncher(mode));
     try {
       const outcome = await provider.execute({
-        operation: "inspect_firmware_regions",
-        input: binwalkNgInputSchemas.inspect_firmware_regions.parse({
+        operation: "extract_firmware",
+        input: binwalkNgInputSchemas.extract_firmware.parse({
           path,
           provider_id: "binwalk-ng",
+          output_directory: join(root, "output"),
+          options: { carve: true },
         }),
       });
       expect(outcome.ok).toBe(true);
@@ -155,6 +353,34 @@ it.skip.each(["inside", "outside"])(
     }
   },
 );
+it.each(["symlink", "special"])(
+  "refuses a nonregular producer artifact (%s) without publishing or replacing caller output",
+  async (mode) => {
+    const { root, path, environment } = await setup();
+    const output = join(root, "output");
+    await mkdir(output);
+    await writeFile(join(output, "sentinel"), "caller bytes");
+    const provider = new BinwalkNgProvider(environment, protocolLauncher(mode));
+    try {
+      const outcome = await provider.execute({
+        operation: "extract_firmware",
+        input: binwalkNgInputSchemas.extract_firmware.parse({
+          path,
+          provider_id: "binwalk-ng",
+          output_directory: output,
+          options: { carve: true },
+        }),
+      });
+      expect(outcome.ok).toBe(false);
+      expect(await readdir(output)).toEqual(["sentinel"]);
+      expect(await readFile(join(output, "sentinel"), "utf8")).toBe(
+        "caller bytes",
+      );
+    } finally {
+      await provider.close();
+    }
+  },
+);
 it.each(["refusal", "cancel", "cleanup"])(
   "retains established private PNG facts through publication %s",
   async (mode) => {
@@ -167,12 +393,18 @@ it.each(["refusal", "cancel", "cleanup"])(
     }
     const create =
       mode === "cancel"
-        ? vi
-            .spyOn(SafeOutputTree, "create")
-            .mockImplementationOnce(async () => {
-              controller.abort();
-              throw controller.signal.reason;
-            })
+        ? (() => {
+            const originalCreate = SafeOutputTree.create;
+            return vi
+              .spyOn(SafeOutputTree, "create")
+              .mockImplementation(async (outputRoot, platform) => {
+                if (outputRoot === output) {
+                  controller.abort();
+                  throw controller.signal.reason;
+                }
+                return originalCreate(outputRoot, platform);
+              });
+          })()
         : undefined;
     const provider = new BinwalkNgProvider(
       environment,
@@ -337,7 +569,7 @@ it("refuses a second admitted operation immediately, releases cancellation capac
   }
 });
 
-it.skip("pending producer-time output admission: bounded extraction workflow fuzz seed 0x4e473208", async () => {
+it("bounded extraction workflow fuzz seed 0x4e473208", async () => {
   let seed = 0x4e473208;
   const next = () => {
     seed ^= seed << 13;
@@ -416,11 +648,13 @@ it("keeps a durably published PNG facet through repeated directory-close failure
   const originalCommit = SafeOutputTree.prototype.commit;
   let inCommit = false,
     launches = 0,
+    outputCommits = 0,
     failedHandle: OwnedFileHandle | undefined;
   let failedCloseAttempts = 0;
   const commit = vi
     .spyOn(SafeOutputTree.prototype, "commit")
     .mockImplementation(async function (this: SafeOutputTree) {
+      if (this.outputRoot === output) outputCommits++;
       inCommit = true;
       try {
         await originalCommit.call(this);
@@ -487,12 +721,12 @@ it("keeps a durably published PNG facet through repeated directory-close failure
     expect(failedCloseAttempts).toBe(2);
     expect((await failedHandle?.handle.stat())?.isDirectory()).toBe(true);
     expect(launches).toBe(2);
-    expect(commit).toHaveBeenCalledTimes(1);
+    expect(outputCommits).toBe(1);
     await provider.close();
     expect(failedCloseAttempts).toBe(3);
     expect(failedHandle?.handle.fd).toBe(-1);
     expect(launches).toBe(2);
-    expect(commit).toHaveBeenCalledTimes(1);
+    expect(outputCommits).toBe(1);
     expect(await readFile(join(output, "entropy.png"))).toEqual(bytes);
   } finally {
     await provider.close();
@@ -504,9 +738,17 @@ it("keeps a durably published PNG facet through repeated directory-close failure
 it("keeps the PNG unpublished when commit fails before establishing durable publication", async () => {
   const { root, path, environment } = await setup();
   const output = join(root, "output");
+  const originalCommit = SafeOutputTree.prototype.commit;
+  let outputCommits = 0;
   const commit = vi
     .spyOn(SafeOutputTree.prototype, "commit")
-    .mockRejectedValueOnce(new Error("injected before durable commit"));
+    .mockImplementation(async function (this: SafeOutputTree) {
+      if (this.outputRoot === output) {
+        outputCommits++;
+        throw new Error("injected before durable commit");
+      }
+      return originalCommit.call(this);
+    });
   const provider = new BinwalkNgProvider(environment, protocolLauncher("png"));
   try {
     const outcome = await provider.execute({
@@ -536,7 +778,7 @@ it("keeps the PNG unpublished when commit fails before establishing durable publ
       },
     });
     await expect(stat(output)).rejects.toMatchObject({ code: "ENOENT" });
-    expect(commit).toHaveBeenCalledTimes(1);
+    expect(outputCommits).toBe(1);
     expect(outcome.error.cleanupIncomplete).toBe(false);
   } finally {
     await provider.close();

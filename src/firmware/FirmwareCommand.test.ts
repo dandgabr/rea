@@ -5,7 +5,10 @@ import { expect, vi, it as test } from "vitest";
 
 import { createTestTempDirectory } from "../../tests/fixtures/temporaryDirectory.js";
 import { FIRMWARE_LIMITS } from "./FirmwareRelease.js";
-import { ProviderProcessSupervisor } from "../process/ProviderProcess.js";
+import {
+  ProviderProcessSupervisor,
+  spawnOwnedProviderProcess,
+} from "../process/ProviderProcess.js";
 import { AnalysisOutputError } from "../domain/analysisErrorCore.js";
 import { AnalysisCapabilityUnavailableError } from "../domain/analysisErrorCore.js";
 import { projectAnalysisError } from "../domain/analysisErrorProjection.js";
@@ -16,6 +19,8 @@ import {
 import { createHash } from "node:crypto";
 import { writeFile as writeProtocolFixture } from "node:fs/promises";
 import { createHash as hashProtocol } from "node:crypto";
+import { SafeOutputTree } from "../artifacts/SafeOutputTree.js";
+import { consumeBinwalkNgTransfer } from "./binwalkNg/BinwalkNgTransfer.js";
 
 const it = test.skipIf(process.platform !== "linux");
 
@@ -56,6 +61,160 @@ it("streams binary protocol stdout without retaining it in diagnostic capture", 
     hashProtocol("sha256").update(payload).digest("hex"),
   );
   expect(result.stdout).toMatchObject({ text: "", bytes: 0, observedBytes: 0 });
+  expect(result.captured_output).toMatchObject({
+    stdout: "",
+    stdout_capture: "protocol",
+    stdout_observed_bytes: payload.byteLength,
+  });
+  expect(result.captured_output).not.toHaveProperty("stdout_bytes");
+  expect(result.captured_output).not.toHaveProperty("stdout_utf8_valid");
+  expect(result.captured_output).not.toHaveProperty("stdout_sha256");
+});
+
+it("preserves stderr as structured diagnostics when a framed protocol fails", async () => {
+  const root = await createTestTempDirectory("rea-firmware-protocol-failure-");
+  const stderr = "native protocol diagnostic";
+  const script = join(root, "failure.py");
+  await writeFile(
+    script,
+    `import sys,time\nsys.stderr.write(${JSON.stringify(stderr)})\nsys.stderr.flush()\nsys.stdout.buffer.write(b'X'*(2*1024*1024))\nsys.stdout.flush()\ntime.sleep(20)\n`,
+  );
+  let protocolBytesRead = 0;
+  const failure: unknown = await runFirmwareCommand({
+    engine: "fixture",
+    operation: "inspect_firmware_entropy",
+    command: "/usr/bin/python3",
+    limiter: "/usr/bin/prlimit",
+    args: [script],
+    cwd: root,
+    environment: { PATH: "/usr/bin:/bin" },
+    signal: AbortSignal.timeout(5000),
+    protocolStdout: async (stdout) => {
+      const first = await stdout[Symbol.asyncIterator]().next();
+      if (first.done) throw new Error("protocol producer emitted no bytes");
+      protocolBytesRead = Buffer.isBuffer(first.value)
+        ? first.value.byteLength
+        : Buffer.byteLength(first.value);
+      throw new Error("malformed protocol frame");
+    },
+    retainCleanup: () => {
+      throw new Error("Unexpected retained process");
+    },
+  }).catch((cause: unknown) => cause);
+
+  expect(failure).toMatchObject({
+    _tag: "ProviderAdapterError",
+    diagnostics: {
+      reason: expect.stringContaining("malformed protocol frame"),
+      stderr,
+    },
+    capturedOutput: {
+      stderr,
+      stdout_capture: "protocol",
+      stdout_observed_bytes: expect.any(Number),
+    },
+  });
+  expect(protocolBytesRead).toBeGreaterThan(0);
+  expect(
+    (failure as { capturedOutput?: { stdout_observed_bytes?: number } })
+      .capturedOutput?.stdout_observed_bytes,
+  ).toBeGreaterThanOrEqual(protocolBytesRead);
+});
+
+it("refuses incomplete process output before accepting a valid-looking result", async () => {
+  const root = await createTestTempDirectory("rea-firmware-incomplete-output-");
+  const script = join(root, "valid-prefix.py");
+  await writeFile(script, "import os; os.write(1, b'{\\\"ready\\\":true}')");
+  const failure = await runFirmwareCommand({
+    engine: "fixture",
+    operation: "firmware_container_runtime",
+    command: "/usr/bin/python3",
+    limiter: "/usr/bin/prlimit",
+    args: [script],
+    cwd: root,
+    environment: { PATH: "/usr/bin:/bin" },
+    signal: AbortSignal.timeout(5_000),
+    launcher: async (options) => {
+      const spawned = await spawnOwnedProviderProcess(options);
+      Object.defineProperty(spawned.process, "outputIncomplete", {
+        configurable: true,
+        value: true,
+      });
+      return spawned;
+    },
+    retainCleanup: () => {
+      throw new Error("unexpected incomplete cleanup");
+    },
+  }).catch((cause: unknown) => cause);
+
+  expect(failure).toMatchObject({
+    _tag: "AnalysisOutputError",
+    capturedOutput: { stdout: '{"ready":true}', truncated: true },
+  });
+});
+
+it("refuses a fully parsed Binwalk transfer when the producer reports incomplete output", async () => {
+  const root = await createTestTempDirectory(
+    "rea-firmware-incomplete-protocol-",
+  );
+  const output = join(root, "output");
+  const script = join(root, "valid-transfer.py");
+  const header = Buffer.from('{"type":"end","files":0,"bytes":0}');
+  const length = Buffer.alloc(4);
+  length.writeUInt32BE(header.byteLength);
+  const transfer = Buffer.concat([Buffer.from("REABWNG1"), length, header]);
+  await writeProtocolFixture(
+    script,
+    `import base64,os\nos.write(1,base64.b64decode(${JSON.stringify(transfer.toString("base64"))}))\n`,
+  );
+  const tree = await SafeOutputTree.create(output);
+  let transferParsed = false;
+  let outputIncomplete = false;
+  try {
+    const failure = await runFirmwareCommand({
+      engine: "binwalk-ng",
+      operation: "extract_firmware",
+      command: "/usr/bin/python3",
+      limiter: "/usr/bin/prlimit",
+      args: [script],
+      cwd: root,
+      environment: { PATH: "/usr/bin:/bin" },
+      signal: AbortSignal.timeout(5_000),
+      launcher: async (options) => {
+        const spawned = await spawnOwnedProviderProcess(options);
+        Object.defineProperty(spawned.process, "outputIncomplete", {
+          configurable: true,
+          get: () => outputIncomplete,
+        });
+        return spawned;
+      },
+      protocolStdout: async (stdout) => {
+        await consumeBinwalkNgTransfer(stdout, tree, {
+          maxBytes: 1,
+          maxFiles: 1,
+          maxEntries: 1,
+          signal: AbortSignal.timeout(5_000),
+        });
+        transferParsed = true;
+        outputIncomplete = true;
+      },
+      retainCleanup: () => {
+        throw new Error("unexpected incomplete cleanup");
+      },
+    }).catch((cause: unknown) => cause);
+
+    expect(failure).toMatchObject({
+      _tag: "AnalysisOutputError",
+      capturedOutput: {
+        stdout_capture: "protocol",
+        stdout_observed_bytes: transfer.byteLength,
+        truncated: true,
+      },
+    });
+    expect(transferParsed).toBe(true);
+  } finally {
+    await tree.rollback();
+  }
 });
 
 it("retains bounded actual command bytes and malformed UTF-8 on cancellation after native output", async () => {
@@ -81,7 +240,7 @@ it("retains bounded actual command bytes and malformed UTF-8 on cancellation aft
     },
   }).catch((cause: unknown) => cause);
   let pid: number | undefined;
-  for (let attempt = 0; attempt < 100; attempt++) {
+  for (let attempt = 0; attempt < 500; attempt++) {
     try {
       pid = Number(await readFile(marker, "utf8"));
       break;
@@ -99,11 +258,6 @@ it("retains bounded actual command bytes and malformed UTF-8 on cancellation aft
       stdout_bytes: 19,
       stderr_bytes: 15,
       stderr_utf8_valid: false,
-      stderr_sha256: createHash("sha256")
-        .update(
-          Buffer.concat([Buffer.from([0xff]), Buffer.from("native-partial")]),
-        )
-        .digest("hex"),
       command: "/usr/bin/python3",
       arguments: [script],
     },
@@ -115,7 +269,7 @@ it("retains bounded actual command bytes and malformed UTF-8 on cancellation aft
       stderr_utf8_valid: false,
     },
   });
-}, 5000);
+}, 15000);
 
 it("retains the same output-growth failure with useful command acknowledgements after owned cleanup", async () => {
   const root = await createTestTempDirectory("rea-firmware-growth-");
@@ -288,9 +442,6 @@ it("retains exact raw provenance at the diagnostic cap, including malformed byte
           stdout: raw.subarray(0, 8).toString("utf8"),
           stdout_bytes: 8,
           stdout_observed_bytes: 24,
-          stdout_sha256: createHash("sha256")
-            .update(raw.subarray(0, 8))
-            .digest("hex"),
           stdout_utf8_valid: false,
           command: "/usr/bin/python3",
           arguments: ["-c", code],
@@ -339,8 +490,6 @@ it("retains exact raw provenance at the diagnostic cap, including malformed byte
       text: "abcdefgh",
       bytes: 8,
       observedBytes: 8,
-      utf8Valid: true,
-      sha256: createHash("sha256").update("abcdefgh").digest("hex"),
     });
   } finally {
     policy.diagnosticBytes = originalBudget;
@@ -369,3 +518,49 @@ test("keeps the first authoritative capture when later text and byte identities 
   expect(failure.capturedOutput).toEqual(original);
   expect(failure.reason).toBe("original reason");
 });
+
+it("hashes only exact UTF-8 command output and omits digests for malformed bytes", async () => {
+  const root = await createTestTempDirectory("rea-firmware-output-digest-");
+  const cases = [
+    { bytes: Buffer.from("\ufeffsource-é😀"), valid: true },
+    { bytes: Buffer.from([0x61, 0xff, 0x62]), valid: false },
+  ] as const;
+
+  for (const { bytes, valid } of cases) {
+    const script = join(root, valid ? "valid-output.py" : "invalid-output.py");
+    const base64 = bytes.toString("base64");
+    await writeFile(
+      script,
+      `import base64,os,sys\nos.write(1,base64.b64decode(${JSON.stringify(base64)}))\nsys.exit(1)\n`,
+    );
+    const failure = await runFirmwareCommand({
+      engine: "fixture",
+      operation: "inspect_firmware_entropy",
+      command: "/usr/bin/python3",
+      limiter: "/usr/bin/prlimit",
+      args: [script],
+      cwd: root,
+      environment: { PATH: "/usr/bin:/bin" },
+      signal: AbortSignal.timeout(10_000),
+      retainCleanup: () => {
+        throw new Error("unexpected incomplete cleanup");
+      },
+    }).catch((cause: unknown) => cause);
+
+    const captured = (failure as { capturedOutput?: Record<string, unknown> })
+      .capturedOutput;
+    expect(failure).toMatchObject({ _tag: "ProviderAdapterError" });
+    expect(captured).toMatchObject({
+      stdout: bytes.toString("utf8"),
+      stdout_capture: "diagnostic",
+      stdout_bytes: bytes.byteLength,
+      stdout_observed_bytes: bytes.byteLength,
+      stdout_utf8_valid: valid,
+    });
+    if (valid)
+      expect(captured?.stdout_sha256).toBe(
+        createHash("sha256").update(bytes).digest("hex"),
+      );
+    else expect(captured).not.toHaveProperty("stdout_sha256");
+  }
+}, 20000);

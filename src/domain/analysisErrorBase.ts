@@ -45,6 +45,8 @@ export interface AnalysisCapturedOutput {
   readonly signal?: string | null;
   readonly stdout_observed_bytes?: number;
   readonly stderr_observed_bytes?: number;
+  /** Identifies stdout intentionally consumed as a binary protocol stream. */
+  readonly stdout_capture?: "diagnostic" | "protocol";
   /** Digests describe retained source bytes, before text decoding. */
   readonly stdout_sha256?: string;
   readonly stderr_sha256?: string;

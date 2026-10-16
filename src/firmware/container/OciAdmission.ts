@@ -957,38 +957,3 @@ export const recheckOwnedPodmanOci = async (
     "Source/producer namespace generation changed across bind revalidation",
   );
 };
-/** Host metadata settlement only: namespace PIDs are never signaled on the host. */
-export const settlePodmanProcess = async (
-  process: { readonly pid: number; readonly start_ticks?: string },
-  signal: AbortSignal,
-  scope: ArtifactResourceScope,
-) => {
-  try {
-    const stat = await processFile(process.pid, "stat", signal, scope);
-    const start = parseLinuxProcessStartTime(stat.text);
-    requireFact(
-      start !== undefined,
-      "Owned prepared process settlement is unreadable",
-    );
-    const state = stat.text.slice(stat.text.lastIndexOf(")") + 2).split(" ")[0];
-    requireFact(
-      (process.start_ticks !== undefined && start !== process.start_ticks) ||
-        state === "Z",
-      "Owned prepared process generation remains live after exact CID removal",
-    );
-  } catch (cause: unknown) {
-    if (cause instanceof Error && "code" in cause && cause.code === "ENOENT")
-      return;
-    try {
-      await lstat(`/proc/${process.pid}`);
-    } catch (absent: unknown) {
-      if (
-        absent instanceof Error &&
-        "code" in absent &&
-        absent.code === "ENOENT"
-      )
-        return;
-    }
-    throw cause;
-  }
-};

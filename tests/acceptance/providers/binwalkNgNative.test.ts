@@ -4,7 +4,8 @@ import { z } from "zod";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import { createHash } from "node:crypto";
 import { gzipSync } from "node:zlib";
-import { readFile, writeFile, stat } from "node:fs/promises";
+import { readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { expect, it } from "vitest";
 import type { TestProcesses } from "../../support/process/processFixture.js";
@@ -28,6 +29,28 @@ const nativeConfigured =
     "REA_FIRMWARE_BWRAP_COMMAND",
   ].every((name) => (process.env[name] ?? "").startsWith("/"));
 const test = cliTest.skipIf(!nativeConfigured);
+const runtimeHasSevenZip = (() => {
+  const manifestPath = process.env.REA_BINWALK_NG_RUNTIME_MANIFEST;
+  if (manifestPath === undefined) return false;
+  try {
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as {
+      helpers?: { name?: string; supported_signatures?: string[] }[];
+    };
+    return (
+      manifest.helpers?.some(
+        (helper) =>
+          helper.name === "7z" &&
+          helper.supported_signatures?.includes("7zip") === true,
+      ) === true
+    );
+  } catch {
+    return false;
+  }
+})();
+const isolatedFixtureImage =
+  "ghcr.io/binwalk-ng/binwalk-ng@sha256:fb2f83d2700a5cd3c97ac19896bac375993a591e3a10916e7f55e096598c7c04";
+const isolatedFixtureConfigured =
+  process.env.REA_BINWALK_NG_FIXTURE_IMAGE === isolatedFixtureImage;
 const testWithBoundaryFixtures = cliTest.skipIf(
   !nativeConfigured || process.env.REA_NG_BOUNDARY_FIXTURE_ROOT === undefined,
 );
@@ -205,21 +228,22 @@ test("real native CLI retains selected scan and entropy Evidence plus provider i
     length: compressed.length,
   });
   expect(scanned.analyses[0]?.regions[0]?.local_range.offset).toBe(0);
-  const deniedExtraction = await processes.run(
-    process.execPath,
-    [
-      process.env.REA_FIRMWARE_TEST_ENTRYPOINT ?? resolve("scripts/rea.mjs"),
+  const extraction = toolContract("extract_firmware").outputSchema.parse(
+    await run([
       "extract-firmware",
       path,
       join(root, "extracted"),
       "--provider",
       "binwalk-ng",
-      "--format",
-      "json",
-    ],
-    { env: { PATH: process.env.PATH ?? "", ...runtime(), HOME: root } },
+      "--include",
+      "gzip",
+      "--recursive",
+      "--max-depth",
+      "3",
+    ]),
   );
-  expect(deniedExtraction.exitCode).not.toBe(0);
+  expect(extraction.subject?.digest.sha256).toBe(digest(bytes));
+  expect(extraction.normalized_result.coverage).toBeDefined();
   const entropy = toolContract("inspect_firmware_entropy").outputSchema.parse(
     await run([
       "inspect-firmware-entropy",
@@ -264,7 +288,7 @@ test("real native CLI retains selected scan and entropy Evidence plus provider i
 }, 125000);
 
 cliTest.skipIf(!nativeConfigured)(
-  "real public MCP client validates converted schemas, supported native Evidence and extraction refusal",
+  "real public MCP client validates converted schemas, extraction and recursive Evidence",
   async () => {
     const { root, path, bytes, compressed } = await fixture();
     const entrypoint =
@@ -358,17 +382,26 @@ cliTest.skipIf(!nativeConfigured)(
           }),
         ]),
       );
-      for (const name of ["extract_firmware"] as const) {
-        const denied = await client.callTool({
-          name,
-          arguments: {
-            path,
-            provider_id: "binwalk-ng",
-            output_directory: join(root, `mcp-${name}`),
-          },
-        });
-        expect(denied.isError, JSON.stringify(denied)).toBe(true);
-      }
+      const extracted = await client.callTool({
+        name: "extract_firmware",
+        arguments: {
+          path,
+          provider_id: "binwalk-ng",
+          output_directory: join(root, "mcp-extract"),
+          max_depth: 3,
+          options: { include: ["gzip"], recursive: true },
+        },
+      });
+      expect(extracted.isError, JSON.stringify(extracted)).not.toBe(true);
+      const extractionEvidence = toolContract(
+        "extract_firmware",
+      ).outputSchema.parse(extracted.structuredContent);
+      expect(extractionEvidence.subject?.digest.sha256).toBe(digest(bytes));
+      expect(extractionEvidence.parameters).toMatchObject({
+        options: { include: ["gzip"], recursive: true },
+        max_depth: 3,
+      });
+      expect(extractionEvidence.normalized_result.coverage).toBeDefined();
       const entropy = await client.callTool({
         name: "inspect_firmware_entropy",
         arguments: {
@@ -543,8 +576,11 @@ test("actual public native entropy preserves the 2047/2048/2049 window transitio
   }
 }, 125000);
 
-cliTest.skipIf(true)(
-  "BLOCKED: feature-disabled native acceptance requires an admitted upstream runtime",
+cliTest.skipIf(
+  !nativeConfigured ||
+    !(process.env.REA_BINWALK_NG_TEST_NO_ENTROPY_COMMAND ?? "").startsWith("/"),
+)(
+  "public CLI and MCP report entropy capability unavailable for a feature-disabled native build",
   async ({ processes }) => {
     const { root, path, bytes } = await fixture();
     const entrypoint =
@@ -612,7 +648,7 @@ cliTest.skipIf(true)(
   125000,
 );
 
-test("actual public CLI preserves scan options and refuses extraction and legacy-ignored options", async ({
+test("actual public CLI preserves scan options and admits explicitly scoped extraction", async ({
   processes,
 }) => {
   const { root, path, bytes } = await fixture();
@@ -632,10 +668,8 @@ test("actual public CLI preserves scan options and refuses extraction and legacy
     options: { search_all: true, exclude: ["tar", "zip"], include: [] },
   });
   const output = join(root, "one-pass");
-  const entrypoint =
-    process.env.REA_FIRMWARE_TEST_ENTRYPOINT ?? resolve("scripts/rea.mjs");
-  for (const args of [
-    [
+  const extraction = toolContract("extract_firmware").outputSchema.parse(
+    await run([
       "extract-firmware",
       path,
       output,
@@ -643,21 +677,17 @@ test("actual public CLI preserves scan options and refuses extraction and legacy
       "binwalk-ng",
       "--include",
       "gzip",
-    ],
-    ["inspect-firmware-regions", path, "--include", "gzip"],
-  ]) {
-    const outcome = await processes.run(
-      process.execPath,
-      [entrypoint, ...args, "--format", "json"],
-      {
-        env: { PATH: process.env.PATH ?? "", ...runtime(), HOME: root },
-        timeoutMs: 125000,
-      },
-    );
-    expect(outcome.exitCode).not.toBe(0);
-    expect(JSON.parse(outcome.stdout)).toHaveProperty("code");
-  }
-  await expect(stat(output)).rejects.toMatchObject({ code: "ENOENT" });
+      "--recursive",
+      "--max-depth",
+      "3",
+    ]),
+  );
+  expect(extraction.subject?.digest.sha256).toBe(digest(bytes));
+  expect(extraction.parameters).toMatchObject({
+    options: { include: ["gzip"], recursive: true },
+    max_depth: 3,
+  });
+  expect((await stat(output)).isDirectory()).toBe(true);
   expect(await readFile(path)).toEqual(bytes);
 }, 125000);
 
@@ -704,6 +734,301 @@ test("actual public REA carve path transfers quota-bounded internal Binwalk-NG a
   );
   expect((await stat(output)).isDirectory()).toBe(true);
 }, 125000);
+
+const assertMcpReportsMissingSevenZip = async (input: {
+  readonly root: string;
+  readonly entrypoint: string;
+  readonly archivePath: string;
+  readonly inputDigest: string;
+  readonly archive: Buffer;
+  readonly absentHelperManifest: string;
+}) => {
+  const outputDirectory = join(input.root, "mcp-no-helper-output");
+  const client = new Client({
+    name: "rea-ng-7z-native-no-helper",
+    version: "1",
+  });
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [input.entrypoint, "mcp"],
+    env: {
+      PATH: process.env.PATH ?? "",
+      ...runtime(),
+      REA_BINWALK_NG_RUNTIME_MANIFEST: input.absentHelperManifest,
+      HOME: input.root,
+    },
+    stderr: "pipe",
+  });
+  try {
+    await client.connect(transport);
+    const result = await client.callTool({
+      name: "extract_firmware",
+      arguments: {
+        path: input.archivePath,
+        provider_id: "binwalk-ng",
+        output_directory: outputDirectory,
+        options: { include: ["7zip"] },
+      },
+    });
+    expect(result.isError, JSON.stringify(result)).not.toBe(true);
+    const evidence = toolContract("extract_firmware").outputSchema.parse(
+      result.structuredContent,
+    );
+    expect(evidence.subject?.digest.sha256).toBe(input.inputDigest);
+    expect(evidence.normalized_result.coverage).toBe("partial");
+    const normalized = evidence.normalized_result;
+    if (!("analyses" in normalized))
+      throw new Error("MCP extraction Evidence has no analysis observations");
+    expect(normalized.analyses).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          extractions: expect.arrayContaining([
+            expect.objectContaining({ success: false }),
+          ]),
+        }),
+      ]),
+    );
+    expect(JSON.stringify(evidence.raw_result)).toContain(
+      "No such file or directory",
+    );
+    expect(await readdir(outputDirectory)).toEqual([]);
+    expect(await readFile(input.archivePath)).toEqual(input.archive);
+  } finally {
+    await client.close();
+    await transport.close();
+  }
+};
+
+const createIsolatedSevenZipFixture = async (input: {
+  processes: TestProcesses;
+  root: string;
+  payloadPath: string;
+  archivePath: string;
+}): Promise<Buffer> => {
+  const payload = Buffer.from("external helper extraction fixture\n");
+  await writeFile(input.payloadPath, payload, { mode: 0o400 });
+  const created = await input.processes.run(
+    "/usr/bin/podman",
+    [
+      "run",
+      "--rm",
+      "--pull=never",
+      "--network=none",
+      "--read-only",
+      "--cap-drop=all",
+      "--security-opt=no-new-privileges",
+      "--pids-limit=32",
+      "--memory=256m",
+      "--memory-swap=256m",
+      "--cpus=1",
+      "--userns=keep-id",
+      "--user",
+      `${String(process.getuid?.() ?? 1000)}:${String(process.getgid?.() ?? 1000)}`,
+      "--tmpfs",
+      "/tmp:rw,noexec,nosuid,nodev,size=16m",
+      "--tmpfs",
+      "/out:rw,noexec,nosuid,nodev,size=16m",
+      "--volume",
+      `${input.payloadPath}:/fixture/payload.bin:ro,Z`,
+      "--entrypoint",
+      "/bin/sh",
+      isolatedFixtureImage,
+      "-c",
+      "/usr/bin/7z a -t7z /out/external.7z /fixture/payload.bin >/dev/null && base64 -w0 /out/external.7z",
+    ],
+    {
+      env: {
+        PATH: "/usr/bin:/bin",
+        HOME: process.env.HOME ?? input.root,
+        ...(process.env.XDG_RUNTIME_DIR === undefined
+          ? {}
+          : { XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR }),
+      },
+      timeoutMs: 30_000,
+    },
+  );
+  expect(created.exitCode, created.stderr).toBe(0);
+  const archive = Buffer.from(created.stdout.trim(), "base64");
+  expect(archive.length).toBeGreaterThan(0);
+  await writeFile(input.archivePath, archive, { mode: 0o400 });
+  return archive;
+};
+
+const assertCompleteSevenZipCapability = (helper: {
+  supported_signatures: string[];
+}) =>
+  expect(helper.supported_signatures).toEqual([
+    "7zip",
+    "apfs",
+    "arj",
+    "compressd",
+    "cpio",
+    "cramfs",
+    "efigpt",
+    "iso9660",
+    "zip",
+    "xz",
+  ]);
+
+cliTest.skipIf(
+  !nativeConfigured || !runtimeHasSevenZip || !isolatedFixtureConfigured,
+)(
+  "real CLI and MCP extract a 7z fixture through the explicitly admitted external helper",
+  async ({ processes }) => {
+    const root = await createTestTempDirectory("rea-ng-public-7z-");
+    const manifest = JSON.parse(
+      await readFile(selected("REA_BINWALK_NG_RUNTIME_MANIFEST"), "utf8"),
+    ) as {
+      helpers: {
+        name: string;
+        source: string;
+        supported_signatures: string[];
+      }[];
+    };
+    const helper = manifest.helpers.find((item) => item.name === "7z");
+    if (helper === undefined)
+      throw Error("7z helper disappeared from manifest");
+    assertCompleteSevenZipCapability(helper);
+    const payloadPath = join(root, "external-payload.bin");
+    const archivePath = join(root, "external.7z");
+    const outputPath = join(root, "cli-output");
+    const archive = await createIsolatedSevenZipFixture({
+      processes,
+      root,
+      payloadPath,
+      archivePath,
+    });
+    const inputDigest = digest(archive);
+    const entrypoint =
+      process.env.REA_FIRMWARE_TEST_ENTRYPOINT ?? resolve("scripts/rea.mjs");
+    const cli = await processes.run(
+      process.execPath,
+      [
+        entrypoint,
+        "extract-firmware",
+        archivePath,
+        outputPath,
+        "--provider",
+        "binwalk-ng",
+        "--include",
+        "7zip",
+        "--format",
+        "json",
+      ],
+      {
+        env: { PATH: process.env.PATH ?? "", ...runtime(), HOME: root },
+        timeoutMs: 125_000,
+      },
+    );
+    expect(cli.exitCode, cli.stdout + cli.stderr).toBe(0);
+    const cliEvidence = toolContract("extract_firmware").outputSchema.parse(
+      parseEvidence(JSON.parse(cli.stdout)),
+    );
+    expect(cliEvidence.subject?.digest.sha256).toBe(inputDigest);
+    expect(cliEvidence.normalized_result.coverage).toBeDefined();
+    expect(await readFile(archivePath)).toEqual(archive);
+
+    const absentHelperManifest = join(root, "runtime-no-7z.json");
+    await writeFile(
+      absentHelperManifest,
+      JSON.stringify({
+        ...JSON.parse(
+          await readFile(selected("REA_BINWALK_NG_RUNTIME_MANIFEST"), "utf8"),
+        ),
+        helpers: manifest.helpers.filter((item) => item.name !== "7z"),
+      }),
+    );
+    const absentHelper = await processes.run(
+      process.execPath,
+      [
+        entrypoint,
+        "extract-firmware",
+        archivePath,
+        join(root, "no-helper-output"),
+        "--provider",
+        "binwalk-ng",
+        "--include",
+        "7zip",
+        "--format",
+        "json",
+      ],
+      {
+        env: {
+          PATH: process.env.PATH ?? "",
+          ...runtime(),
+          REA_BINWALK_NG_RUNTIME_MANIFEST: absentHelperManifest,
+          HOME: root,
+        },
+        timeoutMs: 125_000,
+      },
+    );
+    expect(
+      absentHelper.exitCode,
+      absentHelper.stdout + absentHelper.stderr,
+    ).toBe(0);
+    const absentHelperEvidence = toolContract(
+      "extract_firmware",
+    ).outputSchema.parse(parseEvidence(JSON.parse(absentHelper.stdout)));
+    expect(absentHelperEvidence.normalized_result.coverage).toBe("partial");
+    const absentHelperResult = absentHelperEvidence.normalized_result;
+    if (!("analyses" in absentHelperResult))
+      throw new Error("Extraction Evidence has no analysis observations");
+    expect(absentHelperResult.analyses).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          extractions: expect.arrayContaining([
+            expect.objectContaining({ success: false }),
+          ]),
+        }),
+      ]),
+    );
+    expect(JSON.stringify(absentHelperEvidence.raw_result)).toContain(
+      "No such file or directory",
+    );
+    expect(await readdir(join(root, "no-helper-output"))).toEqual([]);
+    expect(await readFile(archivePath)).toEqual(archive);
+
+    await assertMcpReportsMissingSevenZip({
+      root,
+      entrypoint,
+      archivePath,
+      inputDigest,
+      archive,
+      absentHelperManifest,
+    });
+
+    const client = new Client({ name: "rea-ng-7z-native", version: "1" });
+    const transport = new StdioClientTransport({
+      command: process.execPath,
+      args: [entrypoint, "mcp"],
+      env: { PATH: process.env.PATH ?? "", ...runtime(), HOME: root },
+      stderr: "pipe",
+    });
+    try {
+      await client.connect(transport);
+      const result = await client.callTool({
+        name: "extract_firmware",
+        arguments: {
+          path: archivePath,
+          provider_id: "binwalk-ng",
+          output_directory: join(root, "mcp-output"),
+          options: { include: ["7zip"] },
+        },
+      });
+      expect(result.isError, JSON.stringify(result)).not.toBe(true);
+      const evidence = toolContract("extract_firmware").outputSchema.parse(
+        result.structuredContent,
+      );
+      expect(evidence.subject?.digest.sha256).toBe(inputDigest);
+      expect(evidence.normalized_result.coverage).toBeDefined();
+      expect(await readFile(archivePath)).toEqual(archive);
+    } finally {
+      await client.close();
+      await transport.close();
+    }
+  },
+  125_000,
+);
 
 testWithBoundaryFixtures(
   "public MCP enforces the native input byte limit and preserves digest evidence at the boundary",

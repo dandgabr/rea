@@ -14,14 +14,15 @@ procps-compatible `ps` on REA's `PATH`; see the shared
 [Linux process prerequisite](installation.md#linux-owned-process-prerequisite).
 
 The independent `binwalk-ng/binwalk-ng` 4.0.0 provider supports provider
-inventory, one-pass region scans, entropy analysis and internal carving on Linux
+inventory, one-pass region scans, entropy analysis, internal carving and
+explicitly manifested external-helper extraction with bounded recursion on Linux
 when an explicit runtime is configured and user-systemd cgroup v2 plus the
 required bubblewrap policy are available. The service verifies effective
 memory, swap, task and CPU limits before execution and requires a private tmpfs
 work area. Selected carving is bounded by a private tmpfs byte/inode quota and
-verified framed transfer. Helper-based extraction remains unavailable because
-signature-selected external helper execution and exact helper-path identity are
-not admitted. Caller-provided container execution is also unsupported. See
+verified framed transfer. Helper extraction requires a caller-provided manifest
+binding exact helper paths, digests, version identities and supported signatures.
+Caller-provided container execution is unsupported. See
 [Binwalk-NG setup, options and coverage](binwalk-ng.md). The legacy defaults and
 their prerequisites below remain unchanged.
 

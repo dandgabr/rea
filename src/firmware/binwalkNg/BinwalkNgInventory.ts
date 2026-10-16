@@ -7,6 +7,7 @@ import { AnalysisError } from "../../domain/analysisErrorBase.js";
 import { ProviderAdapterError } from "../../domain/providerAdapterError.js";
 import { jsonValueSchema } from "../../domain/jsonValue.js";
 import { AnalysisOutputError } from "../../domain/analysisErrorCore.js";
+import { firmwareToolUnavailable } from "../FirmwareCommand.js";
 import { prepareBinwalkNgSandbox } from "./BinwalkNgSandbox.js";
 import {
   probeBinwalkNgSandbox,
@@ -47,16 +48,42 @@ export const parseBinwalkNgInventory = (text: string) => {
       continue;
     }
     // Upstream display.rs pads two minimum-width columns to 35 Unicode scalars.
-    // Without visible padding a longer column is ambiguous; retain it raw.
+    // A long description overflows before the padded name column. Recover only
+    // that source-defined layout and keep any remaining ambiguity unparsed.
     const characters = Array.from(line),
       first = characters.slice(0, 35).join(""),
       second = characters.slice(35, 70).join("");
-    const description = first.trimEnd(),
+    let description = first.trimEnd(),
       name = second.trimEnd(),
       extractor = characters.slice(70).join("").trim();
+    const fixedWidthValid =
+      first.endsWith("  ") &&
+      second.endsWith("  ") &&
+      description.length > 0 &&
+      /^\S+$/u.test(name) &&
+      extractor.length > 0;
+    if (!fixedWidthValid && !line.includes("\u001b")) {
+      const utility = /([^\s]+)$/u.exec(line),
+        utilityOffset = utility?.index;
+      if (utility !== null && utilityOffset !== undefined) {
+        const prefix = Array.from(line.slice(0, utilityOffset)),
+          nameField = prefix.slice(-35),
+          descriptionField = prefix.slice(0, -35),
+          overflowDescription = descriptionField.join("").trimEnd(),
+          overflowName = nameField.join("").trim();
+        if (
+          overflowDescription.length > 35 &&
+          nameField.length === 35 &&
+          nameField.at(-1)?.trim() === "" &&
+          /^\S+$/u.test(overflowName)
+        ) {
+          description = overflowDescription;
+          name = overflowName;
+          extractor = utility[1] ?? "";
+        }
+      }
+    }
     if (
-      !first.endsWith("  ") ||
-      !second.endsWith("  ") ||
       description.length === 0 ||
       !/^\S+$/u.test(name) ||
       extractor.length === 0 ||
@@ -97,6 +124,73 @@ export const parseBinwalkNgInventory = (text: string) => {
         ? ("native_reported" as const)
         : ("partial" as const),
   };
+};
+
+interface BinwalkNgHelperCapability {
+  readonly name: string;
+  readonly expected_version: string;
+  readonly supported_signatures: readonly string[];
+}
+
+// Pinned Binwalk-NG 4.0.0 has data-dependent preferred extractors that are not
+// represented by `--list`. Keep this source-backed exception table explicit.
+const dynamicBinwalkNgExtractorSignatures: Readonly<
+  Record<string, readonly string[]>
+> = {
+  "7z": ["xz"],
+  sasquatch: ["squashfs"],
+  "sasquatch-v4be": ["squashfs"],
+  "sasquatch-be": ["squashfs"],
+};
+
+/** Require complete source-backed helper dispatch mappings before admission. */
+export const validateBinwalkNgHelperBindings = <
+  T extends BinwalkNgHelperCapability,
+>(
+  inventory: ReturnType<typeof parseBinwalkNgInventory>,
+  helpers: readonly T[],
+): T[] => {
+  if (helpers.length > 0 && inventory.inventory_coverage !== "native_reported")
+    throw firmwareToolUnavailable(
+      "binwalk-ng",
+      "extract_firmware",
+      "External helpers require a complete native format inventory to prove the full signature dispatch mapping",
+    );
+  const available = new Map<string, Set<string>>();
+  for (const format of inventory.formats) {
+    if (format.extractor === null || format.extractor === "Built-in") continue;
+    const signatures = available.get(format.extractor) ?? new Set<string>();
+    signatures.add(format.name);
+    available.set(format.extractor, signatures);
+  }
+  const configured = new Map<string, T>();
+  for (const helper of helpers) {
+    if (configured.has(helper.name))
+      throw firmwareToolUnavailable(
+        "binwalk-ng",
+        "extract_firmware",
+        `Duplicate admitted helper mapping: ${helper.name}`,
+      );
+    configured.set(helper.name, helper);
+  }
+  for (const helper of helpers) {
+    const declared = [...helper.supported_signatures].sort();
+    const permitted = new Set([
+      ...(available.get(helper.name) ?? []),
+      ...(dynamicBinwalkNgExtractorSignatures[helper.name] ?? []),
+    ]);
+    if (
+      declared.length === 0 ||
+      new Set(declared).size !== declared.length ||
+      [...permitted].sort().join("\0") !== declared.join("\0")
+    )
+      throw firmwareToolUnavailable(
+        "binwalk-ng",
+        "extract_firmware",
+        `Helper ${helper.name} capability list must exactly match the complete native and source-backed signature mapping`,
+      );
+  }
+  return [...helpers];
 };
 
 /** Actual version/list invocation under the identical selected producer policy, without a file subject. */
@@ -145,7 +239,7 @@ export const inspectBinwalkNgRuntime = async (context: {
   let identity: "unknown" | "changed" = "unknown";
   try {
     observed = await runBinwalkNgCommand(commandContext, ["--list"]);
-    if (observed.stdout.utf8Valid === false)
+    if (observed.stdout.invalidUtf8 === true)
       throw new AnalysisOutputError(
         "inspect_firmware_provider",
         "Native format inventory contains invalid UTF-8; retained source bytes cannot be normalized",

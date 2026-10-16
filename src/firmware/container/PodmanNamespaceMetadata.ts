@@ -111,7 +111,7 @@ const responseSchema = z.strictObject({
     .max(32)
     .optional(),
 });
-export type PodmanMetadataResponse = z.infer<typeof responseSchema>;
+type PodmanMetadataResponse = z.infer<typeof responseSchema>;
 export interface PodmanMetadataExecutionContext {
   readonly limiter: string;
   readonly cwd: string;
@@ -460,7 +460,7 @@ export const observePodmanNamespaceMetadata = async (context: {
     observation = { ...(observation as object), captured_output: captured };
     execution.retainObservation?.(observation);
     demand(
-      result.stdout.utf8Valid === true && result.stdout.bytes <= 65536,
+      result.stdout.invalidUtf8 !== true && result.stdout.bytes <= 65536,
       "Metadata response is invalid UTF8 or exceeds its64KiB representation budget",
     );
     const response = responseSchema.parse(JSON.parse(result.stdout.text));

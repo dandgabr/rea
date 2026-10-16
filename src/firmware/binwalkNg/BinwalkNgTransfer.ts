@@ -1,5 +1,6 @@
 import { Readable } from "node:stream";
 import type { SafeOutputTree } from "../../artifacts/SafeOutputTree.js";
+import type { BinwalkNgAggregateBudget } from "./BinwalkNgAggregateBudget.js";
 
 const MAGIC = Buffer.from("REABWNG1");
 const MAX_HEADER_BYTES = 16 * 1024;
@@ -86,7 +87,15 @@ type EndFrame = {
 };
 
 const parseFrame = (input: Buffer): FileFrame | EndFrame => {
-  const raw: unknown = JSON.parse(input.toString("utf8"));
+  let text: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(
+      input,
+    );
+  } catch (cause: unknown) {
+    throw new Error("Binwalk-NG transfer frame is not valid UTF-8", { cause });
+  }
+  const raw: unknown = JSON.parse(text);
   if (raw === null || typeof raw !== "object" || Array.isArray(raw))
     throw new Error("Binwalk-NG transfer frame must be an object");
   const value = raw as Record<string, unknown>;
@@ -119,6 +128,7 @@ export const consumeBinwalkNgTransfer = async (
     readonly maxBytes: number;
     readonly maxFiles: number;
     readonly maxEntries: number;
+    readonly aggregateBudget?: BinwalkNgAggregateBudget;
     readonly signal: AbortSignal;
   },
 ): Promise<{ readonly files: number; readonly bytes: number }> => {
@@ -165,6 +175,7 @@ export const consumeBinwalkNgTransfer = async (
       directories.add(parts.slice(0, index).join("/"));
     if (directories.size + files + 1 > limits.maxEntries)
       throw new Error("Binwalk-NG transfer exceeds aggregate entry budget");
+    limits.aggregateBudget?.admitTransfer(frame.path, frame.bytes);
     await tree.write(
       frame.path,
       Readable.from(input.readPayload(frame.bytes)),
@@ -175,5 +186,3 @@ export const consumeBinwalkNgTransfer = async (
     bytes += frame.bytes;
   }
 };
-
-export const binwalkNgTransferMagic = Buffer.from(MAGIC);

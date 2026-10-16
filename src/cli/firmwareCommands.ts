@@ -116,20 +116,15 @@ export const registerFirmwareCommands = (
     maxOutputBytes: extract.max_output_bytes,
     maxOutputFiles: extract.max_output_files,
   };
-  const unblobBudgetOptions = {
-    maxOutputBytes: extract.max_output_bytes.describe(
-      "Unblob only: staging file-byte budget",
-    ),
-    maxOutputFiles: extract.max_output_files.describe(
-      "Unblob only: staging entry budget",
-    ),
-  };
   cli.command(CLI_COMMANDS.inspectFirmwareRegions, {
     description:
       "Inspect default Binwalk3 or explicitly selected binwalk-ng signatures",
     args: z.object({ path }),
     options: z.object({
-      provider: z.enum(["binwalk", "binwalk-ng"]).default("binwalk"),
+      provider: z
+        .enum(["binwalk", "binwalk-ng"])
+        .default("binwalk")
+        .describe("Firmware signature provider to use for this inspection"),
       ...selectionOptions,
       ...scanOptions,
     }),
@@ -153,22 +148,42 @@ export const registerFirmwareCommands = (
   });
   cli.command(CLI_COMMANDS.extractFirmware, {
     description:
-      "Extract firmware with Unblob; Binwalk-NG extraction is unavailable in this release",
+      "Extract firmware with Unblob or explicitly configured Binwalk-NG helpers under bounded recursion",
     args: z.object(outputArgs),
-    options: z.object({
-      provider: z
-        .enum(["unblob", "binwalk-ng"])
-        .default("unblob")
-        .describe(
-          "Binwalk-NG is listed for explicit selection but returns capability-unavailable for extraction",
+    options: z
+      .object({
+        provider: z
+          .enum(["unblob", "binwalk-ng"])
+          .default("unblob")
+          .describe(
+            "Select default Unblob or caller-configured Binwalk-NG helper manifest",
+          ),
+        ...selectionOptions,
+        ...budgetOptions,
+        maxDepth: extract.max_depth.describe(
+          "Maximum recursive extraction depth",
         ),
-      ...selectionOptions,
-      ...unblobBudgetOptions,
-      maxDepth: extract.max_depth.describe(
-        "Unblob only: maximum recursive extraction depth",
+        ...scanOptions,
+        recursive: z
+          .boolean()
+          .optional()
+          .describe(
+            "Binwalk-NG only: analyze extracted children within the selected depth and output budgets",
+          ),
+      })
+      .refine(
+        (options) =>
+          options.provider === "binwalk-ng" ||
+          (options.searchAll === undefined &&
+            options.include === undefined &&
+            options.exclude === undefined &&
+            options.mmap === undefined &&
+            options.workers === undefined &&
+            options.recursive === undefined),
+        "Binwalk-NG extraction options require --provider binwalk-ng",
       ),
-    }),
     run: ({ args, options }) => {
+      const ngOptions = nativeOptions(options);
       return execute(CLI_COMMANDS.extractFirmware, "extract_firmware", {
         path: absoluteCallerPath(args.path),
         output_directory: absoluteCallerPath(args.outputDirectory),
@@ -177,7 +192,15 @@ export const registerFirmwareCommands = (
         max_output_bytes: options.maxOutputBytes,
         max_output_files: options.maxOutputFiles,
         ...(options.provider === "binwalk-ng"
-          ? { provider_id: "binwalk-ng" }
+          ? {
+              provider_id: "binwalk-ng",
+              options: {
+                ...ngOptions,
+                ...(options.recursive === undefined
+                  ? {}
+                  : { recursive: options.recursive }),
+              },
+            }
           : {}),
       });
     },
@@ -186,7 +209,10 @@ export const registerFirmwareCommands = (
     description: "Carve native known/unknown regions with binwalk-ng",
     args: z.object(outputArgs),
     options: z.object({
-      provider: z.literal("binwalk-ng").default("binwalk-ng"),
+      provider: z
+        .literal("binwalk-ng")
+        .default("binwalk-ng")
+        .describe("Use the explicitly selected Binwalk-NG carving provider"),
       ...selectionOptions,
       ...scanOptions,
       ...budgetOptions,
@@ -207,7 +233,10 @@ export const registerFirmwareCommands = (
       "Measure native binwalk-ng Shannon bits per byte and optionally publish its PNG",
     args: z.object({ path }),
     options: z.object({
-      provider: z.literal("binwalk-ng").default("binwalk-ng"),
+      provider: z
+        .literal("binwalk-ng")
+        .default("binwalk-ng")
+        .describe("Use Binwalk-NG to measure firmware entropy"),
       ...selectionOptions,
       ...budgetOptions,
       outputDirectory: localPathStringSchema
@@ -230,7 +259,10 @@ export const registerFirmwareCommands = (
     description:
       "Inspect native binwalk-ng formats and selected runtime identity",
     options: z.object({
-      provider: z.literal("binwalk-ng").default("binwalk-ng"),
+      provider: z
+        .literal("binwalk-ng")
+        .default("binwalk-ng")
+        .describe("Inspect the selected Binwalk-NG provider runtime"),
     }),
     run: ({ options }) =>
       execute(

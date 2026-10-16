@@ -55,7 +55,9 @@ it("keeps Binwalk-NG-only tools unavailable while default providers remain enabl
   expect(entry("carve_firmware", status(), policy)).toMatchObject({
     available: false,
     reason: "provider_missing",
-    remediation: expect.stringContaining("Extraction remains unavailable"),
+    remediation: expect.stringContaining(
+      "External-helper extraction also requires exact helper names",
+    ),
   });
   expect(
     entry("carve_firmware", status(), {

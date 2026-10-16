@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { readFile, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { readFile, readdir, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, it, vi } from "vitest";
 import { createTestTempDirectory } from "../../../tests/fixtures/temporaryDirectory.js";
@@ -161,6 +162,59 @@ it("preserves durably published files when commit reports a later cleanup failur
     await owned?.rollback();
   }
 });
+
+it.each(["symlink" as const, "special" as const])(
+  "records %s artifacts as unpublished metadata and never copies them into caller output",
+  async (kind) => {
+    const root = await createTestTempDirectory(
+      "rea-ng-nonregular-publication-",
+    );
+    const target = join(root, "target.bin");
+    const path = join(root, kind === "symlink" ? "alias.bin" : "pipe.bin");
+    const outputDirectory = join(root, "output");
+    await writeFile(target, "must not follow or publish");
+    if (kind === "symlink") await symlink("target.bin", path);
+    else
+      execFileSync("/usr/bin/mkfifo", [path], {
+        env: { PATH: "/usr/bin:/bin" },
+      });
+    let owned: SafeOutputTree | undefined;
+    try {
+      const result = await publishBinwalkNgFiles({
+        outputDirectory,
+        entries: [
+          {
+            path,
+            relativePath: kind === "symlink" ? "alias.bin" : "pipe.bin",
+            size: 0,
+            kind,
+            linkTarget: kind === "symlink" ? "target.bin" : null,
+          },
+        ],
+        signal: new AbortController().signal,
+        operation: "extract_firmware",
+        ownTree: (tree) => {
+          owned = tree;
+        },
+        releaseTree: () => {
+          owned = undefined;
+        },
+      });
+      expect(result.files).toEqual([]);
+      expect(result.unpublished_entries).toEqual([
+        {
+          relative_path: kind === "symlink" ? "alias.bin" : "pipe.bin",
+          kind,
+          link_target: kind === "symlink" ? "target.bin" : null,
+        },
+      ]);
+      expect(await readdir(outputDirectory)).toEqual([]);
+      expect(owned).toBeUndefined();
+    } finally {
+      await owned?.rollback();
+    }
+  },
+);
 
 it("delivers established private PNG facts to their observation owner before a descriptor close failure", async () => {
   const root = await createTestTempDirectory("rea-ng-png-close-");

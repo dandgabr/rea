@@ -136,18 +136,23 @@ try {
     stdio: config.transfer ? ['inherit', 2, 2] : 'inherit',
   });
   if (result.error) { process.stderr.write('Binwalk-NG confined command could not start\n'); process.exit(125); }
+  const pidsPath = path.join(directory, 'cgroup.procs');
+  const residualPids = () => fs.readFileSync(pidsPath, 'utf8').trim().split(/\s+/).filter((pid) => pid && Number(pid) !== process.pid);
+  const residual = residualPids();
+  if (residual.length > 0) {
+    // PID-by-PID signaling has an unavoidable reuse race after /proc identity
+    // checks. Exit the unit and let systemd's exact KillMode=control-group
+    // ownership terminate every remaining member before --wait returns.
+    fail('confined command left descendants; cleanup delegated to systemd control-group owner (' + residual.join(',') + ')');
+  }
   if (result.status !== 0) process.exit(result.status === null ? 125 : result.status);
   if (!config.transfer) process.exit(0);
   (async () => {
-    const cgroup = path.resolve('/sys/fs/cgroup', '.' + relative);
-    const taskPath = path.join(cgroup, 'pids.current');
-    let finalTasks = Number(fs.readFileSync(taskPath, 'utf8').trim());
     const taskDeadline = Date.now() + 2_000;
-    while (finalTasks !== baselineTasks && Date.now() < taskDeadline) {
+    while (residualPids().length > 0 && Date.now() < taskDeadline) {
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
-      finalTasks = Number(fs.readFileSync(taskPath, 'utf8').trim());
     }
-    if (finalTasks !== baselineTasks) fail('task count changed from ' + baselineTasks + ' to ' + finalTasks);
+    if (residualPids().length > 0) fail('cgroup contains a child process after producer completion');
     const hashFile = async (file) => {
       const hash = require('node:crypto').createHash('sha256');
       let size = 0;
@@ -319,6 +324,8 @@ export const binwalkNgSystemdRunArguments = (input: {
     `--property=CPUQuota=${limits.cpuQuotaPercent}%`,
     `--property=RuntimeMaxSec=${limits.runtimeMs / 1000}s`,
     "--property=KillMode=control-group",
+    "--property=TimeoutStopSec=2s",
+    "--property=SendSIGKILL=yes",
     "--property=OOMPolicy=kill",
     "--property=UMask=0077",
     ...(quota === undefined

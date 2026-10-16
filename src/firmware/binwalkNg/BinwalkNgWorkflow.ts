@@ -30,6 +30,7 @@ import {
 import {
   probeBinwalkNgSandbox,
   runBinwalkNgCommand,
+  verifyBinwalkNgHelperVersions,
 } from "./BinwalkNgCommand.js";
 import { BINWALK_NG_CGROUP_LIMITS } from "./BinwalkNgSystemdBoundary.js";
 import {
@@ -37,6 +38,11 @@ import {
   parseBinwalkNgEntropy,
 } from "./BinwalkNgReports.js";
 import { prepareBinwalkNgSandbox } from "./BinwalkNgSandbox.js";
+import {
+  parseBinwalkNgInventory,
+  validateBinwalkNgHelperBindings,
+} from "./BinwalkNgInventory.js";
+import { BinwalkNgAggregateBudget } from "./BinwalkNgAggregateBudget.js";
 
 export interface BinwalkNgWorkflowContext {
   readonly request: BinwalkNgFileRequest;
@@ -156,7 +162,22 @@ export const runBinwalkNgWorkflow = async (
   const maxStagingEntries = maxFiles + 8;
   const transferFiles = maxStagingEntries + 2;
   const transferEntries = transferFiles + 32;
-  const transferBytes = maxBytes + FIRMWARE_LIMITS.reportBytes;
+  // Every admitted recursive child is one previously counted artifact file.
+  // Reports therefore have at most one file per artifact plus the root pass.
+  const maxPasses = maxFiles + 1;
+  const aggregateBudget = new BinwalkNgAggregateBudget({
+    artifactBytes: maxBytes,
+    artifactFiles: maxFiles,
+    reportBytes: FIRMWARE_LIMITS.reportBytes,
+    reportFiles: maxPasses,
+    // Per pass, allow the existing 32 nested native directories plus its
+    // report/artifact roots; all are tracked across separate pass trees.
+    // Include up to three host snapshot entries (shared children root, child
+    // directory and file) per admitted recursive child.
+    entries: maxFiles * 4 + maxPasses * 36 + 8,
+    childSnapshotBytes: maxBytes,
+    childSnapshotFiles: maxFiles,
+  });
   const analyses: Analysis[] = [];
   const runs: JsonValue[] = [];
   let reportBytes = 0;
@@ -248,18 +269,54 @@ export const runBinwalkNgWorkflow = async (
       });
       const reportPath = join(transferPassRoot, "reports", `${pass}.json`);
       const pngPath = join(transferPassRoot, "entropy.png");
+      const remainingTransferBytes =
+        aggregateBudget.remainingArtifactBytes +
+        aggregateBudget.remainingReportBytes;
+      const remainingTransferFiles =
+        aggregateBudget.remainingArtifactFiles + (maxPasses - runs.length);
       const baseCommandContext = {
         sandbox,
         operation: request.operation,
         signal,
-        maxOutputBytes: maxBytes,
+        maxOutputBytes: remainingTransferBytes,
         maxOutputFiles: maxStagingEntries,
+        workspaceQuota: {
+          bytes: remainingTransferBytes,
+          inodes: Math.max(4, remainingTransferFiles + 36),
+        },
         retainCleanup: context.retainCleanup,
         ...(context.launcher === undefined
           ? {}
           : { launcher: context.launcher }),
       };
       const versionExecution = await probeBinwalkNgSandbox(baseCommandContext);
+      let helperInventory:
+        | ReturnType<typeof parseBinwalkNgInventory>
+        | undefined;
+      let helperInventoryExecution:
+        | Awaited<ReturnType<typeof runBinwalkNgCommand>>
+        | undefined;
+      let helperVersionExecutions:
+        | Awaited<ReturnType<typeof verifyBinwalkNgHelperVersions>>
+        | undefined;
+      if (request.operation === "extract_firmware") {
+        helperInventoryExecution = await runBinwalkNgCommand(
+          baseCommandContext,
+          ["--list"],
+        );
+        if (helperInventoryExecution.stdout.invalidUtf8 === true)
+          throw new AnalysisOutputError(
+            request.operation,
+            "Native helper inventory contains invalid UTF-8",
+          );
+        helperInventory = parseBinwalkNgInventory(
+          helperInventoryExecution.stdout.text,
+        );
+        validateBinwalkNgHelperBindings(helperInventory, sandbox.helpers);
+        helperVersionExecutions =
+          await verifyBinwalkNgHelperVersions(baseCommandContext);
+        await recheckRuntime(sandbox, signal, request.operation, context.scope);
+      }
       const commandContext = {
         ...baseCommandContext,
         transfer: {
@@ -274,11 +331,14 @@ export const runBinwalkNgWorkflow = async (
               ? [`artifacts/${pass}`]
               : []),
           ],
-          maxBytes: transferBytes,
+          maxBytes:
+            remainingTransferBytes +
+            (request.operation === "inspect_firmware_entropy"
+              ? FIRMWARE_LIMITS.reportBytes
+              : 0),
           maxFiles: transferFiles,
           maxEntries: transferEntries,
-          workspaceBytes: transferBytes,
-          workspaceInodes: transferEntries + 4,
+          aggregateBudget,
         },
       };
       const nativeOutput = `/work/artifacts/${pass}`;
@@ -350,6 +410,13 @@ export const runBinwalkNgWorkflow = async (
           report: raw,
           execution,
           version_execution: versionExecution,
+          ...(helperInventory === undefined
+            ? {}
+            : {
+                helper_inventory: helperInventory,
+                helper_inventory_execution: helperInventoryExecution,
+                helper_version_executions: helperVersionExecutions,
+              }),
           sandbox,
           input: { sha256: file.sha256, size: file.size, depth: file.depth },
         }),
@@ -567,6 +634,7 @@ export const runBinwalkNgWorkflow = async (
           });
           continue;
         }
+        aggregateBudget.admitChildSnapshot(entry.size);
         const childRoot = join(
           context.root,
           "children",

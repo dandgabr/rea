@@ -1,5 +1,8 @@
 import { expect, it } from "vitest";
-import { parseBinwalkNgInventory } from "./BinwalkNgInventory.js";
+import {
+  parseBinwalkNgInventory,
+  validateBinwalkNgHelperBindings,
+} from "./BinwalkNgInventory.js";
 const listing = (
   description = "gzip compressed data",
   name = "gzip",
@@ -41,13 +44,12 @@ it("preserves native format columns and unknown search-all/dependency facts when
 });
 it("retains ambiguous presentation lines and partial inventory without guessing a signature name", () => {
   const line = "native description exceeds the minimum column width";
-  const text = listing(line);
+  const name = "signature_name_that_exceeds_column_width";
+  const text = listing(line, name);
   const result = parseBinwalkNgInventory(text);
   expect(result.formats).toEqual([]);
   expect(result.inventory_coverage).toBe("partial");
-  expect(result.unparsed_lines).toEqual([
-    line + "gzip".padEnd(35) + "Built-in",
-  ]);
+  expect(result.unparsed_lines).toEqual([line + name.padEnd(35) + "Built-in"]);
   expect(result.reported_signature_count).toBe(1);
   expect(() =>
     parseBinwalkNgInventory(
@@ -94,4 +96,89 @@ it("parses the native fixed-width columns when descriptions contain repeated int
       requires_search_all: null,
     },
   ]);
+});
+
+it("parses source-formatted inventory rows whose descriptions overflow the first column", () => {
+  const inventory = parseBinwalkNgInventory(
+    listing(
+      "Broadcom ProgramStore firmware image",
+      "program_store",
+      "Built-in",
+    ),
+  );
+  expect(inventory.inventory_coverage).toBe("native_reported");
+  expect(inventory.formats).toEqual([
+    {
+      name: "program_store",
+      description: "Broadcom ProgramStore firmware image",
+      extractor: "Built-in",
+      requires_search_all: null,
+    },
+  ]);
+});
+
+it("admits explicitly configured helper subsets and source-backed dynamic mappings", () => {
+  const inventory = parseBinwalkNgInventory(
+    listing("7z archive", "7z", "sevenzip"),
+  );
+  const helper = {
+    name: "sevenzip",
+    expected_version: "7-Zip 26.00",
+    supported_signatures: ["7z"],
+  };
+  expect(validateBinwalkNgHelperBindings(inventory, [helper])).toEqual([
+    helper,
+  ]);
+  expect(validateBinwalkNgHelperBindings(inventory, [])).toEqual([]);
+  expect(() =>
+    validateBinwalkNgHelperBindings(inventory, [
+      { ...helper, supported_signatures: ["gzip"] },
+    ]),
+  ).toThrow("complete native and source-backed signature mapping");
+  expect(() =>
+    validateBinwalkNgHelperBindings(inventory, [
+      helper,
+      { ...helper, name: "unexpected" },
+    ]),
+  ).toThrow("complete native and source-backed signature mapping");
+  expect(
+    validateBinwalkNgHelperBindings(
+      parseBinwalkNgInventory(listing("xz stream", "xz", "Built-in")),
+      [{ ...helper, name: "7z", supported_signatures: ["xz"] }],
+    ),
+  ).toHaveLength(1);
+});
+
+it("requires the complete helper signature set including dynamic XZ dispatch", () => {
+  const inventory = parseBinwalkNgInventory(
+    listing("7zip archive", "7zip", "7z"),
+  );
+  expect(() =>
+    validateBinwalkNgHelperBindings(inventory, [
+      {
+        name: "7z",
+        expected_version: "7-Zip 26.00",
+        supported_signatures: ["7zip"],
+      },
+    ]),
+  ).toThrow("complete native and source-backed signature mapping");
+});
+
+it("rejects helper admission when the native inventory is partial", () => {
+  const text = `${listing("7z archive", "7z", "sevenzip")}\nambiguous native display row`;
+  const inventory = parseBinwalkNgInventory(text);
+  expect(inventory.inventory_coverage).toBe("partial");
+  const helper = {
+    name: "sevenzip",
+    expected_version: "7-Zip 26.00",
+    supported_signatures: ["7z"],
+  };
+  expect(() =>
+    validateBinwalkNgHelperBindings(inventory, [
+      { ...helper, supported_signatures: ["unknown-format"] },
+    ]),
+  ).toThrow("complete native format inventory");
+  expect(() => validateBinwalkNgHelperBindings(inventory, [helper])).toThrow(
+    "complete native format inventory",
+  );
 });

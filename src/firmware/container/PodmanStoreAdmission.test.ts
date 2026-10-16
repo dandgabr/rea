@@ -569,12 +569,6 @@ it("retains actual malformed UTF-8 metadata capture while refusing supported nor
       capturedOutput: {
         stdout_utf8_valid: false,
         stdout_bytes: 21,
-        stdout_sha256: digest(
-          Buffer.concat([
-            Buffer.from("podman version 5.8.7"),
-            Buffer.from([0xff]),
-          ]),
-        ),
       },
     });
   } finally {
@@ -795,7 +789,6 @@ it("retains actual invalid UTF-8 parser bytes instead of treating invalid DBConf
     capturedOutput: {
       stdout_utf8_valid: false,
       stdout_bytes: 1,
-      stdout_sha256: digest(Buffer.from([255])),
     },
   });
   await f.scope.close();

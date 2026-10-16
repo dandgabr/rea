@@ -456,7 +456,7 @@ const workflowAvailabilityFor = ({
         : {
             reason: "provider_missing",
             remediation:
-              "Configure the admitted native Binwalk-NG runtime with absolute REA_BINWALK_NG_COMMAND and REA_BINWALK_NG_RUNTIME_MANIFEST paths plus bubblewrap, prlimit, tmpfs and a delegated user-systemd manager. Extraction remains unavailable because external helper identity is not admitted.",
+              "Configure the admitted native Binwalk-NG runtime with absolute REA_BINWALK_NG_COMMAND and REA_BINWALK_NG_RUNTIME_MANIFEST paths plus bubblewrap, prlimit, tmpfs and a delegated user-systemd manager. External-helper extraction also requires exact helper names, paths, SHA-256 values, version identities and supported signatures in the pinned runtime manifest.",
           };
     if (
       name === "inspect_firmware_entropy" ||

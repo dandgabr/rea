@@ -13,8 +13,28 @@ const pathSchema = z
   .string()
   .min(1)
   .refine((path) => isAbsolute(path) && !path.includes("\0"));
+const helperNameSchema = z
+  .string()
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._+-]*$/u)
+  .refine((name) => name !== "." && name !== "..")
+  .refine((name) => !name.includes("/") && !name.includes("\\"))
+  .refine((name) => name !== "binwalk");
 const manifestSchema = z.strictObject({
   profile: z.literal("binwalk-ng-4.0.0"),
+  helpers: z
+    .array(
+      z.strictObject({
+        name: helperNameSchema,
+        source: pathSchema,
+        sha256: z.string().regex(/^[a-f0-9]{64}$/u),
+        version_arguments: z.array(
+          z.string().refine((arg) => !arg.includes("\0")),
+        ),
+        expected_version: z.string().min(1),
+        supported_signatures: z.array(z.string().min(1)).min(1),
+      }),
+    )
+    .default([]),
   mounts: z.array(
     z.strictObject({
       source: pathSchema,
@@ -39,7 +59,11 @@ const allowedDestination = (destination: string, kind: string) => {
   )
     return false;
   if (destination === "/runtime/bin/binwalk") return false;
-  if (kind === "support") return destination.startsWith("/runtime/support/");
+  if (kind === "support")
+    return (
+      destination.startsWith("/runtime/support/") ||
+      destination.startsWith("/usr/libexec/7zip/")
+    );
   if (kind === "library")
     return ["/lib/", "/lib64/", "/usr/lib/", "/usr/lib64/"].some((prefix) =>
       destination.startsWith(prefix),
@@ -166,12 +190,16 @@ export const prepareBinwalkNgSandbox = async (input: {
     input.signal?.throwIfAborted();
     if (!allowedDestination(mount.destination, mount.kind))
       throw unavailable(`Unsafe runtime destination: ${mount.destination}`);
+    if (mount.kind === "executable")
+      throw unavailable(
+        "Executable mounts must use the helper identity mapping so PATH cannot expose unbound commands",
+      );
     if (destinations.has(mount.destination))
       throw unavailable(`Duplicate runtime destination: ${mount.destination}`);
     destinations.add(mount.destination);
     const identified = await identifyBinwalkNgRuntimeFile(
       mount.source,
-      mount.kind === "executable",
+      false,
       input,
     );
     if (inside(workRoot, identified.path))
@@ -184,6 +212,57 @@ export const prepareBinwalkNgSandbox = async (input: {
       destination: mount.destination,
       kind: mount.kind,
       sha256: identified.sha256,
+    });
+  }
+  const helperNames = new Set<string>();
+  const helpers = [];
+  for (const helper of parsed.data.helpers) {
+    input.signal?.throwIfAborted();
+    if (helperNames.has(helper.name))
+      throw unavailable(`Duplicate helper command name: ${helper.name}`);
+    helperNames.add(helper.name);
+    const destination = posix.join("/runtime/bin", helper.name);
+    if (
+      posix.normalize(destination) !== destination ||
+      posix.dirname(destination) !== "/runtime/bin" ||
+      posix.basename(destination) !== helper.name
+    )
+      throw unavailable(
+        `Helper ${helper.name} must resolve to one direct child of /runtime/bin`,
+      );
+    if (destinations.has(destination))
+      throw unavailable(`Duplicate runtime destination: ${destination}`);
+    destinations.add(destination);
+    const identified = await identifyBinwalkNgRuntimeFile(
+      helper.source,
+      true,
+      input,
+    );
+    if (identified.sha256 !== helper.sha256)
+      throw unavailable(
+        `Selected helper ${helper.name} digest does not match its declared identity`,
+      );
+    if (inside(workRoot, identified.path))
+      throw unavailable(
+        "Helper executables cannot also be exposed through writable work mounts",
+      );
+    runtimeMounts.push({
+      configured_source: helper.source,
+      source: identified.path,
+      destination,
+      kind: "executable" as const,
+      sha256: identified.sha256,
+    });
+    helpers.push({
+      name: helper.name,
+      configured_source: helper.source,
+      source: identified.path,
+      destination,
+      sha256: identified.sha256,
+      version_arguments: helper.version_arguments,
+      expected_version: helper.expected_version,
+      supported_signatures: helper.supported_signatures,
+      source_provenance: null,
     });
   }
   if (inside(workRoot, command.path))
@@ -234,7 +313,7 @@ export const prepareBinwalkNgSandbox = async (input: {
     "/work/tmp",
     "--setenv",
     "PATH",
-    "/runtime/bin:/usr/bin:/bin",
+    "/runtime/bin",
     "--setenv",
     "LC_ALL",
     "C",
@@ -255,6 +334,7 @@ export const prepareBinwalkNgSandbox = async (input: {
     systemdRun,
     manifest: manifestFile,
     runtime_mounts: runtimeMounts,
+    helpers,
     input_path: inputDestination,
     work_root: workRoot,
     policy_arguments: policyArguments,

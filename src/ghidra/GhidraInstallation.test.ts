@@ -41,7 +41,6 @@ const WINDOWS_INSTALL = "C:\\tools\\ghidra_12.1.4_PUBLIC";
 const WINDOWS_PROPERTIES = `${WINDOWS_INSTALL}\\Ghidra\\application.properties`;
 const WINDOWS_HEADLESS = `${WINDOWS_INSTALL}\\support\\analyzeHeadless.bat`;
 const WINDOWS_DECOMPILER = `${WINDOWS_INSTALL}\\Ghidra\\Features\\Decompiler\\os\\win_x86_64\\decompile.exe`;
-
 const headerProbe = (bytes: Buffer): GhidraExecutableHeaderProbe => ({
   bytes,
   size: bytes.length,

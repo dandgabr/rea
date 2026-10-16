@@ -16,6 +16,7 @@ import {
 } from "../FirmwareCommand.js";
 import { FIRMWARE_LIMITS } from "../FirmwareRelease.js";
 import { consumeBinwalkNgTransfer } from "./BinwalkNgTransfer.js";
+import type { BinwalkNgAggregateBudget } from "./BinwalkNgAggregateBudget.js";
 import type { SafeOutputTree } from "../../artifacts/SafeOutputTree.js";
 import type { Readable } from "node:stream";
 import type { prepareBinwalkNgSandbox } from "./BinwalkNgSandbox.js";
@@ -33,16 +34,20 @@ export interface BinwalkNgCommandContext {
   readonly maxOutputBytes: number;
   readonly maxOutputFiles: number;
   readonly launcher?: FirmwareLauncher;
+  readonly executable?: string;
   readonly reportPath?: string;
   readonly pngPath?: string;
+  readonly workspaceQuota?: {
+    readonly bytes: number;
+    readonly inodes: number;
+  };
   readonly transfer?: {
     readonly tree: SafeOutputTree;
     readonly paths: readonly string[];
     readonly maxBytes: number;
     readonly maxFiles: number;
     readonly maxEntries: number;
-    readonly workspaceBytes: number;
-    readonly workspaceInodes: number;
+    readonly aggregateBudget?: BinwalkNgAggregateBudget;
   };
   retainCleanup(supervisor: ProviderProcessSupervisor): void;
 }
@@ -53,12 +58,19 @@ export const runBinwalkNgCommand = async (
   args: readonly string[],
 ) => {
   const { sandbox } = context;
+  const executable = context.executable ?? "/runtime/bin/binwalk";
+  if (!/^\/runtime\/bin\/[A-Za-z0-9][A-Za-z0-9._+-]*$/u.test(executable))
+    throw firmwareToolUnavailable(
+      "binwalk-ng",
+      context.operation,
+      "A child executable must resolve to one exact admitted runtime helper path",
+    );
   return runFirmwareCommand({
     engine: "binwalk-ng",
     operation: context.operation,
     command: sandbox.bubblewrap.path,
     limiter: sandbox.limiter.path,
-    args: [...sandbox.policy_arguments, "--", "/runtime/bin/binwalk", ...args],
+    args: [...sandbox.policy_arguments, "--", executable, ...args],
     cwd: sandbox.work_root,
     environment: {},
     signal: context.signal,
@@ -80,6 +92,9 @@ export const runBinwalkNgCommand = async (
               maxBytes: context.transfer!.maxBytes,
               maxFiles: context.transfer!.maxFiles,
               maxEntries: context.transfer!.maxEntries,
+              ...(context.transfer!.aggregateBudget === undefined
+                ? {}
+                : { aggregateBudget: context.transfer!.aggregateBudget }),
               signal: context.signal,
             }).then(() => undefined),
         }),
@@ -106,7 +121,7 @@ export const runBinwalkNgCommand = async (
       const gid = process.getgid?.();
       if (
         uid === undefined ||
-        (context.transfer !== undefined && gid === undefined)
+        (context.workspaceQuota !== undefined && gid === undefined)
       )
         throw firmwareToolUnavailable(
           "binwalk-ng",
@@ -133,12 +148,12 @@ export const runBinwalkNgCommand = async (
           runId: options.runId,
           cwd: sandbox.work_root,
           command: process.execPath,
-          ...(context.transfer === undefined
+          ...(context.workspaceQuota === undefined
             ? {}
             : {
                 workspaceQuota: {
-                  bytes: context.transfer.workspaceBytes,
-                  inodes: context.transfer.workspaceInodes,
+                  bytes: context.workspaceQuota.bytes,
+                  inodes: context.workspaceQuota.inodes,
                   uid,
                   gid: gid!,
                 },
@@ -148,13 +163,17 @@ export const runBinwalkNgCommand = async (
             workRoot: sandbox.work_root,
             command: options.command,
             commandArguments: providerArguments,
-            ...(context.transfer === undefined
+            ...(context.workspaceQuota === undefined
               ? {}
               : {
                   workspaceQuota: {
-                    bytes: context.transfer.workspaceBytes,
-                    inodes: context.transfer.workspaceInodes,
+                    bytes: context.workspaceQuota.bytes,
+                    inodes: context.workspaceQuota.inodes,
                   },
+                }),
+            ...(context.transfer === undefined
+              ? {}
+              : {
                   transfer: {
                     paths: context.transfer.paths,
                     maxBytes: context.transfer.maxBytes,
@@ -213,4 +232,48 @@ export const probeBinwalkNgSandbox = async (
       `The exact bubblewrap policy could not launch the selected runtime; no fallback was attempted: ${cause instanceof Error ? cause.message : String(cause)}`,
     );
   }
+};
+
+/** Run each configured version probe through the same quota, namespace and ownership boundary. */
+export const verifyBinwalkNgHelperVersions = async (
+  context: BinwalkNgCommandContext,
+) => {
+  const observed = [];
+  const { transfer: _transfer, ...helperContext } = context;
+  for (const helper of context.sandbox.helpers) {
+    context.signal.throwIfAborted();
+    const result = await runBinwalkNgCommand(
+      {
+        ...helperContext,
+        executable: helper.destination,
+        maxOutputBytes: Math.min(context.maxOutputBytes, 8 * 1024 * 1024),
+      },
+      helper.version_arguments,
+    );
+    // Version commands may include environment-specific details (locale,
+    // loaded plugin paths, CPU/thread counts). Bind to the stable first
+    // non-empty identity line while retaining the full execution evidence.
+    const actual =
+      result.stdout.text
+        .split(/\r?\n/u)
+        .map((line) => line.trim())
+        .find((line) => line.length > 0) ?? "";
+    if (
+      result.stdout.invalidUtf8 === true ||
+      actual !== helper.expected_version
+    )
+      throw firmwareToolUnavailable(
+        "binwalk-ng",
+        context.operation,
+        `Helper ${helper.name} version identity did not match the selected runtime manifest`,
+      );
+    observed.push({
+      name: helper.name,
+      path: helper.source,
+      sha256: helper.sha256,
+      version: actual,
+      execution: result,
+    });
+  }
+  return observed;
 };

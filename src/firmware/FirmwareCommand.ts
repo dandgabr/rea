@@ -4,8 +4,9 @@ import {
 } from "../domain/analysisErrorBase.js";
 import { projectAnalysisError } from "../domain/analysisErrorProjection.js";
 import type { ArtifactResourceScope } from "../artifacts/ArtifactResourceScope.js";
+import { createHash } from "node:crypto";
 import { randomUUID } from "node:crypto";
-import type { Readable } from "node:stream";
+import { Readable } from "node:stream";
 import { access, lstat, realpath, stat } from "node:fs/promises";
 import { constants } from "node:fs";
 import { isAbsolute } from "node:path";
@@ -193,7 +194,6 @@ export const runFirmwareCommand = async (context: {
       NO_COLOR: "1",
     },
   });
-  let diagnosticTruncated = false;
   const supervisor = new ProviderProcessSupervisor(
     {
       ...spawned,
@@ -214,46 +214,64 @@ export const runFirmwareCommand = async (context: {
         context.limitProfile === "metadata-observer"
           ? 65536
           : FIRMWARE_LIMITS.diagnosticBytes,
-      onDiagnostic: (event) => {
-        if (event.type === "output" && event.truncated === true)
-          diagnosticTruncated = true;
-      },
     },
   );
+  let protocolStdoutObservedBytes = 0;
   const capture = (): AnalysisCapturedOutput => {
     const snapshot = supervisor.snapshot();
+    const stdoutBytes = Buffer.from(snapshot.stdout.text, "utf8");
+    const stderrBytes = Buffer.from(snapshot.stderr.text, "utf8");
+    const stdoutUtf8Valid = snapshot.stdout.invalidUtf8 !== true;
+    const stderrUtf8Valid = snapshot.stderr.invalidUtf8 !== true;
+    const protocolStdout = context.protocolStdout !== undefined;
     return {
       stdout: snapshot.stdout.text,
       stderr: snapshot.stderr.text,
       truncated: snapshot.diagnosticTruncated ?? false,
-      stdout_bytes: snapshot.stdout.bytes,
+      ...(protocolStdout
+        ? { stdout_capture: "protocol" as const }
+        : {
+            stdout_capture: "diagnostic" as const,
+            stdout_bytes: snapshot.stdout.bytes,
+            stdout_observed_bytes: snapshot.stdout.observedBytes,
+            stdout_utf8_valid: stdoutUtf8Valid,
+            ...(stdoutUtf8Valid &&
+            stdoutBytes.byteLength === snapshot.stdout.bytes
+              ? {
+                  stdout_sha256: createHash("sha256")
+                    .update(stdoutBytes)
+                    .digest("hex"),
+                }
+              : {}),
+          }),
       stderr_bytes: snapshot.stderr.bytes,
-      stdout_observed_bytes: snapshot.stdout.observedBytes,
+      ...(protocolStdout
+        ? { stdout_observed_bytes: protocolStdoutObservedBytes }
+        : {}),
       stderr_observed_bytes: snapshot.stderr.observedBytes,
       exit_code: snapshot.exitCode ?? null,
       signal: snapshot.signal ?? null,
-      ...(snapshot.stdout.sha256 === undefined
-        ? {}
-        : { stdout_sha256: snapshot.stdout.sha256 }),
-      ...(snapshot.stderr.sha256 === undefined
-        ? {}
-        : { stderr_sha256: snapshot.stderr.sha256 }),
-      ...(snapshot.stdout.utf8Valid === undefined
-        ? {}
-        : { stdout_utf8_valid: snapshot.stdout.utf8Valid }),
-      ...(snapshot.stderr.utf8Valid === undefined
-        ? {}
-        : { stderr_utf8_valid: snapshot.stderr.utf8Valid }),
+      stderr_utf8_valid: stderrUtf8Valid,
+      ...(stderrUtf8Valid && stderrBytes.byteLength === snapshot.stderr.bytes
+        ? {
+            stderr_sha256: createHash("sha256")
+              .update(stderrBytes)
+              .digest("hex"),
+          }
+        : {}),
       command: context.command,
       arguments: [...context.args],
       resource_limiter: context.limiter,
     };
   };
   const checkDiagnostics = () => {
-    if (diagnosticTruncated) {
+    const snapshot = supervisor.snapshot();
+    if (snapshot.diagnosticTruncated || snapshot.outputIncomplete) {
       throw new AnalysisOutputError(
         operation,
-        `Tool diagnostics exceeded the ${FIRMWARE_LIMITS.diagnosticBytes}-byte capture budget`,
+        snapshot.outputIncomplete
+          ? "Tool output was incomplete and cannot be interpreted as a complete result"
+          : `Tool diagnostics exceeded the ${FIRMWARE_LIMITS.diagnosticBytes}-byte capture budget`,
         {
           capturedOutput: capture(),
         },
@@ -268,7 +286,19 @@ export const runFirmwareCommand = async (context: {
       : spawned.process.stdout === null
         ? Promise.reject(new Error("Provider omitted protocol stdout"))
         : context
-            .protocolStdout(spawned.process.stdout)
+            .protocolStdout(
+              Readable.from(
+                (async function* () {
+                  for await (const value of spawned.process.stdout!) {
+                    const chunk = Buffer.isBuffer(value)
+                      ? value
+                      : Buffer.from(value);
+                    protocolStdoutObservedBytes += chunk.byteLength;
+                    yield chunk;
+                  }
+                })(),
+              ),
+            )
             .catch((cause: unknown) => {
               protocolFailure = cause;
               throw cause;
@@ -297,9 +327,19 @@ export const runFirmwareCommand = async (context: {
     while (!(await supervisor.waitForOutputClose(100))) {
       if (protocolFailure !== undefined) {
         const observed = supervisor.snapshot();
-        throw new Error(
-          `${protocolFailure instanceof Error ? protocolFailure.message : String(protocolFailure)}; protocol launcher exit=${observed.exitCode ?? "unknown"}; stderr=${observed.stderr.text}`,
-        );
+        throw new ProviderAdapterError(engine, operation, {
+          cause: protocolFailure,
+          diagnostics: {
+            reason:
+              protocolFailure instanceof Error
+                ? protocolFailure.message
+                : String(protocolFailure),
+            exit_code: observed.exitCode ?? null,
+            signal: observed.signal ?? null,
+            stderr: observed.stderr.text,
+            stderr_bytes: observed.stderr.bytes,
+          },
+        });
       }
       checkDiagnostics();
       await assertFirmwareOutputBounds(
@@ -323,9 +363,16 @@ export const runFirmwareCommand = async (context: {
         await protocolOutput;
       } catch (cause: unknown) {
         const observed = supervisor.snapshot();
-        throw new Error(
-          `${cause instanceof Error ? cause.message : String(cause)}; protocol launcher exit=${observed.exitCode ?? "unknown"}; stderr=${observed.stderr.text}`,
-        );
+        throw new ProviderAdapterError(engine, operation, {
+          cause,
+          diagnostics: {
+            reason: cause instanceof Error ? cause.message : String(cause),
+            exit_code: observed.exitCode ?? null,
+            signal: observed.signal ?? null,
+            stderr: observed.stderr.text,
+            stderr_bytes: observed.stderr.bytes,
+          },
+        });
       }
     }
     checkDiagnostics();

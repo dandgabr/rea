@@ -523,7 +523,7 @@ export class PreparedPodmanTransport {
   #admitMetadata(info: Awaited<ReturnType<typeof runFirmwareCommand>>): void {
     let parsed: z.infer<typeof infoSchema>;
     try {
-      if (info.stdout.utf8Valid !== true) throw new Error("invalid UTF-8");
+      if (info.stdout.invalidUtf8 === true) throw new Error("invalid UTF-8");
       parsed = infoSchema.parse(JSON.parse(info.stdout.text));
     } catch {
       throw podmanProfileUnavailable(
@@ -555,7 +555,7 @@ export class PreparedPodmanTransport {
     const info = await this.run(["info", "--format=json"], signal);
     const version = await this.run(["--version"], signal);
     if (
-      version.stdout.utf8Valid !== true ||
+      version.stdout.invalidUtf8 === true ||
       version.stdout.text.trim() !== "podman version 5.8.7"
     )
       throw podmanProfileUnavailable(
@@ -587,7 +587,7 @@ export class PreparedPodmanTransport {
       throw cause;
     }
     try {
-      if (result.stdout.utf8Valid !== true) throw new Error("invalid UTF-8");
+      if (result.stdout.invalidUtf8 === true) throw new Error("invalid UTF-8");
       const parsed = z
         .array(
           z.object({
@@ -679,9 +679,6 @@ export class PreparedPodmanTransport {
   }
 }
 
-export type PodmanTransportCapture = Awaited<
-  ReturnType<PreparedPodmanTransport["run"]>
->;
 /** Normalize the producing setup boundary once; arbitrary causes are not public Evidence. */
 const preparationFailure = (
   cause: unknown,

@@ -136,7 +136,7 @@ it("fails a successful sweep when either required report is absent or empty", as
     }
     const result = execute("bash", ["-eu", "-c", command], {
       cwd: directory,
-      env: { ...process.env, REPORT_BASE: base },
+      env: { ...process.env, BASH_ENV: "/dev/null", REPORT_BASE: base },
     });
     if (state === "complete")
       await expect(result).resolves.toMatchObject({ stderr: "" });

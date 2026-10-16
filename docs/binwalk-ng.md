@@ -1,12 +1,32 @@
 # Binwalk-NG analysis and carving
 
-The independent Binwalk-NG provider admits three firmware-analysis workflows on
+The independent Binwalk-NG provider admits firmware-analysis workflows on
 Linux when the caller supplies a pinned runtime and the host exposes a working
-user-systemd cgroup v2 manager: one-pass region scan, entropy analysis and
-internal carving. Provider inventory is a separate fourth operation. External
-helper extraction remains unavailable before input reads because
-signature-selected external helpers and their exact paths are not admitted. REA never installs engines, extractors, libraries or system
-packages. The default region provider remains Binwalk 3.1.x. See the
+user-systemd cgroup v2 manager: one-pass region scan, entropy analysis,
+internal carving, and external-helper extraction with bounded recursion.
+Provider inventory is a separate operation. The proposal in
+[#4110](https://github.com/morluto/rea/issues/4110) requests caller-selected
+external-helper extraction and bounded recursive analysis subject to exact
+helper identity, process ownership, and confinement. It remains pending explicit
+maintainer ratification of the final scope or narrowing of modes that cannot
+meet its authority and resource boundaries; it does not approve integration.
+The runtime manifest binds each selected helper name to a regular-file path,
+SHA-256, exact first non-empty version identity line and supported signatures;
+the full version command output remains in Evidence. Unconfigured helper
+names cannot resolve because the sandbox PATH contains only `/runtime/bin`;
+the upstream inventory and pinned-source compatibility profile's
+dynamic-override map must exactly match the complete declared capability set.
+This is an inference from reviewed source plus the selected runtime's `--list`
+output; it does not prove that an executable with unknown source/build
+provenance has identical dispatch code. Partial inventories and narrowed or widened
+helper declarations are rejected before any helper version probe or extraction;
+for the pinned dispatch map, `7z` must include every native row it handles
+(`7zip`, `apfs`, `arj`, `compressd`, `cpio`, `cramfs`, `efigpt`, `iso9660`,
+and `zip`) plus the dynamic XZ override. Source/build provenance remains explicitly unknown
+unless the caller independently establishes it. Helper-dispatch admission relies on
+the caller trusting the exact configured executable and is not source/build
+attestation. REA never installs engines, extractors,
+libraries or system packages. The default region provider remains Binwalk 3.1.x. See the
 [firmware guide](firmware-analysis.md) for provider selection.
 
 The audited source is [binwalk-ng/binwalk-ng at
@@ -46,12 +66,33 @@ export REA_FIRMWARE_SYSTEMD_RUN_COMMAND=/absolute/path/to/systemd-run
 ```
 
 The runtime manifest declares **individual regular files**, not directories.
-For example, this is the shape of a library declaration; replace the source and
-loader destination with paths required by your existing executable:
+For example, helper entries bind the selected command to its path, digest,
+version identity line and capabilities; library declarations bind individual files:
 
 ```json
 {
   "profile": "binwalk-ng-4.0.0",
+  "helpers": [
+    {
+      "name": "7z",
+      "source": "/absolute/path/to/7zz",
+      "sha256": "<64 lowercase hexadecimal characters>",
+      "version_arguments": ["i"],
+      "expected_version": "<exact first non-empty version identity line>",
+      "supported_signatures": [
+        "7zip",
+        "apfs",
+        "arj",
+        "compressd",
+        "cpio",
+        "cramfs",
+        "efigpt",
+        "iso9660",
+        "zip",
+        "xz"
+      ]
+    }
+  ],
   "mounts": [
     {
       "source": "/absolute/path/to/liblzma.so.5",
@@ -62,13 +103,14 @@ loader destination with paths required by your existing executable:
 }
 ```
 
-That one-file example is not a complete runtime. Supply the actual dynamic
-loader and each required library. External extractor executables and their
-libraries/support files are not admitted by the current provider. `kind` is `library`,
-`executable` or `support`. Library destinations are individual files beneath
+That example is not a complete runtime. Supply the actual dynamic loader and
+each required library. Helper files are mounted by the named helper mapping;
+generic executable mounts are refused. `kind` is `library` or `support`.
+Library destinations are individual files beneath
 `/lib`, `/lib64`, `/usr/lib` or `/usr/lib64`; executable destinations are beneath
 `/runtime/bin` or single names beneath `/bin` or `/usr/bin`; support destinations
-are beneath `/runtime/support`. The engine is mounted separately at
+are beneath `/runtime/support`, with the selected 7-Zip object allowed as one
+regular file beneath `/usr/libexec/7zip`. The engine is mounted separately at
 `/runtime/bin/binwalk`. Duplicate destinations, special files and broad directory
 mounts are refused. A configured symlink is resolved to a regular file and both
 configured and resolved identities are retained. Runtime files cannot also be
@@ -79,19 +121,25 @@ capabilities, a new session, parent-death handling, selected read-only runtime
 files and immutable input, a private writable `/work`, controlled HOME/tmp/cwd
 and stdio. The private work root must be tmpfs. A dedicated user-systemd unit
 sets `MemoryMax=512 MiB`, `MemorySwapMax=0`, `TasksMax=64`, `CPUQuota=100%`,
-`RuntimeMaxSec=120s`, `KillMode=control-group` and `OOMPolicy=kill`. A Node gate
-inside that unit verifies effective cgroup v2 controls and the tmpfs mount
-before it launches the existing bubblewrap/prlimit policy. Run identity is
-placed in the service and native child for owned cleanup. A successful
+`RuntimeMaxSec=120s`, `KillMode=control-group`, `TimeoutStopSec=2s`,
+`SendSIGKILL=yes` and `OOMPolicy=kill`. A Node gate inside that unit verifies
+effective cgroup v2 controls and the tmpfs mount before it launches the existing
+bubblewrap/prlimit policy. If descendants remain after the main process exits,
+the gate fails and systemd terminates the exact unit cgroup before
+`systemd-run --wait` returns; cleanup never signals a PID after a `/proc` check.
+Run identity is placed in the service and native child for owned cleanup. A successful
 `bwrap --version` alone does not establish readiness. Identity readback detects
 observed drift; it does not prevent every filesystem race.
 
 ## Public CLI and MCP contracts
 
 CLI and MCP expose the same named contracts. Inventory, region scan, entropy
-and internal carving execute only through the verified native boundary.
-Extraction returns `AnalysisCapabilityUnavailableError` before reading the
-selected firmware path or starting a tool. Supported commands include:
+internal carving, and explicitly manifested external-helper extraction run only
+through the verified native boundary. Extraction requires helper capabilities
+bound to exact path, digest and version identity; recursive work uses the same
+aggregate byte, file, depth and time limits. Unsupported or unconfigured helper
+execution fails inside the fixed helper-only PATH without ambient fallback.
+Supported commands include:
 
 ```sh
 rea inspect-firmware-provider --provider binwalk-ng --format json
@@ -102,6 +150,8 @@ rea inspect-firmware-regions /path/firmware.bin --provider binwalk-ng \
 rea inspect-firmware-entropy /path/firmware.bin --offset 64 --length 4096
 rea inspect-firmware-entropy /path/firmware.bin \
   --output-directory /path/new-plot
+rea extract-firmware /path/firmware.bin /path/new-extraction \
+  --provider binwalk-ng --include gzip --recursive --max-depth 3
 ```
 
 Repeat `--include` or `--exclude` for multiple exact native signature names.
@@ -111,15 +161,18 @@ intentional U+FFFD, spaces and flag-like names remain exact values. Commas and
 NUL are not native signature-name values. `--workers` is positive, default 1; `--no-mmap`
 preserves the native opt-out. Ng-only options on legacy provider requests are
 rejected rather than ignored. Binwalk-NG extraction and recursive extraction
-are unavailable; `extract-firmware --provider binwalk-ng` returns a named
-capability-unavailable error before reading the input. Its CLI help does not
-advertise Binwalk-NG scan, carve, or recursion options. The separate
+are available only through an explicit helper manifest; its CLI help advertises
+the selected extraction and recursion controls. The separate
 `carve-firmware` command supports bounded internal carving. Every published
 output directory must be absent and absolute with an existing parent. Existing
 destinations are not overwritten.
 
-The current operation scope is scan, entropy, runtime inventory and internal
-carving. External-helper extraction and recursive extraction are unavailable.
+The admitted operation scope is scan, entropy, runtime inventory, internal
+carving, and explicitly configured external-helper extraction with bounded
+recursive analysis. Extraction verifies every declared helper's path, digest,
+version and capability before the native extraction launch. Unconfigured
+helpers fail inside the fixed helper-only PATH; helper source/build provenance
+may remain unknown.
 The integration has no firmware flash/update,
 boot/emulation, JTAG/UART, glitching or hardware-control operation. Native
 execution is Linux-only and requires effective cgroup v2 controls plus the
@@ -129,8 +182,8 @@ implemented.
 ## Request and output semantics
 
 MCP uses the same named contracts. A request selecting Binwalk-NG for
-`extract_firmware` returns capability-unavailable before target reads. The
-request must not imply that its otherwise shared extraction fields are active:
+`extract_firmware` uses the same bounded helper manifest and recursive queue as
+the CLI. Only caller-selected helper capabilities are admitted:
 
 ```json
 {
@@ -145,8 +198,7 @@ request must not imply that its otherwise shared extraction fields are active:
 }
 ```
 
-Use `carve_firmware` for the supported internal carve operation; it accepts
-scan selection and bounded output budgets without invoking external helpers.
+Use `carve_firmware` for internal carving without invoking external helpers.
 
 `carve_firmware` publishes internally carved files through a bounded private
 tmpfs, framed digest-checked transfer and exclusive `SafeOutputTree`. It accepts
@@ -186,8 +238,8 @@ the new bytes. Unattributed files, links and special entries remain explicit
 with unknown lineage and partial coverage. Decompressed children have unknown
 original file ranges and runtime addresses.
 
-Internal carving is supported under the bounded native boundary. External and
-recursive extraction remain unavailable; REA does not execute carved files.
+Internal carving and configured external extraction are supported under the
+bounded native boundary. REA never executes carved or extracted firmware files.
 
 Entropy is the native Shannon measurement, **0–8 bits per byte**, with measured
 start/end coordinates. Below 2048 bytes native uses one whole-input window;
@@ -221,9 +273,13 @@ size zero. These are not aggregate process-memory limits.
 The shared request schema accepts budgets up to 512 MiB / 100,000 entries.
 Binwalk-NG scan and entropy reports are capped at 8 MiB. Internal carving
 honors lower caller limits under hard ceilings of 512 MiB for the private
-workspace (including the report) and 10,000 files; tmpfs byte and inode quotas
-enforce producer-time limits, and the framed transfer independently checks
-aggregate bytes, files, entries and hashes before exclusive publication.
+workspace (including the report) and 10,000 files. Per-run tmpfs byte and inode
+limits constrain the producer workspace. REA also enforces operation-wide
+logical artifact/report byte, file and entry budgets before each framed file is
+staged, and bounds recursive snapshot copies by the requested artifact budgets.
+These checks do not establish a physical quota for host-side transfer staging,
+recursive snapshots, or aggregate tmpfs capacity. Hashes are verified before
+exclusive publication.
 Cancellation carries
 an REA-generated run token into the service and provider process. Failed
 process/descriptor cleanup retains its owner for cleanup-only retry.
@@ -240,9 +296,9 @@ The adapter owns fixed argv and private paths; it exposes no arbitrary argv prox
 | `--list`, `-L`         | `inspect_firmware_provider`                                                 | Native CLI/MCP acceptance                                      |
 | `--quiet`, `-q`        | Adapter-owned presentation for report workflows                             | Native boundary                                                |
 | `--verbose`, `-v`      | Presentation-only, not a caller option; structured per-pass facts preserved | Pinned source audit                                            |
-| `--extract`, `-e`      | `extract_firmware`; unavailable before target read                          | Admission refusal; external helper identity not admitted       |
+| `--extract`, `-e`      | `extract_firmware`; explicit helper manifest and bounded transfer           | Native CLI/MCP and bounded workflow tests                      |
 | `--carve`, `-c`        | `carve_firmware`; internal carving only                                     | Native CLI/MCP real acceptance; tmpfs + framed output ceilings |
-| `--matryoshka`, `-M`   | Not forwarded; recursive extraction unavailable                             | Excluded                                                       |
+| `--matryoshka`, `-M`   | `options.recursive` plus REA bounded child queue                            | Recursive workflow tests and depth/output ceilings             |
 | `--search-all`, `-a`   | `options.search_all` / `--search-all`                                       | Native CLI/MCP acceptance                                      |
 | `--entropy`, `-E`      | Separate `inspect_firmware_entropy`                                         | Native CLI/MCP acceptance                                      |
 | `--png`, `-p`          | Private owned path; optional fresh publication                              | Native entropy acceptance                                      |
@@ -262,13 +318,17 @@ Additional protocol sources:
 [signatures](https://github.com/binwalk-ng/binwalk-ng/tree/368c3815cb97976ae7ba6092f356933169f06dae/src/signatures),
 [extractors](https://github.com/binwalk-ng/binwalk-ng/tree/368c3815cb97976ae7ba6092f356933169f06dae/src/extractors),
 [entropy](https://github.com/binwalk-ng/binwalk-ng/blob/368c3815cb97976ae7ba6092f356933169f06dae/src/entropy.rs).
-Library custom signatures/internal callbacks have no REA wrapper; use an explicitly
-selected trusted executable profile and retain its actual identity.
+The upstream Rust library API for custom signatures, internal callbacks and
+programmatic analysis has no REA wrapper. Those library-only entry points are
+excluded; use an explicitly selected trusted executable profile and retain its
+actual identity. The compatibility-profile helper mapping does not attest that
+an unknown-provenance executable has the reviewed source's dispatch behavior.
 
 ## Verification and remaining coverage
 
 The dedicated Binwalk-NG availability acceptance test checks static catalog
-contracts and extraction refusal before launch:
+contracts, runtime fail-closed behavior, and rejection of Binwalk-NG-only
+options when Unblob is selected:
 
 ```sh
 npm run test:focused -- tests/acceptance/binwalkNgAvailability.test.ts
@@ -277,7 +337,7 @@ npm run test:focused -- tests/acceptance/binwalkNgAvailability.test.ts
 The real CLI/MCP cases in `tests/acceptance/providers/binwalkNgNative.test.ts`
 run when the exact runtime, runtime manifest and bubblewrap path are configured.
 They cover inventory, selected scan, entropy, bounded internal carving and
-explicit extraction refusal.
+configured extraction/recursion when native prerequisites are present.
 This verification also ran the pinned upstream binary directly inside a
 disposable Podman container for `--version`, a gzip JSON scan and entropy PNG
 generation, with network disabled, a read-only root filesystem, dropped
@@ -288,14 +348,18 @@ container-selection, identity/configuration proof or immutable input/output
 mapping for this provider, and does not manage the caller's container lifecycle.
 
 The native Linux x64 acceptance lane covers gzip signature scan, reported
-inventory, selected coordinates, entropy windows, internal carving through
-CLI/MCP, quota-bounded output transfer, public converted schemas and source
-immutability. External-helper extraction and other signature/extractor
-families, proprietary images and other hosts/architectures remain unsupported
-or unverified.
-The optional acceptance case using a build without `entropy-plot` was skipped
-because that alternate pinned binary was not built; its refusal behavior remains
-unverified.
+inventory, selected coordinates, entropy windows, internal carving and
+configured extraction/recursion through CLI/MCP, quota-bounded output transfer,
+public converted schemas and source immutability. External helper coverage is
+limited to helpers explicitly present in the selected manifest; other
+signature/extractor families, proprietary images and other hosts/architectures
+remain unsupported or unverified.
+The alternate `--no-default-features` binary was built from the same pinned
+source and lockfile. Its native `--entropy` refusal and REA provider-level
+capability classification were verified, including captured-stderr fallback.
+The public CLI/MCP acceptance case using that binary also passed: both adapters
+reported the capability unavailable with the upstream diagnostic. See the
+verification record for the binary digest and the exact scope of these checks.
 
 **Public container execution is not implemented at this native checkpoint.**
 Direct producer container smoke tests do not establish public REA container

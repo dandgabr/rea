@@ -50,7 +50,7 @@ const limitations = [
   "The selected binwalk-ng 4.0.0 profile is a compatibility declaration. Runtime executable, selected regular-file mounts, launcher and limiter are fingerprinted; the installed source revision remains unknown. Identity readback is not syscall-level TOCTOU prevention.",
   "Each invocation runs in a dedicated user-systemd cgroup and the exact bubblewrap namespace/mount policy. Effective cgroup v2 memory, swap, task and CPU limits are read back in-unit before execution. The manager environment is enumerated by name and removed from the service; selected runtime files and immutable input alone are readable inside bubblewrap.",
   "The private work tree must be tmpfs; producer writes are charged to the same 512 MiB cgroup memory ceiling. Individual report/PNG reads remain capped at 8 MiB and captures are separately bounded. This is not a caller-configurable 512 MiB output quota.",
-  "Provider inventory, one-pass signature scan, native entropy and internal carving are admitted under the verified native boundary. Extraction remains unavailable before target reads because signature-selected external helper execution and helper-path identity have not been admitted.",
+  "Extraction is admitted only when a complete native helper inventory matches exact caller-selected helper path, digest, version and signature-capability mappings; every child remains in the bounded cgroup and fixed helper-only PATH. Source/build provenance is retained as unknown when unverified.",
   "Unknown and unexamined files remain explicit. Empty native analyses do not attest successful examination. Extracted code is never executed. No unrestricted fallback is used.",
   "Entropy preserves native Shannon values and measured byte windows without encryption/compression interpretation. Native plot dimensions are verified from the bounded PNG header, not a complete image decode. Optional PNG controls publication only.",
 ] as const;
@@ -60,6 +60,7 @@ const nativeOperations = new Set([
   "inspect_firmware_regions",
   "inspect_firmware_entropy",
   "carve_firmware",
+  "extract_firmware",
 ]);
 
 /** Single-outstanding BYO binwalk-ng provider owning all processes, private roots and output cleanup. */
@@ -99,7 +100,7 @@ export class BinwalkNgProvider {
         firmwareToolUnavailable(
           "binwalk-ng",
           request.operation,
-          "Binwalk-NG extraction remains unavailable until signature-selected external helpers and exact helper-path identity are admitted",
+          "This Binwalk-NG operation is not admitted by the selected provider profile",
         ),
       );
     const deadline = AbortSignal.timeout(FIRMWARE_LIMITS.timeoutMs);
@@ -268,11 +269,18 @@ export class BinwalkNgProvider {
         ),
       );
     } catch (cause: unknown) {
+      const stderr =
+        cause instanceof ProviderAdapterError
+          ? typeof cause.diagnostics?.stderr === "string" &&
+            cause.diagnostics.stderr.length > 0
+            ? cause.diagnostics.stderr
+            : cause.capturedOutput?.stderr
+          : undefined;
       const featureAbsent =
         request.operation === "inspect_firmware_entropy" &&
         cause instanceof ProviderAdapterError &&
-        typeof cause.diagnostics?.stderr === "string" &&
-        cause.diagnostics.stderr.includes(
+        stderr !== undefined &&
+        stderr.includes(
           'binwalk was built without the "entropy-plot" feature, entropy analysis isn\'t available',
         );
       const error =
@@ -283,7 +291,13 @@ export class BinwalkNgProvider {
                 "binwalk-ng",
                 request.operation,
                 "The selected native build reports that entropy-plot is unavailable",
-                { cause, diagnostics: cause.diagnostics },
+                {
+                  cause,
+                  diagnostics: {
+                    ...cause.diagnostics,
+                    stderr,
+                  },
+                },
               )
             : options?.signal?.aborted === true
               ? new AnalysisCancelledError(request.operation)

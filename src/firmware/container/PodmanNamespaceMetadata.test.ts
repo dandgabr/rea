@@ -200,8 +200,8 @@ const installResponse = (
       change(response);
       const text = JSON.stringify(response);
       return {
-        stdout: { text, bytes: Buffer.byteLength(text), utf8Valid: true },
-        stderr: { text: "", bytes: 0, utf8Valid: true },
+        stdout: { text, bytes: Buffer.byteLength(text) },
+        stderr: { text: "", bytes: 0 },
         exit_code: 0,
         captured_output: capture,
       } as never;

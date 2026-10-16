@@ -43,6 +43,8 @@ it("places the complete selected process tree in a private bounded user service"
     "--property=CPUQuota=100%",
     "--property=RuntimeMaxSec=120s",
     "--property=KillMode=control-group",
+    "--property=TimeoutStopSec=2s",
+    "--property=SendSIGKILL=yes",
     "--property=OOMPolicy=kill",
     "--property=UMask=0077",
     ...[
@@ -120,6 +122,10 @@ it("checks effective cgroup controls and the workspace filesystem before exec", 
   expect(args[1]).toContain("pids.max");
   expect(args[1]).toContain("cpu.max");
   expect(args[1]).toContain("memory.oom.group");
+  expect(args[1]).toContain("cgroup.procs");
+  expect(args[1]).not.toContain("process.kill(");
+  expect(args[1]).not.toContain("processIdentity(pid)");
+  expect(args[1]).toContain("cleanup delegated to systemd control-group owner");
   expect(args[1]).toContain("statfsSync");
   expect(args[1]).toContain("/proc/self/mountinfo");
   expect(args[1]).toContain("nr_inodes=");
@@ -172,6 +178,84 @@ it("rejects caller-controlled unit names and distinguishes tmpfs from ordinary f
   expect(isBinwalkNgTmpfs(0x01021994)).toBe(true);
   expect(isBinwalkNgTmpfs(0x794c7630)).toBe(false);
 });
+
+it.runIf(process.env.REA_RUN_USER_SYSTEMD_BOUNDARY_TEST === "1")(
+  "owns and reaps an extractor-like descendant with the same cgroup as its parent",
+  async () => {
+    const uid = process.getuid?.();
+    if (uid === undefined) throw new Error("Linux uid is unavailable");
+    const root = await createTestTempDirectory("rea-ng-systemd-descendant-");
+    const runtimeDirectory = `/run/user/${uid}`;
+    const external = await import("node:child_process").then(({ spawn }) =>
+      spawn(process.execPath, ["-e", "setInterval(()=>{},1000000)"], {
+        stdio: "ignore",
+      }),
+    );
+    const resultPath = join(root, "descendant.json");
+    const parentScript = [
+      "const {spawn}=require('node:child_process');",
+      "const fs=require('node:fs');",
+      "const child=spawn(process.execPath,['-e','setInterval(()=>{},1000000)'],{stdio:'ignore'});child.unref();",
+      `setTimeout(()=>{const own=fs.readFileSync('/proc/self/cgroup','utf8').trim();const descendant=fs.readFileSync('/proc/'+child.pid+'/cgroup','utf8').trim();fs.writeFileSync(${JSON.stringify(resultPath)},JSON.stringify({pid:child.pid,own,descendant}))},100)`,
+    ].join("");
+    const gate = binwalkNgCgroupGateArguments({
+      workRoot: root,
+      command: process.execPath,
+      commandArguments: ["-e", parentScript],
+    });
+    const args = binwalkNgSystemdRunArguments({
+      runId: "rea-firmware-12345678-1234-1234-1234-123456789abc",
+      cwd: root,
+      command: process.execPath,
+      commandArguments: gate,
+    });
+    try {
+      await expect(
+        execFileAsync("/usr/bin/systemd-run", args, {
+          encoding: "utf8",
+          timeout: 30_000,
+          env: {
+            PATH: "/usr/bin:/bin",
+            XDG_RUNTIME_DIR: runtimeDirectory,
+            DBUS_SESSION_BUS_ADDRESS: `unix:path=${runtimeDirectory}/bus`,
+          },
+        }),
+      ).rejects.toMatchObject({
+        code: 125,
+        stderr: expect.stringContaining(
+          "cleanup delegated to systemd control-group owner",
+        ),
+      });
+      const child = JSON.parse(
+        await (await import("node:fs/promises")).readFile(resultPath, "utf8"),
+      ) as {
+        pid: number;
+        own: string;
+        descendant: string;
+      };
+      expect(child.descendant).toBe(child.own);
+      const deadline = Date.now() + 3_000;
+      let alive = true;
+      while (Date.now() < deadline) {
+        try {
+          process.kill(child.pid, 0);
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        } catch (cause) {
+          if ((cause as NodeJS.ErrnoException).code === "ESRCH") {
+            alive = false;
+            break;
+          }
+          throw cause;
+        }
+      }
+      expect(alive).toBe(false);
+      expect(() => process.kill(external.pid ?? -1, 0)).not.toThrow();
+    } finally {
+      external.kill("SIGKILL");
+    }
+  },
+  40_000,
+);
 
 it.runIf(process.env.REA_RUN_USER_SYSTEMD_BOUNDARY_TEST === "1")(
   "clears manager variables added after the snapshot before the Node gate starts",

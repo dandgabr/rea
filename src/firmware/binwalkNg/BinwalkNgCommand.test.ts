@@ -1,4 +1,5 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, it } from "vitest";
 import { assertFirmwareOutputBounds } from "../FirmwareCommand.js";
@@ -6,6 +7,16 @@ import { runFirmwareCommand } from "../FirmwareCommand.js";
 import { cleanupOwnedProcessGroup } from "../../process/ProcessOwnership.js";
 import type { ProviderProcessSupervisor } from "../../process/ProviderProcess.js";
 import { createTestTempDirectory } from "../../../tests/fixtures/temporaryDirectory.js";
+import { prepareBinwalkNgSandbox } from "./BinwalkNgSandbox.js";
+import {
+  probeBinwalkNgSandbox,
+  runBinwalkNgCommand,
+  verifyBinwalkNgHelperVersions,
+} from "./BinwalkNgCommand.js";
+import {
+  spawnOwnedProviderProcess,
+  type OwnedProviderProcessSpawnOptions,
+} from "../../process/ProviderProcess.js";
 
 it("accepts absent/growing private reports within budget and rejects actual overflow before parsing", async () => {
   const root = await createTestTempDirectory("rea-ng-growth-");
@@ -104,7 +115,7 @@ it("fails named unavailable after a denied sandbox probe without an unconfined r
       maxOutputBytes: 256 * 1024 * 1024,
       maxOutputFiles: 10000,
       retainCleanup: () => {},
-      launcher: async (options) => {
+      launcher: async (options: OwnedProviderProcessSpawnOptions) => {
         launches++;
         return spawnOwnedProviderProcess(options);
       },
@@ -115,6 +126,89 @@ it("fails named unavailable after a denied sandbox probe without an unconfined r
     reason: expect.stringContaining("exact bubblewrap policy"),
   });
   expect(launches).toBe(1);
+});
+
+it("runs an admitted helper by its exact sandbox path under an aggregate workspace quota", async () => {
+  const root = await createTestTempDirectory("rea-ng-helper-command-");
+  const input = join(root, "input.bin");
+  const work = join(root, "work");
+  const manifest = join(root, "runtime.json");
+  await writeFile(input, "input");
+  await mkdir(work);
+  const source = "/usr/bin/true";
+  const sha256 = createHash("sha256")
+    .update(await readFile(source))
+    .digest("hex");
+  await writeFile(
+    manifest,
+    JSON.stringify({
+      profile: "binwalk-ng-4.0.0",
+      mounts: [],
+      helpers: [
+        {
+          name: "helper",
+          source,
+          sha256,
+          version_arguments: ["--version"],
+          expected_version: "helper 1.0",
+          supported_signatures: ["sample"],
+        },
+      ],
+    }),
+  );
+  const sandbox = await prepareBinwalkNgSandbox({
+    command: "/usr/bin/true",
+    bubblewrap: "/usr/bin/true",
+    limiter: "/usr/bin/prlimit",
+    systemdRun: "/usr/bin/true",
+    manifest,
+    inputPath: input,
+    workRoot: work,
+  });
+  const launches: OwnedProviderProcessSpawnOptions[] = [];
+  const context = {
+    sandbox,
+    operation: "extract_firmware",
+    signal: AbortSignal.timeout(5_000),
+    maxOutputBytes: 1024,
+    maxOutputFiles: 4,
+    workspaceQuota: { bytes: 1024 * 1024, inodes: 32 },
+    retainCleanup: () => {},
+    launcher: async (options: OwnedProviderProcessSpawnOptions) => {
+      launches.push(options);
+      return spawnOwnedProviderProcess({
+        ...options,
+        command: "/usr/bin/printf",
+        expectedCommand: null,
+        arguments: ["\nhelper 1.0\ndynamic environment details\n"],
+      });
+    },
+  };
+  await expect(verifyBinwalkNgHelperVersions(context)).resolves.toMatchObject([
+    { name: "helper", path: source, sha256, version: "helper 1.0" },
+  ]);
+  const invocation = launches[0];
+  expect(invocation?.arguments).toContain(
+    `--property=TemporaryFileSystem=${work}:size=1048576,nr_inodes=32,mode=0700,uid=${process.getuid?.()},gid=${process.getgid?.()}`,
+  );
+  expect(invocation?.arguments.join(" ")).toContain(
+    "/runtime/bin/helper --version",
+  );
+  expect(invocation?.arguments.join(" ")).toContain('"workspaceQuota"');
+  const mismatch = {
+    ...context,
+    sandbox: {
+      ...sandbox,
+      helpers: sandbox.helpers.map((helper) => ({
+        ...helper,
+        expected_version: "helper 2.0",
+      })),
+    },
+  };
+  await expect(verifyBinwalkNgHelperVersions(mismatch)).rejects.toMatchObject({
+    _tag: "AnalysisCapabilityUnavailableError",
+    reason: expect.stringContaining("version identity"),
+  });
 });
 
 it("retains the supervisor and owning operation when cleanup fails, then permits a verified retry", async () => {
@@ -157,10 +251,3 @@ it("retains the supervisor and owning operation when cleanup fails, then permits
     expect((await pending?.stop())?.status).not.toBe("incomplete");
   }
 });
-
-import { prepareBinwalkNgSandbox } from "./BinwalkNgSandbox.js";
-import { probeBinwalkNgSandbox } from "./BinwalkNgCommand.js";
-import {
-  spawnOwnedProviderProcess,
-  type OwnedProviderProcessSpawnOptions,
-} from "../../process/ProviderProcess.js";

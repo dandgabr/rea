@@ -51,7 +51,7 @@ it.skipIf(profile === undefined || image === undefined)(
       }
       const identity = await transport.image(image!, signal);
       expect(runtime.version.stdout.text.trim()).toBe("podman version 5.8.7");
-      expect(runtime.info.stdout.utf8Valid).toBe(true);
+      expect(runtime.info.stdout.invalidUtf8).toBeUndefined();
       expect(identity.selected_reference).toBe(image);
       expect(identity.image_id).toMatch(/^[a-f0-9]{64}$/u);
       expect(runtime.store.shared_helper).toMatchObject({
