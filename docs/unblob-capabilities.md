@@ -1,21 +1,47 @@
 # Unblob capability and acceptance ledger
 
-**Status: constrained native inventory, scan-only inspection and extraction are
-available; caller-container execution remains unavailable.** Native Unblob runs
-inside a verified user-systemd transient service. systemd applies the service
-boundary before Python exec; a minimal `-I -S` bootstrap verifies the effective
-PID namespace and resource controls before executing Unblob. Installed
-`unblob_v1` entrypoints execute inside that boundary, but REA cannot enumerate
-or attest them; task processing is marked unknown and overall
-inspection/extraction coverage is always partial. Extraction stages on a 64
+**Status: native Unblob is exposed when both absolute runtime variables are
+configured. This configuration-based availability does not prove a successful
+analysis. Each request fails closed unless the runtime passes its admission
+checks; current-head CLI/MCP/systemd acceptance remains unverified. The gate
+only admits protected runtime trees whose interpreter,
+Python import roots and ancestors are not owned or writable by the invoking
+user. Python interpreters must resolve under `/usr/bin` or `/usr/local/bin`,
+with their standard `/usr/{,local/}lib{,64}/pythonX.Y` roots. The disposable
+caller-owned runtime root does not satisfy that precondition.
+Caller-container execution remains unavailable.**
+
+**Integration gate:** this capability is proposed in a draft PR while the
+required maintainer scope decision in [#4110](https://github.com/morluto/rea/issues/4110)
+is pending. Draft publication does not authorize merging or enabling the
+provider in official REA distributions.
+The implementation is designed to run inside a user-systemd transient service.
+systemd applies the service boundary before Python starts; a minimal `-I -S`
+bootstrap rechecks the protected Python runtime, then audits startup files and
+distribution entrypoints before importing Unblob. It never runs
+`.pth`, `sitecustomize` or `usercustomize`; it admits only the known setuptools
+`.pth` by exact digest and disables its execution. Any other startup hook or
+any `unblob_v1` distribution entrypoint is rejected before launch. Pluggy
+entrypoint loading is disabled in the admitted interpreter. The caller runtime
+source revision remains unverified, so inspection/extraction coverage remains
+partial. Extraction is designed to stage on a 64
 MiB/512-inode service tmpfs, then transfers bounded hashed frames into a
 private `SafeOutputTree` before verified publication.
+
+The CLI and MCP contracts below describe their schemas and intended behavior.
+The capability inventory exposes Unblob when both absolute runtime variables
+are configured, while runtime admission still validates the protected tree and
+systemd boundary for every request. Current-head real CLI/MCP/systemd
+acceptance has not been repeated, so successful runtime behavior remains
+unverified; configuration alone is not verification.
 
 The producer reference is [Unblob 26.6.4](https://github.com/onekey-sec/unblob/tree/1fcc7a0a584a70a96c31f5a276c20944d199a089),
 revision `1fcc7a0a584a70a96c31f5a276c20944d199a089`. Runtime version and executable
 SHA-256 are observations; matching the version does not prove this source
-revision. REA supports Binwalk inspection and this constrained native Unblob
-profile on Linux with user systemd and cgroup v2.
+revision. Binwalk inspection is available when configured. Unblob's constrained
+native profile is exposed when configured on Linux, but its current-head
+acceptance and successful runtime behavior remain unverified; it still requires
+user systemd, cgroup v2 and a protected runtime installation.
 
 Native options below are audited in [cli.py](https://github.com/onekey-sec/unblob/blob/1fcc7a0a584a70a96c31f5a276c20944d199a089/python/unblob/cli.py).
 `FILE` accepts one existing regular file. A directory, password argument, raw
@@ -59,20 +85,18 @@ original byte offsets. Neither signatures nor randomness establish encryption,
 compression or valid partitions.
 
 [plugins.py](https://github.com/onekey-sec/unblob/blob/1fcc7a0a584a70a96c31f5a276c20944d199a089/python/unblob/plugins.py)
-can import explicitly selected modules and installed entrypoints before sandbox
-setup. REA rejects caller-selected `--plugins-path`. Installed entrypoints are
-contained inside the transient systemd service rather than disabled. Their
-identity and influence cannot be established, so all task processing is
-reported as `unknown_plugin_processing` and overall scan/extraction coverage
-is partial even when parsed report rows are otherwise complete. The in-service
-systemd applies the transient service's filesystem, network, PID namespace,
-and cgroup policy before executing the configured Python interpreter. The
-interpreter is started with isolated/no-site flags; its small gate then checks
-the effective PID namespace, cgroup-v2, and tmpfs controls before it execs the
-Unblob entrypoint. Thus interpreter ELF loading necessarily precedes the
-in-process readbacks, while systemd policy and static loader-variable removal
-are applied before interpreter exec. The gate checks effective controls before
-entrypoint loading occurs after the outer boundary is active.
+can import explicitly selected modules and installed entrypoints before its
+internal sandbox. REA rejects caller-selected `--plugins-path`, rejects any
+installed `unblob_v1` entrypoint during preflight, and disables Pluggy's
+entrypoint loader before importing the Unblob CLI. Startup files are audited
+before that import; the pinned setuptools `.pth` is recognized by digest but
+never executed. The configured runtime's Unblob source revision remains
+unverified, so successful analysis still reports partial coverage. The
+in-service systemd applies the transient service's filesystem, network, PID
+namespace, and cgroup policy before executing the configured Python
+interpreter. The interpreter is started with isolated/no-site flags; its gate
+checks effective resource controls and audits startup metadata before loading
+Unblob.
 
 [dependencies.py](https://github.com/onekey-sec/unblob/blob/1fcc7a0a584a70a96c31f5a276c20944d199a089/python/unblob/dependencies.py)
 uses executable lookup; missing marks and exit 1 remain useful evidence.
@@ -112,7 +136,7 @@ primitives exist on that host; it is not an admitted Unblob profile or a portabl
 host guarantee.
 
 The production adapter owns a unique transient unit with `PrivatePIDs=yes`,
-checks the effective PID namespace, cgroup-v2 and private tmpfs controls in a
+checks the effective PID namespace, file-size `RLIMIT_FSIZE`, cgroup-v2 and private tmpfs controls in a
 minimal Python interpreter started with `-I -S`, binds the input snapshot
 read-only, and verifies exact-unit cleanup on completion or cancellation.
 systemd applies namespace and resource properties before interpreter exec; the
@@ -175,6 +199,85 @@ manager variable is absent from the post-gate child. Assertions compare names
 only and do not print environment values. The transient unit bounds stop time to two seconds and
 allows systemd to kill only that exact unit's cgroup if graceful termination
 does not complete.
+
+### Fixture-scoped external extractor runtime (2026-10-15)
+
+The gzip/USTAR acceptance now gates its required `7z` against the Unblob
+dependency inventory returned inside the admitted service. An absent unrelated
+extractor does not fail this fixture-specific check, and a host `PATH` lookup is
+not accepted as evidence about `RootDirectory` visibility. Malformed,
+duplicate, missing, or incomplete inventory rows fail closed. The dedicated
+verification driver also rejects extraction Evidence that reports the
+fixture-required `7z` missing.
+
+The disposable Podman runtime was built as
+`localhost/rea-unblob-runtime:26.6.4` with image digest
+`sha256:64b3e700c9c7cbb1fd9d0c060c35437e89d774089eac598438383fcaccbede02`.
+It uses the pinned Python 3.12 slim base digest recorded in
+`tests/fixtures/firmware/unblob-runtime/Containerfile`, Unblob commit
+`1fcc7a0a584a70a96c31f5a276c20944d199a089`, locked Python distributions, and
+Debian `7zip` package `25.01+dfsg-1~deb13u2`. The runtime's `/usr/bin/7z` is a
+static executable with SHA-256
+`60fc00b4e1ed37668972c51f03426973d8006db3c7224075878f6d66196d7c27`; `7z i`
+reports 7-Zip 25.01. The runtime installs Unblob into `/usr/local` so the
+manually audited and appended Python import paths resolve the pinned package.
+The root is a disposable test artifact, not an accepted caller-container
+runtime. Its direct Podman run used no network, a read-only root, no added
+capabilities, a private read-only input mount and a private read-write output
+mount; extracted fixture
+files matched oracle paths, sizes and SHA-256 values.
+
+On 2026-10-15, the real public CLI/MCP test suite passed 11/11 tests with the
+generated gzip fixture and passed 11/11 again with a downloaded 7.6 MiB
+camera-firmware ZIP (input SHA-256
+`0db884f68be6dc6eb78203281f1002644948df35d5562a0497ef0c36438507bc`; the
+input hash was unchanged after both runs). This confirms extraction for those
+inputs only. The systemd boundary checks its effective file-size `RLIMIT_FSIZE` and cgroup-v2 CPU, memory,
+swap and process limits, tmpfs bytes/inodes, and hides an unrelated host
+readable canary; output staging and framing retain their independent byte and
+entry quotas. Four targeted dependency-gate mutants were killed: required
+check removed, installed boolean inverted, inventory replaced by the former
+ambient host `7z` prerequisite, and incomplete inventory accepted.
+
+The Unblob-only `npm run verify:unblob-firmware` lane passed against the
+generated fixture and independent `oracle.json`, without configuring Binwalk.
+The combined `npm run verify:firmware` lane remains unverified because no real
+Binwalk executable was configured (`REA_BINWALK_COMMAND`); its early
+prerequisite gate stopped before invoking either analysis provider. Real
+firmware results do not establish support for other formats or Unblob plugins.
+
+### Python startup and plugin admission (2026-10-16)
+
+Before launch, the adapter checks Python runtime and ancestor paths for
+same-user ownership or effective write access. It rejects root execution,
+mutable paths, unverifiable or escaping symlinks, and scans at most 100,000
+runtime nodes. A successful proof is retained for the REA process lifetime;
+trusted runtime-owner updates require restarting REA for fresh admission. The
+in-unit bootstrap repeats the check against `sys.executable` and the exact
+`sysconfig` import roots. Each host and in-unit startup audit scans at most
+8,192 combined directory entries across Python library and startup locations,
+and reads each `.pth` or `entry_points.txt` file only up to 1 MiB plus one byte
+to detect overflow. Exceeding either limit fails closed before Unblob imports.
+The adapter audits Python startup locations and
+distribution metadata. It rejects `sitecustomize`, `usercustomize`, every `.pth`
+except the pinned setuptools hook by SHA-256, and
+every installed `unblob_v1` entrypoint. The known setuptools hook is not
+executed: Python site initialization remains disabled and the admitted import
+paths are added directly. Unblob is invoked using `runpy`; Python `exec` and
+`site.main()` are not used. The same audit runs inside the systemd unit before
+the Unblob CLI is imported, and Pluggy entrypoint discovery is disabled before
+that import to prevent an entrypoint added after preflight from loading. A
+caller plugin whose target has a stable or previously known digest is still
+rejected by its installed entrypoint metadata.
+
+Focused source tests passed 9/9 applicable tests for systemd startup admission
+and invocation policy; six live systemd cases were skipped because this phase
+did not run shared runtime acceptance. The generated Python bootstrap was
+compiled with `/usr/bin/python3 -I -S` without execution. Public CLI/MCP and
+live systemd acceptance against the pinned runtime is still pending, so the
+revised native bootstrap is unverified. Caller-container execution remains
+refused because the selected container generation, invocation ownership and
+effective inode quota are still unproved.
 
 Caller-container execution remains refused. The current rootless Podman/crun
 rejects tmpfs `nr_inodes`; a memory-cgroup many-empty-file probe was OOM-killed

@@ -1,7 +1,15 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { constants } from "node:fs";
-import { access, open, realpath, readlink, writeFile } from "node:fs/promises";
+import {
+  access,
+  lstat,
+  opendir,
+  open,
+  realpath,
+  readlink,
+  writeFile,
+} from "node:fs/promises";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import {
@@ -25,14 +33,444 @@ const SERVICE_LIMITS = {
 } as const;
 const runIdPattern =
   /^rea-firmware-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/u;
-const cgroupGate = String.raw`import json, os, pathlib, sys
+const SETUPTOOLS_STARTUP_HOOK_SHA256 =
+  "2638ce9e2500e572a5e0de7faed6661eb569d1b696fcba07b0dd223da5f5d224";
+const MAX_AUDITED_RUNTIME_NODES = 100_000;
+const MAX_STARTUP_SCAN_ENTRIES = 8_192;
+const MAX_STARTUP_METADATA_BYTES = 1024 * 1024;
+
+const isMissingPath = (cause: unknown): boolean =>
+  typeof cause === "object" &&
+  cause !== null &&
+  "code" in cause &&
+  cause.code === "ENOENT";
+
+async function* readStartupDirectory(
+  path: string,
+  count: { value: number },
+): AsyncGenerator<import("node:fs").Dirent<string>> {
+  const directory = await opendir(path);
+  for await (const entry of directory) {
+    count.value += 1;
+    if (count.value > MAX_STARTUP_SCAN_ENTRIES)
+      throw new Error("Unblob startup audit exceeds its bounded entry scan");
+    yield entry;
+  }
+}
+
+async function readBoundedStartupMetadata(path: string): Promise<Buffer> {
+  const file = await open(
+    path,
+    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+  );
+  try {
+    const identity = await file.stat();
+    if (!identity.isFile() || identity.size > MAX_STARTUP_METADATA_BYTES)
+      throw new Error(
+        `Unblob startup metadata exceeds ${MAX_STARTUP_METADATA_BYTES} bytes`,
+      );
+    const buffer = Buffer.alloc(MAX_STARTUP_METADATA_BYTES + 1);
+    let bytesRead = 0;
+    while (bytesRead < buffer.length) {
+      const result = await file.read(
+        buffer,
+        bytesRead,
+        buffer.length - bytesRead,
+        bytesRead,
+      );
+      if (result.bytesRead === 0) break;
+      bytesRead += result.bytesRead;
+    }
+    if (bytesRead > MAX_STARTUP_METADATA_BYTES)
+      throw new Error(
+        `Unblob startup metadata exceeds ${MAX_STARTUP_METADATA_BYTES} bytes`,
+      );
+    return buffer.subarray(0, bytesRead);
+  } finally {
+    await file.close();
+  }
+}
+
+export async function auditUnblobRuntimeStartupFiles(
+  root: string,
+): Promise<void> {
+  const localSiteDirectories: string[] = [];
+  const systemSiteDirectories: string[] = [];
+  const startupDirectories: string[] = [];
+  const scannedEntries = { value: 0 };
+  for (const libraryRoot of [
+    join(root, "usr/local/lib"),
+    join(root, "usr/lib"),
+  ]) {
+    try {
+      for await (const candidate of readStartupDirectory(
+        libraryRoot,
+        scannedEntries,
+      )) {
+        if (
+          !candidate.isDirectory() ||
+          !/^python\d+(?:\.\d+)?$/u.test(candidate.name)
+        )
+          continue;
+        startupDirectories.push(join(libraryRoot, candidate.name));
+        for (const leaf of ["site-packages", "dist-packages"]) {
+          const path = join(libraryRoot, candidate.name, leaf);
+          try {
+            const identity = await lstat(path);
+            if (identity.isSymbolicLink())
+              throw new Error(
+                "Unblob runtime site-package directory is a symbolic link",
+              );
+            if (identity.isDirectory()) {
+              if (libraryRoot.includes("/usr/local/lib"))
+                localSiteDirectories.push(path);
+              else systemSiteDirectories.push(path);
+              startupDirectories.push(path);
+            }
+          } catch (cause) {
+            if (!isMissingPath(cause)) throw cause;
+          }
+        }
+      }
+    } catch (cause) {
+      if (isMissingPath(cause)) continue;
+      throw cause;
+    }
+  }
+  const siteDirectories =
+    localSiteDirectories.length > 0
+      ? localSiteDirectories
+      : systemSiteDirectories;
+  for (const startupDirectory of startupDirectories) {
+    for await (const entry of readStartupDirectory(
+      startupDirectory,
+      scannedEntries,
+    )) {
+      const name = entry.name;
+      if (
+        ["sitecustomize", "usercustomize"].some(
+          (hook) => name === hook || name.startsWith(`${hook}.`),
+        )
+      )
+        throw new Error(
+          `Unblob runtime contains a prohibited Python startup hook: ${name}`,
+        );
+    }
+  }
+  for (const siteDirectory of siteDirectories) {
+    for await (const item of readStartupDirectory(
+      siteDirectory,
+      scannedEntries,
+    )) {
+      if (item.name.endsWith(".pth")) {
+        const path = join(siteDirectory, item.name);
+        if (
+          !item.isFile() ||
+          createHash("sha256")
+            .update(await readBoundedStartupMetadata(path))
+            .digest("hex") !== SETUPTOOLS_STARTUP_HOOK_SHA256
+        )
+          throw new Error(
+            `Unblob runtime contains an unaudited Python startup hook: ${item.name}`,
+          );
+      }
+      if (!item.name.endsWith(".dist-info") && !item.name.endsWith(".egg-info"))
+        continue;
+      if (!item.isDirectory())
+        throw new Error(
+          `Unblob runtime distribution metadata has an unsafe identity: ${item.name}`,
+        );
+      const entryPointsPath = join(
+        siteDirectory,
+        item.name,
+        "entry_points.txt",
+      );
+      let entryPoints: string;
+      try {
+        const identity = await lstat(entryPointsPath);
+        if (!identity.isFile())
+          throw new Error(
+            "Unblob runtime entry point metadata is not a regular file",
+          );
+        entryPoints = (
+          await readBoundedStartupMetadata(entryPointsPath)
+        ).toString("utf8");
+      } catch (cause) {
+        if (isMissingPath(cause)) continue;
+        throw cause;
+      }
+      let group: string | undefined;
+      for (const rawLine of entryPoints.split(/\r?\n/u)) {
+        const line = rawLine.trim();
+        if (line.length === 0 || line.startsWith("#") || line.startsWith(";"))
+          continue;
+        const heading = /^\[([^\]]+)\]$/u.exec(line);
+        if (heading !== null) {
+          group = heading[1]?.trim().toLowerCase();
+          continue;
+        }
+        if (group === "unblob_v1")
+          throw new Error(
+            "Unblob runtime contains a caller-installed unblob_v1 plugin entrypoint",
+          );
+      }
+    }
+  }
+}
+
+const immutableRuntimeAdmissionCache = new Set<string>();
+
+export function assertUnblobRuntimeAdmissionQueueBound(
+  visitedCount: number,
+  pendingCount: number,
+  additions = 1,
+): void {
+  if (visitedCount + pendingCount + additions > MAX_AUDITED_RUNTIME_NODES)
+    throw new Error("Unblob Python runtime exceeds the bounded admission scan");
+}
+
+export function assertUnblobRuntimeNodeBudget(
+  scannedNodes: number,
+  additions = 1,
+): number {
+  const total = scannedNodes + additions;
+  if (total > MAX_AUDITED_RUNTIME_NODES)
+    throw new Error("Unblob Python runtime exceeds the bounded admission scan");
+  return total;
+}
+
+async function auditImmutableRuntimePath(
+  root: string,
+  path: string,
+  seen: Set<string>,
+  pending: string[],
+): Promise<void> {
+  const canonicalRoot = resolve(root);
+  const absolute = resolve(path);
+  const relativePath = relative(canonicalRoot, absolute);
+  if (
+    relativePath === ".." ||
+    relativePath.startsWith(`..${sep}`) ||
+    isAbsolute(relativePath)
+  )
+    throw new Error("Unblob Python runtime path escapes its admitted root");
+
+  let current = canonicalRoot;
+  const components = relativePath === "" ? [] : relativePath.split(sep);
+  const rootComponents = canonicalRoot.split(sep).filter(Boolean);
+  current = sep;
+  for (const component of [...rootComponents, ...components]) {
+    if (component !== "") current = join(current, component);
+    if (seen.has(current)) continue;
+    let identity;
+    try {
+      identity = await lstat(current);
+    } catch {
+      throw new Error("Unblob Python runtime contains an unverifiable path");
+    }
+    if (
+      identity.uid === process.getuid?.() ||
+      identity.uid === process.geteuid?.() ||
+      (await access(current, constants.W_OK)
+        .then(() => true)
+        .catch(() => false))
+    )
+      throw new Error("Unblob Python runtime is mutable or unverifiable");
+    assertUnblobRuntimeAdmissionQueueBound(seen.size, pending.length);
+    seen.add(current);
+    if (identity.isSymbolicLink()) {
+      let target: string;
+      try {
+        target = await realpath(current);
+      } catch {
+        throw new Error(
+          "Unblob Python runtime contains an unverifiable symlink",
+        );
+      }
+      const targetRelative = relative(canonicalRoot, target);
+      if (
+        targetRelative === ".." ||
+        targetRelative.startsWith(`..${sep}`) ||
+        isAbsolute(targetRelative)
+      )
+        throw new Error(
+          "Unblob Python runtime symlink escapes its admitted root",
+        );
+      assertUnblobRuntimeAdmissionQueueBound(seen.size, pending.length);
+      pending.push(target);
+    }
+  }
+  assertUnblobRuntimeAdmissionQueueBound(seen.size, pending.length);
+  pending.push(absolute);
+}
+
+async function auditImmutableUnblobRuntime(
+  root: string,
+  executable: string,
+  python: string,
+): Promise<void> {
+  const effectiveUid = process.geteuid?.();
+  const realUid = process.getuid?.();
+  if (
+    effectiveUid === undefined ||
+    realUid === undefined ||
+    effectiveUid === 0 ||
+    realUid !== effectiveUid
+  )
+    throw new Error("Unblob Python runtime is mutable or unverifiable");
+  const cacheKey = `${effectiveUid}:${root}:${executable}:${python}`;
+  if (immutableRuntimeAdmissionCache.has(cacheKey)) return;
+  const seen = new Set<string>();
+  const pending: string[] = [];
+  assertUnblobRuntimeAdmissionQueueBound(0, pending.length, 2);
+  pending.push(executable, python);
+  const libraryRoots = [
+    join(root, "usr/lib"),
+    join(root, "usr/lib64"),
+    join(root, "usr/local/lib"),
+    join(root, "usr/local/lib64"),
+  ];
+  let pythonRootCount = 0;
+  let scannedRuntimeNodes = 0;
+  for (const libraryRoot of libraryRoots) {
+    let directory;
+    try {
+      directory = await opendir(libraryRoot);
+    } catch (cause) {
+      if (isMissingPath(cause)) continue;
+      throw cause;
+    }
+    for await (const entry of directory) {
+      scannedRuntimeNodes = assertUnblobRuntimeNodeBudget(scannedRuntimeNodes);
+      if (/^python\d+(?:\.\d+)?\.zip$/u.test(entry.name)) {
+        assertUnblobRuntimeAdmissionQueueBound(seen.size, pending.length);
+        pending.push(join(libraryRoot, entry.name));
+      }
+      if (!entry.isDirectory() || !/^python\d+(?:\.\d+)?$/u.test(entry.name))
+        continue;
+      pythonRootCount += 1;
+      assertUnblobRuntimeAdmissionQueueBound(seen.size, pending.length);
+      pending.push(join(libraryRoot, entry.name));
+    }
+  }
+  if (pythonRootCount === 0)
+    throw new Error("Unblob Python runtime is mutable or unverifiable");
+
+  while (pending.length > 0) {
+    const path = pending.pop();
+    if (path === undefined) continue;
+    if (seen.has(resolve(path))) continue;
+    await auditImmutableRuntimePath(root, path, seen, pending);
+    let canonical: string;
+    try {
+      canonical = await realpath(path);
+    } catch {
+      throw new Error("Unblob Python runtime contains an unverifiable path");
+    }
+    const identity = await lstat(canonical);
+    if (identity.isDirectory()) {
+      let directory;
+      try {
+        directory = await opendir(canonical);
+      } catch {
+        throw new Error(
+          "Unblob Python runtime contains an unverifiable directory",
+        );
+      }
+      for await (const entry of directory) {
+        scannedRuntimeNodes =
+          assertUnblobRuntimeNodeBudget(scannedRuntimeNodes);
+        assertUnblobRuntimeAdmissionQueueBound(seen.size, pending.length);
+        pending.push(join(canonical, entry.name));
+      }
+    }
+    if (seen.size > MAX_AUDITED_RUNTIME_NODES)
+      throw new Error(
+        "Unblob Python runtime exceeds the bounded admission scan",
+      );
+  }
+  // A successful scan proves this identity cannot mutate any admitted node or
+  // parent path. Keep that proof for this process; runtime changes by its
+  // trusted owner require restarting REA to establish a fresh admission.
+  immutableRuntimeAdmissionCache.add(cacheKey);
+}
+const cgroupGate = String.raw`import json, os, pathlib, resource, sys
 config = json.loads(sys.argv[1])
 def fail(reason='policy mismatch'):
     print('Unblob systemd resource boundary verification failed: ' + reason, file=sys.stderr)
     raise SystemExit(125)
+def enqueue_bounded(pending, visited_count, candidate):
+    if visited_count + len(pending) + 1 > 100000:
+        fail('runtime admission scan exceeds its bound')
+    pending.append(str(candidate))
+def audit_immutable_runtime(paths):
+    if os.geteuid() == 0 or os.getuid() != os.geteuid():
+        fail('runtime mutability cannot be excluded for this identity')
+    root = pathlib.Path('/').resolve()
+    visited = set()
+    pending = []
+    for path in paths:
+        enqueue_bounded(pending, len(visited), path)
+    while pending:
+        candidate = pathlib.Path(os.path.abspath(pending.pop()))
+        try:
+            lexical = candidate
+            lexical.relative_to(root)
+            for ancestor in (lexical, *lexical.parents):
+                if ancestor in visited:
+                    continue
+                info = ancestor.lstat()
+                writable = os.access(ancestor, os.W_OK, effective_ids=True)
+                if info.st_uid in (os.getuid(), os.geteuid()) or writable:
+                    fail('runtime lexical path is mutable by the invoking identity')
+                if len(visited) + len(pending) + 1 > 100000:
+                    fail('runtime admission scan exceeds its bound')
+                visited.add(ancestor)
+            if candidate.is_symlink():
+                link_info = candidate.lstat()
+                if link_info.st_uid in (os.getuid(), os.geteuid()) or os.access(candidate, os.W_OK, effective_ids=True):
+                    fail('mutable runtime symlink')
+            resolved = candidate.resolve(strict=True)
+            resolved.relative_to(root)
+        except SystemExit:
+            raise
+        except Exception:
+            fail('unverifiable runtime path or escaping symlink')
+        for ancestor in (resolved, *resolved.parents):
+            if ancestor in visited:
+                continue
+            try:
+                info = ancestor.lstat()
+                writable = os.access(ancestor, os.W_OK, effective_ids=True)
+            except Exception:
+                fail('unverifiable runtime path')
+            if info.st_uid in (os.getuid(), os.geteuid()) or writable:
+                fail('runtime path is mutable by the invoking identity')
+            if len(visited) + len(pending) + 1 > 100000:
+                fail('runtime admission scan exceeds its bound')
+            visited.add(ancestor)
+        if resolved.is_dir():
+            try:
+                for child in resolved.iterdir():
+                    enqueue_bounded(pending, len(visited), child)
+            except Exception:
+                fail('unverifiable runtime directory')
 try:
     if os.readlink('/proc/self/ns/pid') == config['host_pid_namespace']:
         fail('PrivatePIDs is unavailable or was not applied')
+    host_ipc_namespace = config.get('host_ipc_namespace')
+    if (not isinstance(host_ipc_namespace, str) or
+            not host_ipc_namespace.startswith('ipc:[') or
+            not host_ipc_namespace.endswith(']') or
+            not host_ipc_namespace[5:-1].isdigit()):
+        fail('host IPC namespace identity is unavailable')
+    if os.readlink('/proc/self/ns/ipc') == host_ipc_namespace:
+        fail('PrivateIPC is unavailable or was not applied')
+    file_size_soft, file_size_hard = resource.getrlimit(resource.RLIMIT_FSIZE)
+    if file_size_soft == resource.RLIM_INFINITY or file_size_hard == resource.RLIM_INFINITY:
+        fail('file-size limit is unbounded')
+    if file_size_soft > config['file_size_bytes'] or file_size_hard > config['file_size_bytes']:
+        fail('file-size limit mismatch: soft=%s hard=%s' % (file_size_soft, file_size_hard))
     cgroup_line = next(line for line in open('/proc/self/cgroup', encoding='ascii') if line.startswith('0::'))
     process_cgroup = '/' + cgroup_line[3:].strip().strip('/')
     if process_cgroup == '/' or '..' in pathlib.PurePosixPath(process_cgroup).parts:
@@ -84,21 +522,110 @@ except SystemExit:
 except Exception as error:
     fail(type(error).__name__ + ': ' + str(error))
 # User-manager variables are not part of the provider contract. Keep only the
-# fixed runtime environment after admission and before either Unblob exec or
-# post-gate site initialization.
+# fixed runtime environment after resource admission and before Python imports.
 run_id = os.environ.get('REA_PROCESS_RUN_ID', '')
 os.environ.clear()
 os.environ.update({'PATH': '/usr/local/bin:/usr/bin:/bin', 'TMPDIR': '/tmp', 'REA_PROCESS_RUN_ID': run_id})
+import configparser, hashlib, re, runpy, stat, sysconfig
+if re.fullmatch(r'/usr/(?:local/)?bin/python3(?:\.\d+)?', sys.executable) is None:
+    fail('Python interpreter is outside the supported system prefixes')
+_configured = sysconfig.get_paths()
+_runtime_paths = [sys.executable] + list(sys.path) + [_configured[key] for key in ('purelib', 'platlib', 'stdlib', 'platstdlib') if _configured.get(key)]
+audit_immutable_runtime(_runtime_paths)
+def audit_runtime_startup_files():
+    configured = sysconfig.get_paths()
+    paths = sorted(set(path for key, path in configured.items() if key in ('purelib', 'platlib')))
+    startup_paths = sorted(set(path for key, path in configured.items() if key in ('purelib', 'platlib', 'stdlib', 'platstdlib')))
+    if not paths or any(not os.path.isdir(path) for path in paths + startup_paths):
+        fail('Python site-package directories are unavailable for admission')
+    scanned = [0]
+    def bounded_scandir(path):
+        try:
+            with os.scandir(path) as entries:
+                for entry in entries:
+                    scanned[0] += 1
+                    if scanned[0] > 8192:
+                        fail('Python startup audit exceeds its bounded entry scan')
+                    yield entry
+        except SystemExit:
+            raise
+        except Exception as error:
+            fail('unverifiable Python startup directory: ' + type(error).__name__)
+    def read_bounded_metadata(path):
+        fd = None
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_size > 1048576:
+                fail('Python startup metadata exceeds 1048576 bytes or is not regular')
+            data = bytearray()
+            while len(data) <= 1048576:
+                chunk = os.read(fd, min(65536, 1048577 - len(data)))
+                if not chunk:
+                    break
+                data.extend(chunk)
+            if len(data) > 1048576:
+                fail('Python startup metadata exceeds 1048576 bytes')
+            return data.decode('utf-8')
+        except SystemExit:
+            raise
+        except Exception as error:
+            fail('unverifiable Python startup metadata: ' + type(error).__name__)
+        finally:
+            if fd is not None:
+                os.close(fd)
+    for startup_path in startup_paths:
+        for entry in bounded_scandir(startup_path):
+            name = entry.name
+            if name in ('sitecustomize', 'usercustomize') or name.startswith(('sitecustomize.', 'usercustomize.')):
+                fail('prohibited Python startup hook: ' + name)
+    for site_path in paths:
+        for item in bounded_scandir(site_path):
+            name = item.name
+            candidate = pathlib.Path(site_path) / name
+            if name.endswith('.pth'):
+                if candidate.is_symlink() or not candidate.is_file() or hashlib.sha256(read_bounded_metadata(candidate)).hexdigest() != '2638ce9e2500e572a5e0de7faed6661eb569d1b696fcba07b0dd223da5f5d224':
+                    fail('unaudited Python startup hook: ' + name)
+            if not name.endswith(('.dist-info', '.egg-info')):
+                continue
+            if candidate.is_symlink() or not candidate.is_dir():
+                fail('unsafe Python distribution metadata identity: ' + name)
+            entry_points = candidate / 'entry_points.txt'
+            try:
+                entry_identity = entry_points.lstat()
+            except FileNotFoundError:
+                continue
+            if entry_identity:
+                if stat.S_ISLNK(entry_identity.st_mode) or not stat.S_ISREG(entry_identity.st_mode):
+                    fail('unsafe Python entry point metadata identity')
+                parser = configparser.ConfigParser(interpolation=None, strict=True)
+                try: parser.read_string(read_bounded_metadata(entry_points))
+                except SystemExit: raise
+                except Exception as error: fail('malformed Python distribution entry point metadata: ' + type(error).__name__)
+                if parser.has_section('unblob_v1') and list(parser.items('unblob_v1')):
+                    fail('caller-installed unblob_v1 plugin entrypoint is prohibited')
+    return paths
+site_paths = audit_runtime_startup_files()
+# Do not initialize the site module: it executes .pth files and imports
+# sitecustomize. The pinned setuptools hook is admitted by digest but disabled.
+sys.path.extend(path for path in site_paths if path not in sys.path)
+import pluggy
+def disable_setuptools_plugin_discovery(self, group='unblob_v1', name=None):
+    return 0
+pluggy.PluginManager.load_setuptools_entrypoints = disable_setuptools_plugin_discovery
 arguments = sys.argv[3:]
+argv = [sys.argv[2], *arguments]
+sys.argv = argv
 if '--extract-dir' not in arguments or '--skip-extraction' in arguments:
-    os.execv(sys.argv[2], [sys.argv[2], *arguments])
+    try:
+        runpy.run_path(sys.argv[0], run_name='__main__')
+    except SystemExit as result:
+        code = result.code if isinstance(result.code, int) else (0 if result.code is None else 1)
+        raise SystemExit(code)
+    raise SystemExit(0)
 
 # Extraction mode runs only after the resource gate, then emits a bounded,
 # authenticated file stream. All producer bytes stay on the capped service tmpfs.
-# Restore the runtime's global site-packages only after the manager boundary and
-# gate are active; -I -S prevented .pth/sitecustomize execution during bootstrap.
-import site
-site.main()
 import contextlib, hashlib, io, json, runpy, struct, traceback
 MAX_TEXT = 8 * 1024 * 1024
 MAX_ENTRIES = config.get('max_entries', 512)
@@ -301,6 +828,12 @@ export async function buildUnblobSystemdInvocation(
     throw new Error(
       "Unblob Python interpreter must resolve inside its admitted runtime root",
     );
+  if (!/^(?:usr|usr\/local)\/bin\/python3(?:\.\d+)?$/u.test(pythonRelative))
+    throw new Error(
+      "Unblob Python interpreter must resolve under a supported system prefix",
+    );
+  await auditImmutableUnblobRuntime(rootDirectory, executable, pythonPath);
+  await auditUnblobRuntimeStartupFiles(rootDirectory);
   const runIdMatch = runIdPattern.exec(runId);
   if (runIdMatch === null)
     throw new Error(
@@ -459,6 +992,7 @@ export async function buildUnblobSystemdInvocation(
     "--property=PrivateNetwork=yes",
     "--property=PrivateDevices=yes",
     "--property=PrivatePIDs=yes",
+    "--property=PrivateIPC=yes",
     "--property=NoNewPrivileges=yes",
     "--property=ProtectSystem=strict",
     "--property=ProtectHome=tmpfs",
@@ -491,6 +1025,8 @@ export async function buildUnblobSystemdInvocation(
     "/tmp/rea-unblob-gate.py",
     JSON.stringify({
       host_pid_namespace: await readlink("/proc/self/ns/pid"),
+      host_ipc_namespace: await readlink("/proc/self/ns/ipc"),
+      file_size_bytes: SERVICE_LIMITS.fileSizeMax,
       memory_bytes: SERVICE_LIMITS.memoryMax,
       tasks: SERVICE_LIMITS.tasksMax,
       tmpfs_bytes: tmpfsBytes,

@@ -1,0 +1,28 @@
+FROM docker.io/library/python:3.12-slim@sha256:2fe5997d249a808b8eeea52c58a1dbffbba28754dc11699ef5c029f2d818ce79 AS build
+
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      gcc=4:14.2.0-1 \
+      git=1:2.47.3-0+deb13u1 \
+      libc6-dev=2.41-12+deb13u4 \
+      libmagic1t64=1:5.46-5 \
+      libmagic-mgc=1:5.46-5 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.lock /tmp/requirements.lock
+RUN python -m pip install --no-cache-dir \
+      --disable-pip-version-check \
+      -r /tmp/requirements.lock
+
+FROM docker.io/library/python:3.12-slim@sha256:2fe5997d249a808b8eeea52c58a1dbffbba28754dc11699ef5c029f2d818ce79
+
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      7zip=25.01+dfsg-1~deb13u2 \
+      libmagic1t64=1:5.46-5 \
+      libmagic-mgc=1:5.46-5 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=build /usr/local /usr/local
+ENV PATH="/usr/local/bin:/usr/bin:/bin"
+ENTRYPOINT ["/usr/local/bin/unblob"]

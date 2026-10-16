@@ -3,9 +3,8 @@ import { PassThrough } from "node:stream";
 import { expect, it, vi } from "vitest";
 import { ProviderProcessSupervisor } from "./ProviderProcess.js";
 import { redactCapturedTransportCredential } from "./ProviderDiagnosticRedaction.js";
-import { createHash } from "node:crypto";
 
-it("preserves a UTF8 BOM as source text and reports the exact retained byte digest", () => {
+it("preserves a UTF8 BOM as source text in retained diagnostics", () => {
   const producer = Object.assign(new EventEmitter(), {
     stdout: new PassThrough(),
     stderr: new PassThrough(),
@@ -24,8 +23,6 @@ it("preserves a UTF8 BOM as source text and reports the exact retained byte dige
       text: "\ufeffsource-é😀",
       bytes: bytes.length,
       observedBytes: bytes.length,
-      utf8Valid: true,
-      sha256: createHash("sha256").update(bytes).digest("hex"),
     });
   } finally {
     supervisor.dispose();
@@ -52,8 +49,7 @@ it("distinguishes observed bytes from retained split UTF8 at the actual aggregat
         text: "é�",
         bytes: 3,
         observedBytes: 6,
-        utf8Valid: false,
-        sha256: createHash("sha256").update(bytes.subarray(0, 3)).digest("hex"),
+        invalidUtf8: true,
       },
     });
   } finally {

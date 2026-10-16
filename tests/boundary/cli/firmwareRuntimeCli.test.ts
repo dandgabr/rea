@@ -111,11 +111,13 @@ it("advertises the actual inline string representation and preserves native omis
     });
     const options = Reflect.get(advertised as object, "options") as object;
     const properties = Reflect.get(options, "properties") as object;
-    const validate = new Ajv2020({ strict: false }).compile(
-      Reflect.get(properties, "runtime") as object,
-    );
+    const runtimeSchema = Reflect.get(properties, "runtime") as object;
+    const validate = new Ajv2020({ strict: false }).compile(runtimeSchema);
     expect(validate(JSON.stringify(selected))).toBe(true);
     expect(validate(selected)).toBe(false);
+    expect(Reflect.get(runtimeSchema, "description")).toContain(
+      "caller-container runtime is currently unavailable",
+    );
   }
   expect(
     await invoke([

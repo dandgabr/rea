@@ -64,6 +64,57 @@ it("conjoins declared schema dependencies with inferred required partners", () =
 });
 
 it.each([
+  ["draft-07", "dependencies", Ajv],
+  ["draft-2020-12", "dependentSchemas", Ajv2020],
+] as const)(
+  "preserves schema-valued dependencies in the %s dialect while keeping property dependencies as guidance",
+  (dialect, dependencyKeyword, AjvConstructor) => {
+    const draft07 = dialect === "draft-07";
+    const dependency = {
+      properties: { provider_id: { const: "unblob" } },
+      required: ["provider_id"],
+    };
+    const schema = presentInputJsonSchema(
+      {
+        $schema: draft07
+          ? "http://json-schema.org/draft-07/schema#"
+          : "https://json-schema.org/draft/2020-12/schema",
+        type: "object",
+        properties: {
+          provider_id: { enum: ["binwalk", "unblob"] },
+          runtime: { type: "object" },
+          options: { type: "object" },
+        },
+        required: ["provider_id"],
+        dependencies: {
+          runtime: dependency,
+          options: ["provider_id"],
+        },
+        dependentSchemas: { runtime: dependency },
+      },
+      () => undefined,
+    );
+    expect(schema).toHaveProperty(`${dependencyKeyword}.runtime`);
+    expect(schema).not.toHaveProperty(
+      draft07 ? "dependentSchemas" : "dependencies.runtime",
+    );
+    expect(schema.description).toContain(
+      "When options is provided, also provide provider_id.",
+    );
+
+    const ajv = new AjvConstructor({ strict: false });
+    expect(ajv.validateSchema(schema)).toBe(true);
+    const validate = ajv.compile(schema);
+    expect(validate({ provider_id: "binwalk" })).toBe(true);
+    expect(validate({ provider_id: "binwalk", runtime: {} })).toBe(false);
+    expect(validate({ provider_id: "unblob", runtime: {} })).toBe(true);
+    // Property-list dependencies are rendered as caller guidance rather than
+    // schema constraints in the compact input presentation.
+    expect(validate({ provider_id: "binwalk", options: {} })).toBe(true);
+  },
+);
+
+it.each([
   { target: "07", runtime: ["confirmation"] },
   { target: "07", runtime: false },
   { target: "07", runtime: true },
@@ -113,12 +164,17 @@ it.each([
     expect(ajv.validateSchema(schema)).toBe(true);
     const validate = ajv.compile(schema);
     expect(validate({ path: "/fw" })).toBe(true);
-    expect(validate({ path: "/fw", marker: true })).toBe(false);
+    expect(schema).not.toHaveProperty("dependencies.marker");
+    expect(schema).not.toHaveProperty("dependentRequired.marker");
+    expect(schema.description).toContain(
+      "When marker is provided, also provide confirmation.",
+    );
+    expect(validate({ path: "/fw", marker: true })).toBe(true);
     expect(validate({ path: "/fw", marker: true, confirmation: true })).toBe(
       true,
     );
     expect(validate({ path: "/fw", runtime: {}, confirmation: true })).toBe(
-      false,
+      Array.isArray(runtime),
     );
     expect(
       validate({
@@ -127,9 +183,9 @@ it.each([
         profile: "/store",
         confirmation: true,
       }),
-    ).toBe(runtime !== false);
+    ).toBe(Array.isArray(runtime) || runtime === true);
     expect(validate({ path: "/fw", runtime: {}, profile: "/store" })).toBe(
-      runtime === true,
+      Array.isArray(runtime) || runtime === true,
     );
   },
 );

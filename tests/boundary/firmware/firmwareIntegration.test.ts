@@ -9,6 +9,7 @@ import {
 import {
   firmwareResultSchemas,
   binwalkRegionResultSchema,
+  firmwareExtractionObservationSchema,
 } from "../../../src/domain/firmware/firmwareAnalysis.js";
 import { FirmwareAnalysisService } from "../../../src/application/firmware/FirmwareAnalysisService.js";
 import { FirmwareProvider } from "../../../src/firmware/FirmwareProvider.js";
@@ -710,6 +711,146 @@ it("routes a nested unknown chunk through its published child", async () => {
   );
 });
 
+it("retains recovery references in public partial Evidence after publication failure", async () => {
+  const fixture = await firmwareFixture("nested-unknown");
+  const originalWrite = SafeOutputTree.prototype.write;
+  let injected = false;
+  const write = vi
+    .spyOn(SafeOutputTree.prototype, "write")
+    .mockImplementation(async function (this: SafeOutputTree, ...args) {
+      if (this.outputRoot !== fixture.output || injected)
+        return originalWrite.apply(this, args);
+      await originalWrite.apply(this, args);
+      injected = true;
+      throw new Error("injected after staged firmware write");
+    });
+  try {
+    const result = await fixture.service.execute("extract_firmware", {
+      path: fixture.path,
+      output_directory: fixture.output,
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("Expected publication to fail");
+    const projected = projectAnalysisError(result.error);
+    expect(projected).toMatchObject({
+      details: {
+        partial_observation: {
+          kind: "firmware",
+          result: {
+            publication_state: "not_committed",
+            extraction_gaps: [
+              expect.objectContaining({
+                kind: "unknown-chunk-handler",
+                input_path: "$output/rootfs/config",
+                continuation_id: expect.any(String),
+              }),
+            ],
+            extraction_continuations: [
+              {
+                id: expect.any(String),
+                instruction: expect.stringContaining(
+                  "no verified committed child",
+                ),
+              },
+            ],
+          },
+        },
+      },
+    });
+    const details = jsonObjectSchema.parse(projected.details);
+    const partial = jsonObjectSchema.parse(details.partial_observation);
+    const facts = firmwareExtractionObservationSchema.parse(partial.result);
+    const [gap] = facts.extraction_gaps;
+    expect(gap).toBeDefined();
+    expect(facts.extraction_continuations).toContainEqual(
+      expect.objectContaining({
+        id: gap?.continuation_id,
+        instruction: expect.stringContaining("no verified committed child"),
+      }),
+    );
+    expect(facts).not.toHaveProperty("files");
+  } finally {
+    write.mockRestore();
+    await fixture.close();
+  }
+  await assertFirmwareCleanup(fixture.launches);
+});
+
+it("retains unpublished entry metadata and linked gaps in partial Evidence", async () => {
+  const fixture = await firmwareFixture("link");
+  const originalWrite = SafeOutputTree.prototype.write;
+  let injected = false;
+  const write = vi
+    .spyOn(SafeOutputTree.prototype, "write")
+    .mockImplementation(async function (this: SafeOutputTree, ...args) {
+      if (this.outputRoot !== fixture.output || injected)
+        return originalWrite.apply(this, args);
+      await originalWrite.apply(this, args);
+      injected = true;
+      throw new Error("injected after staged firmware write");
+    });
+  try {
+    const result = await fixture.service.execute("extract_firmware", {
+      path: fixture.path,
+      output_directory: fixture.output,
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("Expected publication to fail");
+    const projected = projectAnalysisError(result.error);
+    expect(projected).toMatchObject({
+      details: {
+        partial_observation: {
+          kind: "firmware",
+          result: {
+            publication_state: "not_committed",
+            unpublished_entries: [
+              {
+                relative_path: "escape",
+                kind: "symlink",
+                link_target: "/etc/passwd",
+              },
+            ],
+            extraction_gaps: [
+              expect.objectContaining({
+                kind: "unpublished-entry",
+                input_path: "$output/escape",
+                relative_path: "escape",
+                continuation_id: expect.any(String),
+              }),
+            ],
+            extraction_continuations: [
+              {
+                id: expect.any(String),
+                instruction: expect.stringContaining(
+                  "Retain the link or special entry as metadata",
+                ),
+              },
+            ],
+          },
+        },
+      },
+    });
+    const details = jsonObjectSchema.parse(projected.details);
+    const partial = jsonObjectSchema.parse(details.partial_observation);
+    const facts = firmwareExtractionObservationSchema.parse(partial.result);
+    const [gap] = facts.extraction_gaps;
+    expect(gap?.continuation_id).toBe(facts.extraction_continuations[0]?.id);
+    expect(facts.unpublished_entries).toEqual([
+      {
+        relative_path: "escape",
+        kind: "symlink",
+        link_target: "/etc/passwd",
+      },
+    ]);
+    expect(facts).not.toHaveProperty("files");
+    expect(facts).not.toHaveProperty("output_directory");
+  } finally {
+    write.mockRestore();
+    await fixture.close();
+  }
+  await assertFirmwareCleanup(fixture.launches);
+});
+
 it("retains every eligible child in a maximum-depth continuation", async () => {
   const fixture = await firmwareFixture("depth-reentry");
   const result = await fixture.service.execute("extract_firmware", {
@@ -734,30 +875,47 @@ it("retains every eligible child in a maximum-depth continuation", async () => {
 });
 
 it("withholds the nested rerun advice when the published child exceeds the input limit", async () => {
-  const fixture = await firmwareFixture("nested-unknown-oversized");
-  const result = await fixture.service.execute("extract_firmware", {
-    path: fixture.path,
-    output_directory: fixture.output,
-  });
-  if (!result.ok) throw result.error;
-  const normalized = firmwareResultSchemas.extract_firmware.parse(
-    result.value.normalized_result,
+  const testInputLimit = 20;
+  const descriptor = Object.getOwnPropertyDescriptor(
+    FIRMWARE_LIMITS,
+    "inputBytes",
   );
-  expect(gapsWithContinuations(normalized)).toEqual([
-    {
-      kind: "unknown-chunk-handler",
-      input_path: "$output/rootfs/config",
-      relative_path: null,
-      handler: null,
-      provider_id: "unknown-id",
-      range: { offset: 0, length: 14 },
-      root_file_range: null,
-      dependencies: [],
-      continuation: expect.stringContaining(
-        "cannot accept it as a fresh input",
-      ),
-    },
-  ]);
+  if (descriptor === undefined) throw new Error("Missing firmware input limit");
+  Object.defineProperty(FIRMWARE_LIMITS, "inputBytes", {
+    value: testInputLimit,
+  });
+  let fixture: Awaited<ReturnType<typeof firmwareFixture>> | undefined;
+  try {
+    fixture = await firmwareFixture("nested-unknown-oversized");
+    const result = await fixture.service.execute("extract_firmware", {
+      path: fixture.path,
+      output_directory: fixture.output,
+    });
+    if (!result.ok) throw result.error;
+    const normalized = firmwareResultSchemas.extract_firmware.parse(
+      result.value.normalized_result,
+    );
+    expect(gapsWithContinuations(normalized)).toEqual([
+      {
+        kind: "unknown-chunk-handler",
+        input_path: "$output/rootfs/config",
+        relative_path: null,
+        handler: null,
+        provider_id: "unknown-id",
+        range: { offset: 0, length: 14 },
+        root_file_range: null,
+        dependencies: [],
+        continuation: expect.stringContaining(
+          "cannot accept it as a fresh input",
+        ),
+      },
+    ]);
+    expect(normalized.files[0]?.size).toBeGreaterThan(testInputLimit);
+  } finally {
+    if (fixture !== undefined) await fixture.close();
+    Object.defineProperty(FIRMWARE_LIMITS, "inputBytes", descriptor);
+  }
+  if (fixture !== undefined) await assertFirmwareCleanup(fixture.launches);
 });
 
 it.each([
@@ -1196,6 +1354,56 @@ it("names the accepted release line when the banner is another line", async () =
       reason: expect.stringContaining("Binwalk 3.1.x"),
     },
   });
+  if (result.ok) throw new Error("Unsupported version must be refused");
+  expect(result.error.capturedOutput).toMatchObject({
+    stdout: "binwalk 3.2.0\n",
+    stdout_bytes: Buffer.byteLength("binwalk 3.2.0\n"),
+    arguments: ["--version"],
+    command: "/usr/bin/true",
+  });
+  await assertFirmwareCleanup(fixture.launches);
+});
+
+it("retains malformed version bytes and command identity when refusing the banner", async () => {
+  const fixture = await firmwareFixture("version-invalid-utf8");
+  const result = await fixture.service.execute("inspect_firmware_regions", {
+    path: fixture.path,
+  });
+  expect(result).toMatchObject({
+    ok: false,
+    error: {
+      _tag: "AnalysisOutputError",
+      message: expect.stringContaining("not valid UTF-8"),
+      capturedOutput: {
+        stdout: "�\n",
+        stdout_bytes: 2,
+        stdout_utf8_valid: false,
+        arguments: ["--version"],
+        command: "/usr/bin/true",
+      },
+    },
+  });
+  await assertFirmwareCleanup(fixture.launches);
+});
+
+it("retains an overlong version banner and command identity when refusing it", async () => {
+  const banner = "x".repeat(1025);
+  const fixture = await firmwareFixture("normal", banner);
+  const result = await fixture.service.execute("inspect_firmware_regions", {
+    path: fixture.path,
+  });
+  expect(result).toMatchObject({
+    ok: false,
+    error: {
+      _tag: "AnalysisCapabilityUnavailableError",
+      capturedOutput: {
+        stdout: `${banner}\n`,
+        stdout_bytes: 1026,
+        arguments: ["--version"],
+        command: "/usr/bin/true",
+      },
+    },
+  });
   await assertFirmwareCleanup(fixture.launches);
 });
 
@@ -1287,6 +1495,80 @@ it.skip("blocked: Unblob skip-extraction inspection", async () => {
     provider_id: "binwalk",
   });
   expect(supported.ok && supported.value.provider.id).toBe("binwalk");
+  await assertFirmwareCleanup(fixture.launches);
+});
+
+it("keeps framed Unblob guest diagnostics separate from launcher transport capture", async () => {
+  const fixture = await firmwareFixture();
+  const outcome = await fixture.service.execute("extract_firmware", {
+    path: fixture.path,
+    output_directory: fixture.output,
+    provider_id: "unblob",
+  });
+  if (!outcome.ok) throw outcome.error;
+  const raw = jsonObjectSchema.parse(outcome.value.raw_result);
+  const execution = jsonObjectSchema.parse(raw.execution);
+  const transport = jsonObjectSchema.parse(execution.transport);
+  const guestCapture = jsonObjectSchema.parse(execution.captured_output);
+  const transportCapture = jsonObjectSchema.parse(transport.captured_output);
+
+  expect(execution).toMatchObject({
+    command: expect.stringContaining("unblob-command"),
+    stdout: { text: expect.any(String), bytes: expect.any(Number) },
+  });
+  expect(guestCapture).toMatchObject({
+    command: expect.stringContaining("unblob-command"),
+    arguments: expect.arrayContaining(["--extract-dir"]),
+  });
+  expect(transport).toMatchObject({
+    command: process.execPath,
+    resource_limiter: process.execPath,
+    stdout: { text: "" },
+  });
+  expect(transportCapture).toMatchObject({
+    command: process.execPath,
+    arguments: expect.arrayContaining([
+      expect.stringContaining("/tests/fixtures/firmware/producer.mjs"),
+    ]),
+  });
+  expect(transport.arguments).toEqual(transportCapture.arguments);
+  expect(execution).not.toHaveProperty("resource_limiter");
+  await assertFirmwareCleanup(fixture.launches);
+});
+
+it("retains malformed guest frame bytes and transport capture on UTF-8 rejection", async () => {
+  const fixture = await firmwareFixture("frame-invalid-utf8");
+  const outcome = await fixture.service.execute("extract_firmware", {
+    path: fixture.path,
+    output_directory: fixture.output,
+    provider_id: "unblob",
+  });
+  expect(outcome).toMatchObject({
+    ok: false,
+    error: {
+      _tag: "AnalysisOutputError",
+      message: expect.stringContaining("stdout is not valid UTF-8"),
+      capturedOutput: {
+        stdout: "�",
+        stdout_bytes: 1,
+        stdout_utf8_valid: false,
+        stdout_sha256: createHash("sha256")
+          .update(Buffer.from([0xff]))
+          .digest("hex"),
+        command: expect.stringContaining("unblob-command"),
+        arguments: expect.arrayContaining(["--extract-dir"]),
+      },
+      diagnostics: {
+        output_source: "unblob_guest_frame",
+        transport_capture: {
+          command: process.execPath,
+          arguments: expect.arrayContaining([
+            expect.stringContaining("/tests/fixtures/firmware/producer.mjs"),
+          ]),
+        },
+      },
+    },
+  });
   await assertFirmwareCleanup(fixture.launches);
 });
 

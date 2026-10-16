@@ -18,7 +18,7 @@ it.each([
 ] as const)(
   "requires an admitted native runtime root for Unblob operation %s before process launch",
   async (operation, input) => {
-    const fixture = await firmwareFixture();
+    const fixture = await firmwareFixture("normal", undefined, "missing");
     const outcome = await fixture.service.execute(operation, {
       ...input,
       ...("path" in input ? { path: fixture.path } : {}),

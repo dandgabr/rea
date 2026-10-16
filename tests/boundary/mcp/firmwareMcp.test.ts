@@ -165,7 +165,7 @@ test.skipIf(
 );
 
 it("executes named firmware contracts with inline Evidence and no native binary admission", async () => {
-  const fixture = await firmwareFixture();
+  const fixture = await firmwareFixture("dependency");
   const session = createTestBinarySession(() => {
     throw new Error("Firmware inspection must not acquire a native provider");
   });
@@ -261,26 +261,37 @@ it("executes named firmware contracts with inline Evidence and no native binary 
                 : {}),
             },
     });
-    if (contract.name !== "inspect_firmware_regions") {
-      expect(response.isError, JSON.stringify(response)).toBe(true);
-      expect(JSON.stringify(response)).toContain(
-        contract.name === "extract_firmware"
-          ? "absolute REA_UNBLOB_RUNTIME_ROOT"
-          : "absolute REA_UNBLOB_RUNTIME_ROOT",
-      );
-      continue;
-    }
     expect(response.isError, JSON.stringify(response)).not.toBe(true);
     const result = contract.outputSchema.parse(response.structuredContent);
     const evidence = parseEvidence(result);
     expect(evidence.operation).toBe(contract.name);
     expect(evidence.raw_result).not.toBeNull();
+    if (
+      contract.name === "inspect_firmware_provider" ||
+      contract.name === "extract_firmware"
+    ) {
+      const limitations = evidence.limitations.join("\n");
+      expect(limitations).toMatch(/exposed when .*configured/iu);
+      expect(limitations).toMatch(
+        /current-head live CLI\/MCP\/systemd acceptance remains unverified/iu,
+      );
+      expect(limitations).toMatch(/each request performs runtime admission/iu);
+      expect(limitations).toMatch(
+        /caller-container execution is unavailable/iu,
+      );
+    }
+    if (contract.name === "extract_firmware")
+      expect(evidence.normalized_result).toMatchObject({
+        extraction_gaps: [
+          { kind: "missing-extractor-dependency", dependencies: ["sasquatch"] },
+        ],
+        extraction_continuations: [
+          { id: expect.any(String), instruction: expect.any(String) },
+        ],
+      });
+    if (contract.name === "inspect_firmware_provider")
+      expect(evidence.subject).toBeNull();
   }
-  expect(
-    fixture.launches.filter((launch) =>
-      launch.args.some((arg) => arg.includes("unblob")),
-    ),
-  ).toEqual([]);
   await assertFirmwareCleanup(fixture.launches);
 });
 
@@ -311,10 +322,13 @@ it("advertises and executes provider inventory by its exact MCP contract", async
     name: "inspect_firmware_provider",
     arguments: { provider_id: "unblob" },
   });
-  expect(response.isError, JSON.stringify(response)).toBe(true);
-  expect(JSON.stringify(response)).toContain(
-    "absolute REA_UNBLOB_RUNTIME_ROOT",
-  );
-  expect(fixture.launches).toEqual([]);
+  expect(response.isError, JSON.stringify(response)).not.toBe(true);
+  const result = FIRMWARE_TOOL_CONTRACTS.find(
+    ({ name }) => name === "inspect_firmware_provider",
+  )!.outputSchema.parse(response.structuredContent);
+  expect(parseEvidence(result).normalized_result).toMatchObject({
+    dependency_readiness: "reported_missing",
+  });
+  expect(fixture.launches.length).toBeGreaterThan(0);
   await assertFirmwareCleanup(fixture.launches);
 });

@@ -20,6 +20,7 @@ import {
   hashFirmwareFile,
   withFirmwareFile,
   type FirmwareEntry,
+  type UnpublishedFirmwareEntry,
 } from "./FirmwareFiles.js";
 import type { normalizeUnblobReport } from "./FirmwareReports.js";
 import type { extractionGap } from "../domain/firmware/firmwareAnalysis.js";
@@ -95,7 +96,7 @@ const gapSortKey = (gap: ExtractionGap): string =>
 export const publishFirmwareExtraction = async (context: {
   outputDirectory: string;
   entries: readonly FirmwareEntry[];
-  additionalUnpublished?: readonly FirmwareEntry[];
+  additionalUnpublished?: readonly UnpublishedFirmwareEntry[];
   normalized: ReturnType<typeof normalizeUnblobReport>;
   selection: { offset: number; length: number; sha256: string };
   /** Caller-selected extraction depth, for boundary-aware continuations. */
@@ -131,10 +132,10 @@ export const publishFirmwareExtraction = async (context: {
     }
     const files = [];
     const unpublished = (context.additionalUnpublished ?? []).map((entry) => ({
-        relative_path: entry.relativePath,
-        kind: entry.kind,
-        link_target: entry.linkTarget,
-      }));
+      relative_path: entry.relativePath,
+      kind: entry.kind,
+      link_target: entry.linkTarget,
+    }));
     tree = await SafeOutputTree.create(context.outputDirectory);
     for (const entry of context.entries) {
       if (entry.kind !== "file") {

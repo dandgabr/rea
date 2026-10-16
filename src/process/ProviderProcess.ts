@@ -1,6 +1,4 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { createHash } from "node:crypto";
-import { createHash } from "node:crypto";
 import type { EventEmitter } from "node:events";
 import type { Readable, Writable } from "node:stream";
 
@@ -52,6 +50,11 @@ export interface OwnedProviderProcessSpawnOptions {
 export interface SpawnedOwnedProviderProcess {
   readonly process: ProviderProcessHandle;
   readonly ownership: OwnedProcessGroup;
+  /** Exact command and argv passed to the owned process launcher, when known. */
+  readonly invocation?: {
+    readonly command: string;
+    readonly arguments: readonly string[];
+  };
   readonly cleanup?: () => Promise<ProcessCleanupResult>;
 }
 
@@ -105,30 +108,20 @@ export interface ProviderProcessSnapshot {
   readonly diagnosticTruncated?: boolean;
   readonly stdout: {
     readonly text: string;
-    readonly invalidUtf8?: true;
     /** True when retained bytes cannot be represented exactly as UTF-8 text. */
     readonly invalidUtf8?: true;
     /** Bytes retained in text, limited by maxDiagnosticBytes when configured. */
     readonly bytes: number;
     /** All bytes drained from this stream since construction or resetOutput. */
     readonly observedBytes: number;
-    readonly sha256: string;
-    readonly utf8Valid: boolean;
-    readonly sha256?: string;
-    readonly utf8Valid?: boolean;
   };
   readonly stderr: {
     readonly text: string;
-    readonly invalidUtf8?: true;
     /** True when retained bytes cannot be represented exactly as UTF-8 text. */
     readonly invalidUtf8?: true;
     /** Bytes retained in text, limited by maxDiagnosticBytes when configured. */
     readonly bytes: number;
     readonly observedBytes: number;
-    readonly sha256: string;
-    readonly utf8Valid: boolean;
-    readonly sha256?: string;
-    readonly utf8Valid?: boolean;
   };
   readonly exitCode: number | null | undefined;
   readonly signal: NodeJS.Signals | null | undefined;
@@ -254,6 +247,10 @@ export const spawnOwnedProviderProcess = async (
     );
     return {
       process: child,
+      invocation: {
+        command: options.command,
+        arguments: [...options.arguments],
+      },
       ownership: {
         runId: options.runId,
         leaderPid: child.pid,
@@ -294,7 +291,14 @@ export const spawnOwnedProviderProcess = async (
       ? {}
       : { expectedCommand: options.expectedCommand ?? options.command }),
   };
-  return { process: child, ownership };
+  return {
+    process: child,
+    ownership,
+    invocation: {
+      command: options.command,
+      arguments: [...options.arguments],
+    },
+  };
 };
 
 /**
@@ -766,24 +770,22 @@ class ProcessOutputCapture {
     buffer: Buffer,
     observedBytes: number,
   ): ProviderProcessSnapshot["stdout"] {
-    let text: string,
-      utf8Valid = true;
+    let text: string;
     try {
       text = new TextDecoder("utf-8", {
         fatal: true,
         ignoreBOM: true,
       }).decode(buffer);
     } catch {
-      utf8Valid = false;
       text = buffer.toString("utf8");
     }
     return {
       text,
       bytes: buffer.byteLength,
       observedBytes,
-      sha256: createHash("sha256").update(buffer).digest("hex"),
-      utf8Valid,
-      ...(utf8Valid ? {} : { invalidUtf8: true as const }),
+      ...(Buffer.from(text, "utf8").equals(buffer)
+        ? {}
+        : { invalidUtf8: true as const }),
     };
   }
 }

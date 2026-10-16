@@ -45,7 +45,7 @@ export class FirmwareAnalysisService {
         ),
       );
     return completeProviderEvidence(
-      createEvidence(execution.subject, execution.provider, {
+      createEvidence(execution.subject ?? undefined, execution.provider, {
         operation,
         parameters: jsonObjectSchema.parse(parsed.data.input),
         result: execution.result,

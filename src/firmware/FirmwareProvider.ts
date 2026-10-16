@@ -1,7 +1,7 @@
+import { createHash } from "node:crypto";
 import { ArtifactResourceScope } from "../artifacts/ArtifactResourceScope.js";
 import { join, isAbsolute } from "node:path";
 import { Readable } from "node:stream";
-import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { FirmwareAnalysisPort } from "../application/firmware/FirmwareAnalysisPort.js";
 import {
@@ -59,12 +59,13 @@ import {
   runFirmwareCommand,
   readFirmwareCommandReport,
   type FirmwareLauncher,
+  type FirmwareCommandResult,
 } from "./FirmwareCommand.js";
 import {
   FirmwareFileCleanupError,
   inventoryFirmwareOutput,
   snapshotFirmware,
-  type FirmwareEntry,
+  type UnpublishedFirmwareEntry,
 } from "./FirmwareFiles.js";
 import {
   normalizeBinwalkReport,
@@ -108,7 +109,7 @@ const limitations = [
   "Listed extraction gaps describe unexamined or unpublished coverage; they do not establish target corruption or an empty filesystem.",
   "Signature matches and reported sizes do not establish partition validity, encryption or runtime mappings. Binwalk may infer unknown lengths before emitting its report.",
   "Only Linux is supported by this integration. Binwalk's address-space/file-size/CPU limits are per process; its output budgets are polled and may transiently overshoot. Unblob is separately confined to an exact systemd unit with aggregate MemoryMax, task, CPU, runtime and tmpfs byte/inode ceilings.",
-  "Unblob inventory, inspection and bounded extraction require an explicit runtime root inside an admitted user-systemd service; native execution and caller-container execution remain unavailable. The exact service has aggregate MemoryMax, task, CPU, runtime and tmpfs byte/inode ceilings. Installed unblob_v1 entrypoints remain caller-provided code, are contained before Python starts, and are neither enumerated nor attested; plugin influence on processing is unknown and scan/extraction coverage is therefore always partial. Provider inventory and source revision remain observations. Caller-selected skip rules and missing external extractors, unknown chunks, encrypted chunks or depth limits further constrain coverage. Extracted code is never automatically executed; only regular files are published without executable permission bits.",
+  "When using Unblob, inventory, inspection and bounded extraction are exposed when its absolute command and runtime paths are configured; current-head live CLI/MCP/systemd acceptance remains unverified. Each request performs runtime admission and requires a protected runtime whose interpreter, Python import roots and ancestors are not owned or writable by the invoking user, plus user systemd and cgroup v2. The producer is confined to an exact service with aggregate MemoryMax, task, CPU, runtime and tmpfs byte/inode ceilings. Startup hooks and distribution metadata are audited before importing Unblob; custom hooks and installed unblob_v1 entrypoints are rejected, and Pluggy entrypoint loading is disabled. Caller-container execution is unavailable because its exact inode quota and lifecycle ownership cannot be proven. Provider inventory, source revision and processing influence remain unknown; coverage is partial. Caller-selected skip rules, missing extractors, unknown or encrypted chunks, and depth limits further constrain coverage. Extracted code is never automatically executed; only regular files are published without executable permission bits.",
   "extraction_gaps lists regions that were carved or left unextracted and names extractor dependencies the producer reported as missing. A listed gap does not mean the target is corrupt or that a retained region is empty.",
   "The actual launcher executable is hashed. Interpreter, shared libraries and installed Python package dependencies are not independently attested; source revision remains unknown for caller-supplied builds.",
 ] as const;
@@ -365,25 +366,42 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
         });
       };
       const versionRun = await run(["--version"]);
+      const versionCapturedOutput = versionRun.captured_output ?? {
+        stdout: versionRun.stdout.text,
+        stderr: versionRun.stderr.text,
+        truncated: versionRun.diagnostic_truncated,
+        stdout_bytes: versionRun.stdout.bytes,
+        stderr_bytes: versionRun.stderr.bytes,
+        stdout_observed_bytes: versionRun.stdout.observedBytes,
+        stderr_observed_bytes: versionRun.stderr.observedBytes,
+        stdout_utf8_valid: versionRun.stdout.invalidUtf8 !== true,
+        stderr_utf8_valid: versionRun.stderr.invalidUtf8 !== true,
+        ...(versionRun.exit_code === undefined
+          ? {}
+          : { exit_code: versionRun.exit_code }),
+        signal: versionRun.signal,
+        command: versionRun.command,
+        arguments: [...versionRun.args],
+      };
       const version = versionRun.stdout.text.trim();
       if (versionRun.stdout.bytes > 1024)
         throw firmwareToolUnavailable(
           engineName,
           request.operation,
           `Tool version banner is ${String(versionRun.stdout.bytes)} bytes; expected a short ${engineName} version line.`,
-        );
-      if (versionRun.stdout.utf8Valid === false)
+        ).retainCapturedOutput(versionCapturedOutput);
+      if (versionRun.stdout.invalidUtf8 === true)
         throw new AnalysisOutputError(
           request.operation,
           "Tool version is not valid UTF-8",
-        );
+        ).retainCapturedOutput(versionCapturedOutput);
       const admitted = admitFirmwareVersion(engineName, version);
       if (admitted.status === "unsupported" || admitted.status === "unresolved")
         throw firmwareToolUnavailable(
           engineName,
           request.operation,
           admitted.message,
-        );
+        ).retainCapturedOutput(versionCapturedOutput);
       const engine = {
         name: engineName,
         version: admitted.version,
@@ -440,7 +458,7 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
         );
         inventoryRaw.dependency_execution = dependenciesRun;
         retainInventory();
-        if (dependenciesRun.stdout.utf8Valid === false)
+        if (dependenciesRun.stdout.invalidUtf8 === true)
           throw new AnalysisOutputError(
             request.operation,
             "Native dependency inventory is not valid UTF-8",
@@ -450,10 +468,7 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
                 stderr: dependenciesRun.stderr.text,
                 truncated: false,
                 stdout_bytes: dependenciesRun.stdout.bytes,
-                ...(dependenciesRun.stdout.sha256 === undefined
-                  ? {}
-                  : { stdout_sha256: dependenciesRun.stdout.sha256 }),
-                stdout_utf8_valid: dependenciesRun.stdout.utf8Valid,
+                stdout_utf8_valid: false,
               },
             },
           );
@@ -562,7 +577,7 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
           let frameResult:
             | Extract<UnblobSystemdFrame, { type: "result" }>
             | undefined;
-          const unpublishedFrames: FirmwareEntry[] = [];
+          const unpublishedFrames: UnpublishedFirmwareEntry[] = [];
           let frameFileCount = 0;
           let frameFileBytes = 0;
           if (request.operation === "extract_firmware")
@@ -657,8 +672,18 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
           );
           const { stdoutResult: _stdoutResult, ...plainProcessRun } =
             rawProcessRun;
-          let processRun = plainProcessRun;
+          let processRun: FirmwareCommandResult = plainProcessRun;
           if (request.operation === "extract_firmware") {
+            const {
+              transport_capture: transportCapture,
+              diagnostic_truncated: transportDiagnosticTruncated,
+              output_incomplete: transportOutputIncomplete,
+              exit_code: transportExitCode,
+              signal: transportSignal,
+              stdout: transportStdout,
+              stderr: transportStderr,
+              ...guestProcessRun
+            } = plainProcessRun;
             frameResult ??= _stdoutResult as
               | Extract<UnblobSystemdFrame, { type: "result" }>
               | undefined;
@@ -696,38 +721,89 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
                 { cause },
               );
             }
-            const decodeText = (bytes: Buffer, field: string) => {
+            const decodeText = (bytes: Buffer) => {
               try {
-                return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-              } catch (cause: unknown) {
-                throw new AnalysisOutputError(
-                  request.operation,
-                  `Unblob framed ${field} is not valid UTF-8`,
-                  { cause },
-                );
+                return {
+                  text: new TextDecoder("utf-8", { fatal: true }).decode(bytes),
+                  utf8Valid: true,
+                };
+              } catch {
+                return { text: bytes.toString("utf8"), utf8Valid: false };
               }
             };
-            processRun = {
-              ...plainProcessRun,
+            const guestStdout = decodeText(frameResult.stdout);
+            const guestStderr = decodeText(frameResult.stderr);
+            const guestCapture = {
+              stdout: guestStdout.text,
+              stderr: guestStderr.text,
+              truncated:
+                outputMetrics.stdout_truncated ||
+                outputMetrics.stderr_truncated,
+              stdout_bytes: frameResult.stdout.length,
+              stderr_bytes: frameResult.stderr.length,
+              stdout_observed_bytes: outputMetrics.stdout_observed_bytes,
+              stderr_observed_bytes: outputMetrics.stderr_observed_bytes,
+              stdout_sha256: createHash("sha256")
+                .update(frameResult.stdout)
+                .digest("hex"),
+              stderr_sha256: createHash("sha256")
+                .update(frameResult.stderr)
+                .digest("hex"),
+              stdout_utf8_valid: guestStdout.utf8Valid,
+              stderr_utf8_valid: guestStderr.utf8Valid,
               exit_code: frameResult.exitCode,
+              command: command.command,
+              arguments: [...extractionArgs],
+            };
+            if (!guestStdout.utf8Valid || !guestStderr.utf8Valid)
+              throw new AnalysisOutputError(
+                request.operation,
+                `Unblob framed ${[
+                  ...(!guestStdout.utf8Valid ? ["stdout"] : []),
+                  ...(!guestStderr.utf8Valid ? ["stderr"] : []),
+                ].join(" and ")} is not valid UTF-8`,
+                {
+                  capturedOutput: guestCapture,
+                  diagnostics: {
+                    output_source: "unblob_guest_frame",
+                    transport_capture: jsonValueSchema.parse(
+                      transportCapture ?? null,
+                    ),
+                  },
+                },
+              );
+            processRun = {
+              ...guestProcessRun,
+              transport: {
+                command: transportCapture?.command ?? null,
+                arguments: transportCapture?.arguments ?? null,
+                resource_limiter: transportCapture?.command ?? null,
+                exit_code: transportExitCode,
+                signal: transportSignal,
+                stdout: transportStdout,
+                stderr: transportStderr,
+                captured_output: transportCapture,
+                diagnostic_truncated: transportDiagnosticTruncated,
+                ...(transportOutputIncomplete === undefined
+                  ? {}
+                  : { output_incomplete: transportOutputIncomplete }),
+              },
+              exit_code: frameResult.exitCode,
+              signal: null,
+              diagnostic_truncated:
+                outputMetrics.stdout_truncated ||
+                outputMetrics.stderr_truncated,
               stdout: {
-                text: decodeText(frameResult.stdout, "stdout"),
+                text: guestStdout.text,
                 bytes: frameResult.stdout.length,
                 observedBytes: outputMetrics.stdout_observed_bytes,
-                sha256: createHash("sha256")
-                  .update(frameResult.stdout)
-                  .digest("hex"),
-                utf8Valid: true,
               },
               stderr: {
-                text: decodeText(frameResult.stderr, "stderr"),
+                text: guestStderr.text,
                 bytes: frameResult.stderr.length,
                 observedBytes: outputMetrics.stderr_observed_bytes,
-                sha256: createHash("sha256")
-                  .update(frameResult.stderr)
-                  .digest("hex"),
-                utf8Valid: true,
               },
+              captured_output: guestCapture,
             };
             if (
               outputMetrics.stdout_truncated ||
@@ -782,6 +858,7 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
                   normalized,
                   selection: target.selection,
                   engine,
+                  unpublished: unpublishedFrames,
                 })
               : createFirmwareInspectionObservation({
                   engine,

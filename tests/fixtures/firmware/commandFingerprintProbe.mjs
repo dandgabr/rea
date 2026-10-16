@@ -26,7 +26,7 @@ await writeFile(executable, bytes, { mode: 0o700 });
 await symlink("actual-tool", selected);
 await writeFile(input, "abc");
 const admitted = await resolveFirmwareCommand(
-  { REA_UNBLOB_COMMAND: selected },
+  { REA_UNBLOB_COMMAND: selected, REA_UNBLOB_RUNTIME_ROOT: root },
   "unblob",
   "inspect_firmware_regions",
 );
@@ -46,10 +46,16 @@ let allowClose = mode !== "cleanup";
 const events = [];
 let launches = 0;
 const service = new FirmwareAnalysisService(
-  createFirmwareAnalysisProvider({ REA_UNBLOB_COMMAND: selected }, async () => {
-    launches++;
-    throw Error("Canceled fingerprint must not launch a producer");
-  }),
+  createFirmwareAnalysisProvider(
+    {
+      REA_UNBLOB_COMMAND: selected,
+      REA_UNBLOB_RUNTIME_ROOT: root,
+    },
+    async () => {
+      launches++;
+      throw Error("Canceled fingerprint must not launch a producer");
+    },
+  ),
 );
 if (mode === "deadline") AbortSignal.timeout = () => controller.signal;
 prototype.read = async function (...args) {

@@ -43,7 +43,7 @@ it("selects explicit Unblob inspection through real CLI parsing rather than the 
   ]);
   expect(result).toMatchObject({
     code: "capability_unavailable",
-    message: expect.stringContaining("installed unblob_v1 entrypoints"),
+    message: expect.stringContaining("absolute REA_UNBLOB_COMMAND"),
   });
 });
 
@@ -65,7 +65,7 @@ it("exposes named provider inventory without a firmware positional argument", as
     await invoke(["inspect-firmware-provider", "--provider-id", "unblob"]),
   ).toMatchObject({
     code: "capability_unavailable",
-    message: expect.stringContaining("installed unblob_v1 entrypoints"),
+    message: expect.stringContaining("absolute REA_UNBLOB_COMMAND"),
   });
 });
 

@@ -30,5 +30,3 @@ export const firmwareRuntimeSchema = z.discriminatedUnion("kind", [
     ),
   }),
 ]);
-
-export type FirmwareRuntimeSelection = z.infer<typeof firmwareRuntimeSchema>;

@@ -70,9 +70,13 @@ it("describes configured native Unblob inventory, inspection, and extraction as 
     const description = descriptions.get(name);
     expect(description, name).toBeDefined();
     expect(description, name).not.toMatch(
-      /planned capabilities only|unavailable: rea refuses/iu,
+      /planned capabilities only|unavailable: rea refuses|unavailable pending current-head|remains unavailable/iu,
     );
     expect(description, name).toMatch(/user systemd and cgroup v2/iu);
+    expect(description, name).toMatch(/exposed when .*configured/iu);
+    expect(description, name).toMatch(/acceptance remains unverified/iu);
+    expect(description, name).toMatch(/each request.*admission/iu);
+    expect(description, name).toMatch(/caller-container.*unavailable/iu);
   }
   expect(descriptions.get("extract_firmware")).toMatch(/64 MiB\/512-inode/iu);
   expect(descriptions.get("extract_firmware")).toMatch(

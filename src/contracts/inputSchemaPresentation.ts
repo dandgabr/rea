@@ -26,6 +26,15 @@ export const schemaChildren = new Set([
 const isObject = (value: unknown): value is Readonly<Record<string, unknown>> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
+const schemaValuedDependencies = (value: unknown): Record<string, unknown> =>
+  isObject(value)
+    ? Object.fromEntries(
+        Object.entries(value).filter(
+          ([, dependency]) => !Array.isArray(dependency),
+        ),
+      )
+    : {};
+
 const resolveReference = (
   root: Readonly<Record<string, unknown>>,
   reference: string,
@@ -443,18 +452,44 @@ export const presentInputJsonSchema = (
       string,
       unknown
     >;
+  const draft07 =
+    described.$schema === "http://json-schema.org/draft-07/schema#";
+  const draft2020 =
+    described.$schema === "https://json-schema.org/draft/2020-12/schema";
+  const dependencyKeyword = draft07
+    ? "dependencies"
+    : draft2020
+      ? "dependentSchemas"
+      : undefined;
+  const dependencySources = [
+    isObject(described.dependencies) ? described.dependencies : {},
+    isObject(described.dependentSchemas) ? described.dependentSchemas : {},
+  ];
+  const schemaDependencies: Record<string, unknown> = {};
+  for (const source of dependencySources)
+    for (const [property, dependency] of Object.entries(source)) {
+      if (Array.isArray(dependency)) continue;
+      const existing = schemaDependencies[property];
+      if (existing === undefined) schemaDependencies[property] = dependency;
+      else if (!isDeepStrictEqual(existing, dependency))
+        schemaDependencies[property] = { allOf: [existing, dependency] };
+    }
   const {
     dependencies: _dependencies,
     dependentRequired: _dependentRequired,
+    dependentSchemas: _dependentSchemas,
     ...presentation
   } = described;
-  const rootDependencies = isObject(described.dependentRequired)
-    ? described.dependentRequired
-    : isObject(described.dependencies)
-      ? described.dependencies
-      : undefined;
+  // Root-union inference also emits property-list dependencies. Those are
+  // already explained by the complete-group description; only dependencies
+  // explicitly declared on the source schema need additional guidance.
+  const rootDependencies = Object.assign(
+    {},
+    ...(isObject(root.dependencies) ? [root.dependencies] : []),
+    ...(isObject(root.dependentRequired) ? [root.dependentRequired] : []),
+  );
   const dependencyGuidance =
-    rootDependencies === undefined
+    Object.keys(rootDependencies).length === 0
       ? []
       : Object.entries(rootDependencies).flatMap(([property, partners]) =>
           Array.isArray(partners) &&
@@ -464,19 +499,40 @@ export const presentInputJsonSchema = (
               ]
             : [],
         );
-  if (dependencyGuidance.length === 0)
-    return normalizeAdvertisedSchema(presentation).schema as Record<
-      string,
-      unknown
-    >;
   const description = [
     typeof presentation.description === "string"
       ? presentation.description
       : undefined,
     ...dependencyGuidance,
   ].filter((text) => text !== undefined);
-  return normalizeAdvertisedSchema({
+  const dialectDependencies =
+    dependencyKeyword === undefined
+      ? {
+          ...(Object.keys(schemaValuedDependencies(described.dependencies))
+            .length > 0
+            ? {
+                dependencies: schemaValuedDependencies(described.dependencies),
+              }
+            : {}),
+          ...(Object.keys(schemaValuedDependencies(described.dependentSchemas))
+            .length > 0
+            ? {
+                dependentSchemas: schemaValuedDependencies(
+                  described.dependentSchemas,
+                ),
+              }
+            : {}),
+        }
+      : Object.keys(schemaDependencies).length > 0
+        ? { [dependencyKeyword]: schemaDependencies }
+        : {};
+  const advertised = {
     ...presentation,
-    description: description.join(" "),
-  }).schema as Record<string, unknown>;
+    ...(description.length > 0 ? { description: description.join(" ") } : {}),
+    ...dialectDependencies,
+  };
+  return normalizeAdvertisedSchema(advertised).schema as Record<
+    string,
+    unknown
+  >;
 };

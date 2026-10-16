@@ -25,11 +25,23 @@ with tarfile.open(fileobj=buffer, mode="w", format=tarfile.USTAR_FORMAT) as arch
 compressed = gzip.compress(buffer.getvalue(), mtime=0)
 image = b"REA firmware fixture\n".ljust(64, b"\xff") + compressed + b"\x00" * 128
 (root / "firmware.bin").write_bytes(image)
+gzip_root = f"64-{64 + len(compressed)}.gzip_extract"
+unblob_files = {
+    "0-64.unknown": image[:64],
+    f"{gzip_root}/gzip.uncompressed": buffer.getvalue(),
+    **{
+        f"{gzip_root}/gzip.uncompressed_extract/{name}": data
+        for name, data in payloads.items()
+    },
+    f"{64 + len(compressed)}-{len(image)}.padding": image[64 + len(compressed):],
+}
 (root / "oracle.json").write_text(json.dumps({
     "generator": "Python tarfile USTAR + gzip; host cc; no target execution",
     "offset": 64, "length": len(compressed), "size": len(image),
     "sha256": hashlib.sha256(image).hexdigest(),
     "files": {name: {"sha256": hashlib.sha256(data).hexdigest(), "size": len(data)} for name, data in payloads.items()},
+    "unblob_output_root": "rea-input_extract",
+    "unblob_files": {name: {"sha256": hashlib.sha256(data).hexdigest(), "size": len(data)} for name, data in unblob_files.items()},
 }, indent=2) + "\n")
 print(root)
 

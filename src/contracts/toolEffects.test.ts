@@ -86,7 +86,11 @@ const EXECUTION_WORDING_EXCEPTIONS: Readonly<Record<string, string>> = {
   inspect_adb_package: "reports install times without changing the device",
   list_adb_processes: "lists running processes without changing the device",
   inspect_web_event_listeners: "states it does not evaluate JavaScript",
-  inspect_firmware_regions: "runs the caller-supplied Binwalk tool only",
+  inspect_firmware_provider:
+    "runs caller-supplied inventory tools but never the firmware target",
+  extract_firmware:
+    "runs the caller-supplied Unblob extractor but never extracted target code",
+  inspect_firmware_regions: "runs caller-supplied analysis tools only",
 };
 
 const declaresForeignAuthority = (name: string): boolean => {
@@ -148,7 +152,9 @@ describe("tool effects", () => {
       TOOL_CONTRACTS.map(({ name }) => name).sort(),
     );
   });
+});
 
+describe("tool effect wording", () => {
   it("keeps execution and device wording aligned with declared effects", () => {
     const undeclared = TOOL_CONTRACTS.filter(
       ({ name, description }) =>
@@ -171,7 +177,9 @@ describe("tool effects", () => {
     );
     expect(staleExceptions).toEqual([]);
   });
+});
 
+describe("destructive tool effects", () => {
   it("marks foreign execution and device mutation as destructive", () => {
     const destructive = TOOL_CONTRACTS.filter(
       ({ effects }) => effects.executesForeignCode || effects.mutatesDevice,

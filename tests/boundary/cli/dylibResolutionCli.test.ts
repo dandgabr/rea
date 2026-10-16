@@ -542,8 +542,8 @@ cliTest(
     ] as const) {
       const app = await fixtureApp();
       await writeFiles(app, {
-        "Contents/MacOS/App": fatImage([
-          ...[CPU.arm64e, CPU.arm64eX1].map((cpu, index) => {
+        "Contents/MacOS/App": fatImage(
+          [CPU.arm64e, CPU.arm64eX1, CPU.x86_64].map((cpu, index) => {
             const setting = settings[index];
             return {
               cpu,
@@ -556,8 +556,7 @@ cliTest(
               }),
             };
           }),
-          { cpu: CPU.x86_64, bytes: machoImage({ cpu: CPU.x86_64 }) },
-        ]),
+        ),
       });
       const result = await cli.run({
         arguments: [

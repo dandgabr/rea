@@ -4,7 +4,7 @@ import {
   type AnalysisCapturedOutput,
 } from "../domain/analysisErrorBase.js";
 import { projectAnalysisError } from "../domain/analysisErrorProjection.js";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { access, realpath, stat } from "node:fs/promises";
 import { constants } from "node:fs";
 import type { Readable } from "node:stream";
@@ -39,6 +39,32 @@ import {
 export type FirmwareLauncher = (
   options: OwnedProviderProcessSpawnOptions,
 ) => Promise<SpawnedOwnedProviderProcess>;
+
+export interface FirmwareCommandResult {
+  readonly stdout: {
+    readonly text: string;
+    readonly bytes: number;
+    readonly observedBytes: number;
+    readonly invalidUtf8?: true;
+  };
+  readonly stderr: {
+    readonly text: string;
+    readonly bytes: number;
+    readonly observedBytes: number;
+    readonly invalidUtf8?: true;
+  };
+  readonly exit_code: number | null | undefined;
+  readonly signal: string | null;
+  readonly captured_output?: AnalysisCapturedOutput;
+  readonly transport_capture?: AnalysisCapturedOutput;
+  readonly diagnostic_truncated: boolean;
+  readonly output_incomplete?: true;
+  readonly command: string;
+  readonly args: readonly string[];
+  readonly resource_limiter?: string;
+  readonly stdoutResult?: unknown;
+  readonly transport?: Readonly<Record<string, unknown>>;
+}
 
 /** Refuse an unmet host or tool requirement, which another target cannot satisfy. */
 export const firmwareToolUnavailable = (
@@ -183,7 +209,7 @@ export const runFirmwareCommand = async (context: {
   consumeStdout?: (stream: Readable) => Promise<unknown>;
   acceptReportedExtractionFailure?: boolean;
   retainCleanup(supervisor: ProviderProcessSupervisor): void;
-}) => {
+}): Promise<FirmwareCommandResult> => {
   const { engine, operation, signal } = context;
   signal.throwIfAborted();
   const runId = `rea-firmware-${randomUUID()}`;
@@ -212,7 +238,9 @@ export const runFirmwareCommand = async (context: {
     },
   };
   const spawned =
-    engine === "unblob" && context.systemdProfile !== undefined
+    engine === "unblob" &&
+    context.systemdProfile !== undefined &&
+    context.launcher === undefined
       ? await spawnUnblobSystemdProcess(
           context.systemdProfile,
           context.args,
@@ -238,31 +266,53 @@ export const runFirmwareCommand = async (context: {
   );
   const capture = (): AnalysisCapturedOutput => {
     const snapshot = supervisor.snapshot();
+    const stderrBytes = Buffer.from(snapshot.stderr.text, "utf8");
+    const stderrUtf8Valid = snapshot.stderr.invalidUtf8 !== true;
     return {
       stdout: snapshot.stdout.text,
       stderr: snapshot.stderr.text,
       truncated: snapshot.diagnosticTruncated ?? false,
-      stdout_bytes: snapshot.stdout.bytes,
       stderr_bytes: snapshot.stderr.bytes,
-      stdout_observed_bytes: snapshot.stdout.observedBytes,
       stderr_observed_bytes: snapshot.stderr.observedBytes,
       exit_code: snapshot.exitCode ?? null,
       signal: snapshot.signal ?? null,
-      ...(snapshot.stdout.sha256 === undefined
-        ? {}
-        : { stdout_sha256: snapshot.stdout.sha256 }),
-      ...(snapshot.stderr.sha256 === undefined
-        ? {}
-        : { stderr_sha256: snapshot.stderr.sha256 }),
-      ...(snapshot.stdout.utf8Valid === undefined
-        ? {}
-        : { stdout_utf8_valid: snapshot.stdout.utf8Valid }),
-      ...(snapshot.stderr.utf8Valid === undefined
-        ? {}
-        : { stderr_utf8_valid: snapshot.stderr.utf8Valid }),
-      command: context.command,
-      arguments: [...context.args],
-      resource_limiter: context.limiter,
+      stderr_utf8_valid: stderrUtf8Valid,
+      ...(context.consumeStdout === undefined
+        ? {
+            stdout_bytes: snapshot.stdout.bytes,
+            stdout_observed_bytes: snapshot.stdout.observedBytes,
+            stdout_utf8_valid: snapshot.stdout.invalidUtf8 !== true,
+            ...(snapshot.stdout.invalidUtf8 !== true &&
+            Buffer.byteLength(snapshot.stdout.text, "utf8") ===
+              snapshot.stdout.bytes
+              ? {
+                  stdout_sha256: createHash("sha256")
+                    .update(Buffer.from(snapshot.stdout.text, "utf8"))
+                    .digest("hex"),
+                }
+              : {}),
+          }
+        : {}),
+      ...(stderrUtf8Valid && stderrBytes.byteLength === snapshot.stderr.bytes
+        ? {
+            stderr_sha256: createHash("sha256")
+              .update(stderrBytes)
+              .digest("hex"),
+          }
+        : {}),
+      ...(context.consumeStdout === undefined
+        ? { command: context.command }
+        : spawned.invocation === undefined
+          ? {}
+          : { command: spawned.invocation.command }),
+      ...(context.consumeStdout === undefined
+        ? { arguments: [...context.args] }
+        : spawned.invocation === undefined
+          ? {}
+          : { arguments: [...spawned.invocation.arguments] }),
+      ...(context.consumeStdout === undefined
+        ? { resource_limiter: context.limiter }
+        : {}),
     };
   };
   let stdoutResult: unknown;
@@ -279,10 +329,17 @@ export const runFirmwareCommand = async (context: {
           },
         );
   const checkDiagnostics = () => {
-    if (diagnosticTruncated) {
+    const snapshot = supervisor.snapshot();
+    if (
+      diagnosticTruncated ||
+      snapshot.diagnosticTruncated === true ||
+      snapshot.outputIncomplete === true
+    ) {
       throw new AnalysisOutputError(
         operation,
-        `Tool diagnostics exceeded the ${FIRMWARE_LIMITS.diagnosticBytes}-byte capture budget`,
+        snapshot.outputIncomplete === true
+          ? "Tool output is incomplete; refusing to interpret a partial report"
+          : `Tool diagnostics exceeded the ${FIRMWARE_LIMITS.diagnosticBytes}-byte capture budget`,
         {
           capturedOutput: capture(),
         },
@@ -332,7 +389,9 @@ export const runFirmwareCommand = async (context: {
         signal: snapshot.signal ?? null,
         stdout: snapshot.stdout.text,
         stderr: snapshot.stderr.text,
-        stdout_bytes: snapshot.stdout.bytes,
+        ...(context.consumeStdout === undefined
+          ? { stdout_bytes: snapshot.stdout.bytes }
+          : {}),
         stderr_bytes: snapshot.stderr.bytes,
         previous_error: failure instanceof Error ? failure.message : null,
         primary_error:
@@ -360,7 +419,9 @@ export const runFirmwareCommand = async (context: {
         signal: snapshot.signal ?? null,
         stdout: snapshot.stdout.text,
         stderr: snapshot.stderr.text,
-        stdout_bytes: snapshot.stdout.bytes,
+        ...(context.consumeStdout === undefined
+          ? { stdout_bytes: snapshot.stdout.bytes }
+          : {}),
         stderr_bytes: snapshot.stderr.bytes,
       },
     });
@@ -369,9 +430,16 @@ export const runFirmwareCommand = async (context: {
     stderr: snapshot.stderr,
     exit_code: snapshot.exitCode,
     signal: snapshot.signal ?? null,
+    ...(context.consumeStdout === undefined
+      ? { captured_output: captured }
+      : { transport_capture: captured }),
+    diagnostic_truncated: snapshot.diagnosticTruncated ?? false,
+    ...(snapshot.outputIncomplete === true ? { output_incomplete: true } : {}),
     command: context.command,
     args: [...context.args],
-    resource_limiter: context.limiter,
+    ...(context.consumeStdout === undefined
+      ? { resource_limiter: context.limiter }
+      : {}),
     ...(context.consumeStdout === undefined ? {} : { stdoutResult }),
   };
 };

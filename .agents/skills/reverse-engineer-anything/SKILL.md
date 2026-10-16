@@ -103,10 +103,20 @@ explicit path or endpoint and do not need it.
   keeps Binwalk. Preserve ranges, native randomness units and unknown child
   offsets. Use `extract_firmware` when extraction is requested, with a caller-selected new
   absolute output directory. These tools use caller-supplied Binwalk/Unblob on
-  Linux. Read `extraction_gaps` and typed partial observations before proposing
-  another request; never install extractors, replay failures or import plugins
-  implicitly. Explicit `options.plugins_path` imports trusted code before native
-  sandbox setup; fingerprints do not attest isolation. See the [firmware guide](https://github.com/morluto/rea/blob/main/docs/firmware-analysis.md).
+  Linux. Native Unblob remains unavailable pending current-head CLI/MCP/systemd
+  acceptance and explicit maintainer scope ratification in
+  [#4110](https://github.com/morluto/rea/issues/4110); draft changes do not
+  authorize official availability. Its caller-supplied runtime must be protected from writes by the
+  invoking user and run inside an admitted user-systemd service. REA audits
+  Python startup files before importing Unblob,
+  rejects custom startup hooks and installed `unblob_v1` entrypoints, and
+  disables Pluggy entrypoint discovery. Current-head Unblob CLI/MCP/systemd
+  acceptance is pending, so do not claim native Unblob availability until it
+  passes. Caller-owned or writable Python import trees fail closed. Caller-container execution remains
+  unavailable. Read `extraction_gaps` and typed partial observations before
+  proposing another request; never install extractors, replay failures or
+  provide plugins. Runtime fingerprints do not attest the whole runtime or its
+  source revision. See the [firmware guide](https://github.com/morluto/rea/blob/main/docs/firmware-analysis.md).
 - .NET NativeAOT PE/ELF: native Ghidra analysis. Native code can yield pseudocode;
   consult the NativeAOT workflow in `references/native-and-artifacts.md` for
   optional metadata recovery and its supported host/layout boundary.

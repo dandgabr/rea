@@ -4,6 +4,8 @@ import {
   chmod,
   mkdir,
   readFile,
+  readdir,
+  readlink,
   truncate,
   writeFile,
   symlink,
@@ -13,6 +15,74 @@ const args = process.argv.slice(2);
 const mode = process.env.REA_FIRMWARE_FIXTURE_MODE;
 const engine = process.env.REA_FIRMWARE_FIXTURE_ENGINE;
 const banner = process.env.REA_FIRMWARE_FIXTURE_VERSION;
+const serializeUnblobReport = (report, input, output) =>
+  JSON.stringify(report)
+    .replaceAll(input, "/tmp/rea-input")
+    .replaceAll(output, "/tmp/rea-extracted");
+const emitExtractionFrame = async (reportPath, root) => {
+  const entries = [];
+  const walk = async (directory, prefix = "") => {
+    for (const item of await readdir(directory, { withFileTypes: true })) {
+      const relative = prefix === "" ? item.name : `${prefix}/${item.name}`;
+      const path = join(directory, item.name);
+      if (item.isDirectory()) {
+        entries.push({ kind: 0, relative, bytes: Buffer.alloc(0) });
+        await walk(path, relative);
+      } else if (item.isSymbolicLink()) {
+        entries.push({
+          kind: 2,
+          relative,
+          bytes: Buffer.alloc(0),
+          target: await readlink(path),
+        });
+      } else if (item.isFile()) {
+        entries.push({ kind: 1, relative, bytes: await readFile(path) });
+      } else {
+        entries.push({ kind: 3, relative, bytes: Buffer.alloc(0) });
+      }
+    }
+  };
+  await walk(root);
+  const report = await readFile(reportPath);
+  const stdout =
+    mode === "frame-invalid-utf8" ? Buffer.from([0xff]) : Buffer.alloc(0);
+  const stderr = Buffer.alloc(0);
+  const auxiliary = Buffer.from(
+    JSON.stringify({
+      stdout_observed_bytes: 0,
+      stderr_observed_bytes: 0,
+      stdout_truncated: false,
+      stderr_truncated: false,
+    }),
+  );
+  const totalBytes = entries.reduce(
+    (sum, entry) => sum + entry.bytes.length,
+    0,
+  );
+  const header = Buffer.alloc(40);
+  Buffer.from("REAUB1\0\0", "ascii").copy(header);
+  header.writeInt32BE(process.exitCode ?? 0, 8);
+  header.writeUInt32BE(stdout.length, 12);
+  header.writeUInt32BE(stderr.length, 16);
+  header.writeUInt32BE(report.length, 20);
+  header.writeUInt32BE(auxiliary.length, 24);
+  header.writeUInt32BE(entries.length, 28);
+  header.writeBigUInt64BE(BigInt(totalBytes), 32);
+  const frames = entries.map((entry) => {
+    const path = Buffer.from(entry.relative, "utf8");
+    const target = Buffer.from(entry.target ?? "", "utf8");
+    const frame = Buffer.alloc(45);
+    frame.writeUInt8(entry.kind, 0);
+    frame.writeUInt16BE(path.length, 1);
+    frame.writeUInt16BE(target.length, 3);
+    frame.writeBigUInt64BE(BigInt(entry.bytes.length), 5);
+    createHash("sha256").update(entry.bytes).digest().copy(frame, 13);
+    return Buffer.concat([frame, path, target, entry.bytes]);
+  });
+  process.stdout.write(
+    Buffer.concat([header, stdout, stderr, report, auxiliary, ...frames]),
+  );
+};
 const selectedPlugin = args
   .find((arg) => arg.startsWith("--plugins-path="))
   ?.slice("--plugins-path=".length);
@@ -28,6 +98,10 @@ if (
   );
 }
 if (args.includes("--version")) {
+  if (mode === "version-invalid-utf8") {
+    process.stdout.write(Buffer.from([0xff, 0x0a]));
+    process.exit(0);
+  }
   console.log(
     mode === "version"
       ? "unsupported"
@@ -191,13 +265,17 @@ if (args.includes("--version")) {
       );
     await writeFile(
       reportPath,
-      JSON.stringify([
-        {
-          task: { path: input, depth: 0, blob_id: "", is_multi_file: false },
-          reports,
-          subtasks: [],
-        },
-      ]),
+      serializeUnblobReport(
+        [
+          {
+            task: { path: input, depth: 0, blob_id: "", is_multi_file: false },
+            reports,
+            subtasks: [],
+          },
+        ],
+        input,
+        args[args.indexOf("--extract-dir") + 1],
+      ),
     );
   } else {
     const deleted = mode === "deleted" || mode === "deleted-and-missing";
@@ -254,6 +332,7 @@ if (args.includes("--version")) {
               start_offset: 0,
               end_offset: content.length,
               size: content.length,
+              randomness: null,
             },
           ],
           subtasks: [],
@@ -277,12 +356,17 @@ if (args.includes("--version")) {
           subtasks: [childTask],
         },
       ];
-      await writeFile(reportPath, JSON.stringify(nestedUnknownRecords));
+      await writeFile(
+        reportPath,
+        serializeUnblobReport(nestedUnknownRecords, input, output),
+      );
     }
     if (mode === "nested-unknown-oversized") {
       // The child exceeds the firmware input limit, so a fresh run cannot
       // accept it even though the unknown chunk's range is small.
-      const oversized = 128 * 1024 * 1024 + 1;
+      // The test lowers the input ceiling to keep this case below the
+      // isolation stream's independent 64 MiB output ceiling.
+      const oversized = 32;
       await truncate(child, oversized);
       const oversizedDigest = createHash("sha256");
       for await (const chunk of createReadStream(child))
@@ -300,6 +384,7 @@ if (args.includes("--version")) {
               start_offset: 0,
               end_offset: content.length,
               size: content.length,
+              randomness: null,
             },
           ],
           subtasks: [],
@@ -323,7 +408,10 @@ if (args.includes("--version")) {
           subtasks: [childTask],
         },
       ];
-      await writeFile(reportPath, JSON.stringify(nestedUnknownRecords));
+      await writeFile(
+        reportPath,
+        serializeUnblobReport(nestedUnknownRecords, input, output),
+      );
     }
     if (mode === "depth-orphan") {
       // A depth-limited directory with nothing published under it cannot
@@ -356,7 +444,10 @@ if (args.includes("--version")) {
           subtasks: [midTask],
         },
       ];
-      await writeFile(reportPath, JSON.stringify(orphanRecords));
+      await writeFile(
+        reportPath,
+        serializeUnblobReport(orphanRecords, input, output),
+      );
     }
     if (mode === "depth-reentry") {
       // A depth-limited directory with two published children that can each
@@ -418,7 +509,10 @@ if (args.includes("--version")) {
           subtasks: [midTask],
         },
       ];
-      await writeFile(reportPath, JSON.stringify(depthReentryRecords));
+      await writeFile(
+        reportPath,
+        serializeUnblobReport(depthReentryRecords, input, output),
+      );
       process.exitCode = 0;
     }
     const records = [
@@ -516,6 +610,7 @@ if (args.includes("--version")) {
           start_offset: 0,
           end_offset: 1,
           size: 1,
+          randomness: null,
         })),
       ];
     }
@@ -665,7 +760,7 @@ if (args.includes("--version")) {
         reportPath,
         mode === "malformed" || mode === "workspace-cleanup-failure-malformed"
           ? "["
-          : JSON.stringify(records),
+          : serializeUnblobReport(records, input, output),
       );
     if (mode === "dependency" || mode === "multi-file-dependency")
       process.exitCode = 1;
@@ -678,5 +773,7 @@ if (args.includes("--version")) {
       await writeFile(join(blocked, "retained"), "owned workspace bytes");
       await chmod(blocked, 0);
     }
+    if (!args.includes("--skip-extraction"))
+      await emitExtractionFrame(reportPath, output);
   }
 }

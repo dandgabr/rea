@@ -34,7 +34,9 @@ export const firmwareSelectionFields = { ...target, range: range.optional() };
 export const firmwareExtractionFields = {
   ...firmwareSelectionFields,
   output_directory: localPathStringSchema
-    .refine(isAbsolute, { message: "output_directory must be absolute" })
+    .refine(isAbsolute, {
+      message: "output_directory must be an absolute local filesystem path",
+    })
     .describe("Absolute, absent output directory; parent must exist"),
   max_depth: z.number().int().min(1).max(10).default(3),
   max_output_bytes: z
@@ -410,7 +412,6 @@ export const firmwareExtractionObservationSchema =
     .omit({
       output_directory: true,
       files: true,
-      unpublished_entries: true,
       published_bytes: true,
     })
     .extend({

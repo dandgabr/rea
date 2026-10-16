@@ -9,10 +9,16 @@ import { cleanupOwnedProcessGroup } from "../../../src/process/ProcessOwnership.
 import { createTestTempDirectory } from "../temporaryDirectory.js";
 
 /** Exercise real subprocess ownership with synthetic pinned producer representations. */
-export const firmwareFixture = async (mode = "normal", banner?: string) => {
+export const firmwareFixture = async (
+  mode = "normal",
+  banner?: string,
+  unblobRuntime: "admitted" | "missing" = "admitted",
+) => {
   const root = await createTestTempDirectory("rea-firmware-test-");
   const path = join(root, "input.bin");
   await writeFile(path, Buffer.from("fixture-input-data"));
+  const unblobCommand = join(root, "unblob-command");
+  await writeFile(unblobCommand, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
   onTestFinished(() => rm(root, { recursive: true, force: true }));
   const launches: {
     cwd: string | undefined;
@@ -20,11 +26,16 @@ export const firmwareFixture = async (mode = "normal", banner?: string) => {
     args: readonly string[];
   }[] = [];
   let cleanupUnverified = mode === "cleanup-failure";
+  const environment = { ...process.env };
+  delete environment.REA_UNBLOB_RUNTIME_ROOT;
   const provider = createFirmwareAnalysisProvider(
     {
-      ...process.env,
+      ...environment,
       REA_BINWALK_COMMAND: "/usr/bin/true",
-      REA_UNBLOB_COMMAND: process.execPath,
+      REA_UNBLOB_COMMAND: unblobCommand,
+      ...(unblobRuntime === "admitted"
+        ? { REA_UNBLOB_RUNTIME_ROOT: root }
+        : {}),
     },
     async (options) => {
       const start = options.arguments.indexOf("--") + 2;

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   firmwareExtractionObservationSchema,
   unblobRegionResultSchema,
@@ -6,6 +7,7 @@ import {
 import type { z } from "zod";
 import type { normalizeUnblobReport } from "./FirmwareReports.js";
 import { jsonValueSchema } from "../domain/jsonValue.js";
+import type { UnpublishedFirmwareEntry } from "./FirmwareFiles.js";
 
 import { firmwareExtractionGaps } from "./FirmwareExtractionGaps.js";
 
@@ -28,22 +30,47 @@ export const createFirmwareExtractionObservation = (context: {
   selection: z.infer<typeof firmwareExtractionObservationSchema>["selection"];
   normalized: ReturnType<typeof normalizeUnblobReport>;
   maxDepth: number;
-}): FirmwarePartialObservation => ({
-  kind: "firmware",
-  result: jsonValueSchema.parse(
-    firmwareExtractionObservationSchema.parse({
-      engine: context.engine,
-      selection: context.selection,
-      publication_state: "not_committed",
-      requested_output_directory: context.outputDirectory,
-      ...facts(context.normalized),
-      extraction_gaps: firmwareExtractionGaps(
-        context.normalized,
-        context.maxDepth,
-      ),
-    }),
-  ),
-});
+  unpublished?: readonly Pick<
+    UnpublishedFirmwareEntry,
+    "relativePath" | "kind" | "linkTarget"
+  >[];
+}): FirmwarePartialObservation => {
+  const instructions = new Map<string, string>();
+  const unpublished = context.unpublished ?? [];
+  const extractionGaps = firmwareExtractionGaps(
+    context.normalized,
+    context.maxDepth,
+    [],
+    unpublished.map(({ relativePath }) => ({ relative_path: relativePath })),
+  ).map(({ continuation, ...gap }) => {
+    const id = createHash("sha256").update(continuation).digest("hex");
+    instructions.set(continuation, id);
+    return { ...gap, continuation_id: id };
+  });
+  return {
+    kind: "firmware",
+    result: jsonValueSchema.parse(
+      firmwareExtractionObservationSchema.parse({
+        engine: context.engine,
+        selection: context.selection,
+        publication_state: "not_committed",
+        requested_output_directory: context.outputDirectory,
+        ...facts(context.normalized),
+        unpublished_entries: unpublished.map(
+          ({ relativePath, kind, linkTarget }) => ({
+            relative_path: relativePath,
+            kind,
+            link_target: linkTarget,
+          }),
+        ),
+        extraction_gaps: extractionGaps,
+        extraction_continuations: [...instructions].map(
+          ([instruction, id]) => ({ id, instruction }),
+        ),
+      }),
+    ),
+  };
+};
 
 /** Inspection producer facts never acquire artifact publication paths. */
 export const createFirmwareInspectionObservation = (context: {

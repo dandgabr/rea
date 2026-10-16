@@ -188,7 +188,7 @@ const dependencyFailure = z.object({
 });
 
 /** Collect the named extractors from any dependency report nested in one value. */
-const missingDependencies = (value: unknown): string[] => {
+const collectMissingDependencyNames = (value: unknown): string[] => {
   const found = new Set<string>();
   const pending: unknown[] = [value];
   while (pending.length > 0) {
@@ -213,7 +213,7 @@ const extractionDiagnostic = (
   stage: string | null,
   report: JsonValue,
 ): JsonValue => {
-  const dependencies = missingDependencies(report);
+  const dependencies = collectMissingDependencyNames(report);
   return {
     input_path: inputPath,
     ...(stage === null ? {} : { stage }),
@@ -614,7 +614,7 @@ export const normalizeUnblobReport = (
       });
     for (const item of record.reports) {
       if (item.__typename__ === "ExtractorDependencyNotFoundReport") {
-        const dependencies = missingDependencies(item);
+        const dependencies = collectMissingDependencyNames(item);
         if (dependencies.length > 0)
           noteExtractionProblem({
             input_path: path,
@@ -717,15 +717,14 @@ export const normalizeUnblobReport = (
             // Nested under one chunk: keep the owning chunk, not the whole task.
             noteChunkMissingDependencies(path, parsed.id, [problem]);
           }
-        if (
-          detail !== null &&
-          hasExtractionProblem(detail.extraction_reports)
-        )
+        if (detail !== null && hasExtractionProblem(detail.extraction_reports))
           noteExtractionProblem({
             input_path: path,
             provider_id: parsed.id,
             handler: detail.handler_name,
-            dependencies: missingDependencies(detail.extraction_reports),
+            dependencies: collectMissingDependencyNames(
+              detail.extraction_reports,
+            ),
           });
         addBlobOrigin(path, parsed.id, {
           handler: detail?.handler_name ?? null,
@@ -761,7 +760,9 @@ export const normalizeUnblobReport = (
               input_path: path,
               provider_id: parsed.id,
               handler: parsed.handler_name,
-              dependencies: missingDependencies(parsed.extraction_reports),
+              dependencies: collectMissingDependencyNames(
+                parsed.extraction_reports,
+              ),
             });
           diagnostics.push(
             extractionDiagnostic(

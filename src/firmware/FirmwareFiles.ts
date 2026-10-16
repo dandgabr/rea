@@ -47,6 +47,11 @@ export interface FirmwareEntry {
   readonly linkTarget: string | null;
 }
 
+/** Filesystem entries that may be reported but are never published as files. */
+export type UnpublishedFirmwareEntry = Omit<FirmwareEntry, "kind"> & {
+  readonly kind: Exclude<FirmwareEntry["kind"], "file">;
+};
+
 const throwIfFirmwareInventoryCancelled = (
   signal: AbortSignal | undefined,
   operation: string,

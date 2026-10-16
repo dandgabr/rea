@@ -18,7 +18,6 @@ import type { CliInstance } from "./types.js";
 import { withCommandCancellation } from "./commandCancellation.js";
 import { absoluteCallerPath } from "../filesystem/callerPath.js";
 import { finishAnalysisCommand } from "./finishAnalysisCommand.js";
-import { resolve } from "node:path";
 
 /** One-shot firmware CLI commands backed by the same workflows as MCP. */
 export const registerFirmwareCommands = (
@@ -35,7 +34,7 @@ export const registerFirmwareCommands = (
     .string()
     .optional()
     .describe(
-      'Inline JSON runtime selection, for example {"kind":"native"}; container requires command, image and existing_store_profile',
+      'Inline JSON runtime selection, for example {"kind":"native"}; caller-container runtime is currently unavailable',
     );
   const selectionOptions = {
     offset: range.offset
@@ -46,10 +45,14 @@ export const registerFirmwareCommands = (
       .describe("Selected byte length; requires offset"),
   };
   const unblobOptions = {
-    workers: unblobOptionsSchema.shape.workers.removeDefault().optional(),
+    workers: unblobOptionsSchema.shape.workers
+      .removeDefault()
+      .optional()
+      .describe("Maximum Unblob worker processes"),
     randomnessDepth: unblobOptionsSchema.shape.randomness_depth
       .removeDefault()
-      .optional(),
+      .optional()
+      .describe("Randomness analysis depth"),
     skipMagic: z
       .array(z.string())
       .optional()
@@ -120,7 +123,9 @@ export const registerFirmwareCommands = (
         return finishAnalysisCommand(
           () => service.execute(operation, selectedInput, { signal }),
           service,
-          operation === "inspect_firmware_regions" ? "binwalk" : "unblob",
+          typeof selectedInput.provider_id === "string"
+            ? selectedInput.provider_id
+            : "unblob",
           operation,
           undefined,
           signal,
@@ -134,7 +139,7 @@ export const registerFirmwareCommands = (
     description:
       "Inspect selected tool identity, dependency lookup and native documented formats",
     options: z.object({
-      providerId: z.literal("unblob"),
+      providerId: z.literal("unblob").describe("Selected provider identity"),
       runtime,
     }),
     run: ({ options }) =>
@@ -154,7 +159,10 @@ export const registerFirmwareCommands = (
       "Inspect firmware signature candidates without extracting them",
     args: z.object({ path }),
     options: z.object({
-      providerId: z.enum(["binwalk", "unblob"]).default("binwalk"),
+      providerId: z
+        .enum(["binwalk", "unblob"])
+        .default("binwalk")
+        .describe("Firmware analysis provider"),
       runtime,
       ...selectionOptions,
       ...unblobOptions,
@@ -187,28 +195,41 @@ export const registerFirmwareCommands = (
       ),
     }),
     options: z.object({
-      providerId: z.literal("unblob").default("unblob"),
+      providerId: z
+        .literal("unblob")
+        .default("unblob")
+        .describe("Firmware extraction provider"),
       runtime,
       ...selectionOptions,
       ...unblobOptions,
       keepExtractedChunks:
         unblobExtractionOptionsSchema.shape.keep_extracted_chunks
           .removeDefault()
-          .optional(),
-      deleteExtractedFiles: z.enum(["none", "all", "selected"]).optional(),
+          .optional()
+          .describe("Keep intermediate extracted chunks"),
+      deleteExtractedFiles: z
+        .enum(["none", "all", "selected"])
+        .optional()
+        .describe("Select which extracted files to delete"),
       deleteHandler: z
         .array(z.string())
         .optional()
         .describe("Repeatable handler; requires selected deletion mode"),
       carveSuffix: unblobExtractionOptionsSchema.shape.carve_suffix
         .removeDefault()
-        .optional(),
+        .optional()
+        .describe("Suffix for carved output files"),
       extractSuffix: unblobExtractionOptionsSchema.shape.extract_suffix
         .removeDefault()
-        .optional(),
-      maxDepth: extractInput.max_depth,
-      maxOutputBytes: extractInput.max_output_bytes,
-      maxOutputFiles: extractInput.max_output_files,
+        .optional()
+        .describe("Suffix for extracted output files"),
+      maxDepth: extractInput.max_depth.describe("Maximum extraction depth"),
+      maxOutputBytes: extractInput.max_output_bytes.describe(
+        "Maximum total published output bytes",
+      ),
+      maxOutputFiles: extractInput.max_output_files.describe(
+        "Maximum number of published output files",
+      ),
     }),
     run: ({ args, options }) =>
       execute(CLI_COMMANDS.extractFirmware, "extract_firmware", {
