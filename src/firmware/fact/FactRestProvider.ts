@@ -339,9 +339,10 @@ export class FactRestProvider implements FirmwareCorpusPort {
       delivered = true;
       const response = await fetch(url, {
         method,
-        headers: (connection.authorization === undefined
+        headers:
+          connection.authorization === undefined
             ? {}
-            : { Authorization: connection.authorization }),
+            : { Authorization: connection.authorization },
         redirect: "manual",
         signal,
       });
