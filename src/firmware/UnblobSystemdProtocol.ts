@@ -1,5 +1,9 @@
 import { createHash } from "node:crypto";
-import { AnalysisOutputError } from "../domain/analysisErrorCore.js";
+import type { Readable } from "node:stream";
+import {
+  AnalysisCancelledError,
+  AnalysisOutputError,
+} from "../domain/analysisErrorCore.js";
 
 const MAGIC = Buffer.from("REAUB1\0\0", "ascii");
 const HEADER_BYTES = 40;
@@ -36,7 +40,7 @@ export type UnblobSystemdFrame =
 
 /** Decode a bounded framed stream from the isolated systemd service. File bodies stay streaming. */
 export async function* readUnblobSystemdFrames(
-  source: AsyncIterable<Uint8Array>,
+  source: Readable,
   options: {
     maxBytes: number;
     maxEntries: number;
@@ -214,17 +218,17 @@ export async function* readUnblobSystemdFrames(
 }
 
 class FrameReader {
-  readonly #iterator: AsyncIterator<Uint8Array>;
+  readonly #source: Readable;
   #buffer: Buffer<ArrayBufferLike> = Buffer.alloc(0);
   #offset = 0;
   #remaining = 0;
 
   constructor(
-    source: AsyncIterable<Uint8Array>,
+    source: Readable,
     readonly operation: string,
     readonly signal: AbortSignal | undefined,
   ) {
-    this.#iterator = source[Symbol.asyncIterator]();
+    this.#source = source;
   }
 
   async readExact(length: number): Promise<Buffer> {
@@ -240,7 +244,7 @@ class FrameReader {
     while (remaining > 0) {
       this.#checkAbort();
       if (this.#offset >= this.#buffer.length) {
-        const next = await this.#iterator.next();
+        const next = await this.#next();
         if (next.done)
           throw invalid(this.operation, "Unblob isolation stream is truncated");
         this.#buffer = Buffer.from(
@@ -271,7 +275,7 @@ class FrameReader {
         while (reader.#remaining > 0) {
           reader.#checkAbort();
           if (reader.#offset >= reader.#buffer.length) {
-            const next = await reader.#iterator.next();
+            const next = await reader.#next();
             if (next.done)
               throw invalid(reader.operation, "Unblob file frame is truncated");
             reader.#buffer = Buffer.from(
@@ -301,7 +305,7 @@ class FrameReader {
         this.operation,
         "Unblob isolation stream has trailing frame bytes",
       );
-    const extra = await this.#iterator.next();
+    const extra = await this.#next();
     if (!extra.done)
       throw invalid(
         this.operation,
@@ -309,9 +313,66 @@ class FrameReader {
       );
   }
 
+  /** Own a cancellable readable wait, without leaving iterator.next in flight.
+   * The supervisor owns the pipe lifetime and any bounded post-protocol drain.
+   */
+  #next(): Promise<IteratorResult<Uint8Array>> {
+    const source = this.#source;
+    return new Promise((resolve, reject) => {
+      const dispose = () => {
+        source.off("readable", read);
+        source.off("end", read);
+        source.off("close", read);
+        source.off("error", failed);
+        this.signal?.removeEventListener("abort", read);
+      };
+      const failed = (cause: unknown) => {
+        dispose();
+        reject(cause);
+      };
+      const read = () => {
+        try {
+          this.#checkAbort();
+          const value: unknown = source.read();
+          if (value !== null) {
+            if (!(value instanceof Uint8Array))
+              throw invalid(
+                this.operation,
+                "Unblob protocol stream did not produce bytes",
+              );
+            dispose();
+            resolve({ done: false, value });
+          } else if (source.errored !== null) {
+            failed(source.errored);
+          } else if (source.readableEnded) {
+            dispose();
+            resolve({ done: true, value: undefined });
+          } else if (source.destroyed || source.closed) {
+            failed(
+              invalid(
+                this.operation,
+                "Unblob isolation stream closed before EOF",
+              ),
+            );
+          }
+        } catch (cause: unknown) {
+          failed(cause);
+        }
+      };
+      source.on("readable", read);
+      source.on("end", read);
+      source.on("close", read);
+      source.on("error", failed);
+      this.signal?.addEventListener("abort", read, { once: true });
+      read();
+    });
+  }
+
   #checkAbort(): void {
     if (this.signal?.aborted === true)
-      throw invalid(this.operation, "Unblob isolation stream was cancelled");
+      throw new AnalysisCancelledError(this.operation, {
+        cause: this.signal.reason,
+      });
   }
 }
 

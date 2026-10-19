@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { readlinkSync } from "node:fs";
 import { open, readFile, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 
 const [
   serviceModule,
@@ -15,6 +16,9 @@ const [
 const { FirmwareAnalysisService } = await import(serviceModule);
 const { createFirmwareAnalysisProvider } = await import(compositionModule);
 const { resolveFirmwareCommand } = await import(commandModule);
+const { FirmwareFileAccess } = await import(
+  new URL("./FirmwareFiles.js", pathToFileURL(commandModule))
+);
 const executable = join(root, "actual-tool");
 const selected = join(root, "selected-entrypoint");
 const input = join(root, "input.bin");
@@ -25,11 +29,18 @@ const digest = createHash("sha256").update(bytes).digest("hex");
 await writeFile(executable, bytes, { mode: 0o700 });
 await symlink("actual-tool", selected);
 await writeFile(input, "abc");
-const admitted = await resolveFirmwareCommand(
-  { REA_UNBLOB_COMMAND: selected, REA_UNBLOB_RUNTIME_ROOT: root },
-  "unblob",
-  "inspect_firmware_regions",
-);
+const files = new FirmwareFileAccess();
+let admitted;
+try {
+  admitted = await resolveFirmwareCommand(
+    { REA_UNBLOB_COMMAND: selected, REA_UNBLOB_RUNTIME_ROOT: root },
+    "unblob",
+    "inspect_firmware_regions",
+    files,
+  );
+} finally {
+  await files.close();
+}
 assert.equal(admitted.command, selected);
 assert.equal(admitted.resolvedCommand, executable);
 assert.equal(admitted.sha256, digest);

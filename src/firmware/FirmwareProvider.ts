@@ -25,6 +25,7 @@ import { err, ok } from "../domain/result.js";
 import { PrivateRuntimeRoot } from "../process/PrivateRuntimeRoot.js";
 import type { ProviderProcessSupervisor } from "../process/ProviderProcess.js";
 import { SafeOutputTree } from "../artifacts/SafeOutputTree.js";
+import { SafeOutputTreeCreationFailure } from "../artifacts/SafeOutputTreeCreationFailure.js";
 import { Readable } from "node:stream";
 import { z } from "zod";
 import { publishFirmwareExtraction } from "./FirmwarePublication.js";
@@ -65,15 +66,14 @@ import {
 } from "./FirmwareReports.js";
 
 import { firmwareFailure, firmwareCancellation } from "./FirmwareFailures.js";
-import { AnalysisCleanupLease } from "../artifacts/AnalysisCleanupLease.js";
+import {
+  AnalysisCleanupLease,
+  AnalysisCleanupLeaseGroup,
+} from "../artifacts/AnalysisCleanupLease.js";
 
 type Outcome = Awaited<ReturnType<FirmwareAnalysisPort["execute"]>>;
 interface PendingFirmwareCleanup {
   supervisor?: ProviderProcessSupervisor;
-  tree?: {
-    readonly tree: SafeOutputTree;
-    readonly lease: AnalysisCleanupLease;
-  };
   readonly root: PrivateRuntimeRoot;
   readonly rootLease: AnalysisCleanupLease;
   readonly engine: string;
@@ -84,7 +84,7 @@ const bindWorkspaceFailure = (
   pending: PendingFirmwareCleanup,
   failure: AnalysisError,
 ): AnalysisError => {
-  pending.rootLease.bindCleanupError(failure);
+  new AnalysisCleanupLeaseGroup(failure, [pending.rootLease]);
   return failure;
 };
 
@@ -412,27 +412,6 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
         continue;
       }
       try {
-        if (pending.tree !== undefined) {
-          await pending.tree.lease.release();
-          delete pending.tree;
-        }
-      } catch (cause: unknown) {
-        failures.push(
-          bindWorkspaceFailure(
-            pending,
-            new ProviderCleanupError(
-              pending.engine,
-              [path, pending.tree?.tree.outputRoot ?? path],
-              {
-                reason: cause instanceof Error ? cause.message : String(cause),
-              },
-              { operation: pending.operation, cause },
-            ),
-          ),
-        );
-      }
-      if (pending.tree !== undefined) continue;
-      try {
         await pending.rootLease.release();
         this.#pendingCleanup.delete(path);
       } catch (cause: unknown) {
@@ -498,7 +477,46 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
       );
       root = await PrivateRuntimeRoot.create({ prefix: "rea-firmware-" });
       const ownedRoot = root;
-      const ownedRootLease = new AnalysisCleanupLease(() => ownedRoot.close());
+      // Every tree acquired inside this workflow keeps its exact close authority
+      // until rollback confirms all handles are closed. The root cannot outrun it.
+      const trees = new Map<SafeOutputTree, AnalysisCleanupLease>();
+      const ownTree = (tree: SafeOutputTree, lease?: AnalysisCleanupLease) => {
+        const owned =
+          trees.get(tree) ??
+          lease ??
+          new AnalysisCleanupLease(async () => {
+            await tree.rollback();
+          }, [tree.outputRoot]);
+        trees.set(tree, owned);
+        return owned;
+      };
+      const ownedRootLease = new AnalysisCleanupLease(
+        async () => {
+          const failures: unknown[] = [];
+          for (const [tree, lease] of trees) {
+            try {
+              await lease.release();
+              trees.delete(tree);
+            } catch (cause: unknown) {
+              failures.push(cause);
+            }
+          }
+          if (failures.length > 0)
+            throw new AggregateError(
+              failures,
+              "Owned firmware trees remain pending cleanup",
+            );
+          await ownedRoot.close();
+        },
+        {
+          get cleanupResources() {
+            return [
+              ownedRoot.path,
+              ...[...trees.keys()].map((tree) => tree.outputRoot),
+            ];
+          },
+        },
+      );
       rootLease = ownedRootLease;
       const target =
         request.operation === "inspect_firmware_provider"
@@ -507,7 +525,10 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
       const run = (
         args: readonly string[],
         outputBudget?: { root: string; bytes: number; entries: number },
-        consumeStdout?: (stream: Readable) => Promise<unknown>,
+        consumeStdout?: (
+          stream: Readable,
+          signal: AbortSignal,
+        ) => Promise<unknown>,
         acceptReportedExtractionFailure = false,
       ) =>
         runFirmwareCommand({
@@ -749,9 +770,20 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
           ]);
         const outputRoot = join(root.path, "extracted");
         const nativeOptions = unblobExecutionOptions(request);
-        const staging = await SafeOutputTree.create(
-          join(root.path, "unblob-transfer-stage"),
-        );
+        let staging: SafeOutputTree;
+        try {
+          staging = await SafeOutputTree.create(
+            join(root.path, "unblob-transfer-stage"),
+          );
+        } catch (cause: unknown) {
+          if (cause instanceof SafeOutputTreeCreationFailure)
+            ownTree(cause.tree);
+          throw cause;
+        }
+        const stagingLease = ownTree(staging);
+        let extractionNormalized:
+          | ReturnType<typeof normalizeUnblobReport>
+          | undefined;
         let resultFrame:
           | Extract<UnblobSystemdFrame, { type: "result" }>
           | undefined;
@@ -762,22 +794,51 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
           kind: "symlink" | "special";
           linkTarget: string | null;
         }[] = [];
-        const consumeStdout = async (stream: Readable): Promise<unknown> => {
+        const consumeStdout = async (
+          stream: Readable,
+          protocolSignal: AbortSignal,
+        ): Promise<unknown> => {
           for await (const frame of readUnblobSystemdFrames(stream, {
             maxBytes: request.input.max_output_bytes,
             maxEntries: request.input.max_output_files,
             operation: request.operation,
-            signal,
+            signal: protocolSignal,
           })) {
             if (frame.type === "result") {
               resultFrame = frame;
+              extractionNormalized = normalizeUnblobReport(frame.rawReport, {
+                inputPath: "/tmp/rea-input",
+                outputRoot: "/tmp/rea-extracted",
+                ...target.selection,
+                maxDepth: request.input.max_depth,
+                skipMagic: nativeOptions.skipMagic,
+                skipExtensions: nativeOptions.skipExtensions,
+                pluginsUnverified: true,
+              });
+              partialObservation = createFirmwareExtractionObservation({
+                outputDirectory: request.input.output_directory,
+                maxDepth: request.input.max_depth,
+                normalized: extractionNormalized,
+                selection: target.selection,
+                engine,
+              });
             } else if (frame.type === "file") {
-              await staging.write(
-                frame.relativePath,
-                Readable.from(frame.bytes),
-                { sha256: frame.sha256, bytes: frame.size },
-                signal,
-              );
+              try {
+                await staging.write(
+                  frame.relativePath,
+                  Readable.from(frame.bytes),
+                  { sha256: frame.sha256, bytes: frame.size },
+                  protocolSignal,
+                );
+              } catch (cause: unknown) {
+                throw firmwareFailure(
+                  cause,
+                  engineName,
+                  request.operation,
+                  deadline,
+                  stagingLease,
+                );
+              }
             } else if (frame.type === "unpublished") {
               unpublished.push({
                 relativePath: frame.relativePath,
@@ -824,15 +885,9 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
           request.operation,
         );
         const report = frame.rawReport;
-        const normalized = normalizeUnblobReport(report, {
-          inputPath: "/tmp/rea-input",
-          outputRoot: "/tmp/rea-extracted",
-          ...target.selection,
-          maxDepth: request.input.max_depth,
-          skipMagic: nativeOptions.skipMagic,
-          skipExtensions: nativeOptions.skipExtensions,
-          pluginsUnverified: true,
-        });
+        const normalized = extractionNormalized;
+        if (normalized === undefined)
+          throw new Error("Unblob extraction report was not observed");
         if (frame.exitCode === 1 && normalized.diagnostics.length === 0)
           throw new AnalysisOutputError(
             request.operation,
@@ -867,7 +922,7 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
           engine,
           signal,
           retainCleanup: (tree, lease, failure) => {
-            ownedRootLease.bindCleanupError(failure);
+            new AnalysisCleanupLeaseGroup(failure, [ownedRootLease]);
             const pending: PendingFirmwareCleanup = this.#pendingCleanup.get(
               ownedRoot.path,
             ) ?? {
@@ -876,7 +931,7 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
               engine: engineName,
               operation: request.operation,
             };
-            pending.tree = { tree, lease };
+            ownTree(tree, lease);
             this.#pendingCleanup.set(ownedRoot.path, pending);
           },
         });
@@ -956,7 +1011,7 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
       rootLease !== undefined &&
       finished.error.cleanupResources.includes(root.path)
     )
-      rootLease.bindCleanupError(finished.error);
+      new AnalysisCleanupLeaseGroup(finished.error, [rootLease]);
     if (finished.ok && signal.aborted)
       return err(
         firmwareCancellation(
@@ -1011,7 +1066,8 @@ const finishFirmwareWorkspace = async (
             : { partialObservation: outcome.error.partialObservation }),
       },
     );
-    rootLease?.bindCleanupError(cleanup);
+    if (rootLease !== undefined)
+      new AnalysisCleanupLeaseGroup(cleanup, [rootLease]);
     if (outcome.ok && signal.aborted) {
       const primary = firmwareCancellation(
         request.operation,

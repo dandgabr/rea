@@ -372,6 +372,10 @@ export class ProviderProcessSupervisor {
     this.#maxDiagnosticBytes = options.maxDiagnosticBytes;
     if (options.captureStdout !== false)
       this.#attach(launch.process.stdout, "stdout");
+    else
+      // Protocol readers own bytes; the supervisor still owns late pipe errors
+      // after a reader cancels and incomplete process cleanup retains the pipe.
+      launch.process.stdout?.on("error", this.#onStdoutError);
     this.#attach(launch.process.stderr, "stderr");
     launch.process.once("exit", this.#onExit);
     launch.process.once("close", this.#onClose);

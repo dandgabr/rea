@@ -1,5 +1,7 @@
 import { chmod, mkdir, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { EventEmitter } from "node:events";
+import { PassThrough, type Readable } from "node:stream";
 
 import { expect, it as test } from "vitest";
 
@@ -7,6 +9,7 @@ import { createTestTempDirectory } from "../../tests/fixtures/temporaryDirectory
 import {
   AnalysisCapabilityUnavailableError,
   AnalysisProtocolError,
+  AnalysisCancelledError,
 } from "../domain/analysisErrorCore.js";
 import { projectAnalysisError } from "../domain/analysisErrorProjection.js";
 import { FirmwareFileAccess } from "./FirmwareFiles.js";
@@ -15,8 +18,307 @@ import {
   runFirmwareCommand,
 } from "./FirmwareCommand.js";
 import { spawnOwnedProviderProcess } from "../process/ProviderProcess.js";
+import type { ProviderProcessSupervisor } from "../process/ProviderProcess.js";
+import { readUnblobSystemdFrames } from "./UnblobSystemdProtocol.js";
 
 const it = test.skipIf(process.platform !== "linux");
+
+test.each(["timeout", "caller"] as const)(
+  "preserves the first %s interruption when the other signal aborts during stop",
+  async (first) => {
+    const caller = new AbortController();
+    const deadline = new AbortController();
+    const timeoutReason = new DOMException("initial deadline", "TimeoutError");
+    const callerReason = Error("caller interruption");
+    const originalTimeout = AbortSignal.timeout;
+    AbortSignal.timeout = () => deadline.signal;
+    const child = Object.assign(new EventEmitter(), {
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+      exitCode: null,
+      signalCode: null,
+      kill: () => false,
+    });
+    try {
+      const failure = await runFirmwareCommand({
+        engine: "unblob",
+        operation: "extract_firmware",
+        command: "/unused",
+        limiter: "/unused",
+        args: [],
+        cwd: "/tmp",
+        environment: {},
+        signal: caller.signal,
+        retainCleanup: () => {},
+        launcher: async () => {
+          setImmediate(() => {
+            child.emit("exit", 0, null);
+            child.emit("close", 0, null);
+            if (first === "timeout") deadline.abort(timeoutReason);
+            else caller.abort(callerReason);
+          });
+          return {
+            process: child,
+            ownership: {
+              runId: "first-interruption",
+              leaderPid: 123,
+              processGroupId: 123,
+            },
+            cleanup: async () => {
+              if (first === "timeout") caller.abort(callerReason);
+              else deadline.abort(timeoutReason);
+              return { cleaned: true, signaled: false };
+            },
+          };
+        },
+        consumeStdout: async (stream, signal) => {
+          for await (const _frame of readUnblobSystemdFrames(stream, {
+            maxBytes: 100,
+            maxEntries: 8,
+            signal,
+          })) {
+            /* Consume the production protocol. */
+          }
+        },
+      }).catch((cause: unknown) => cause);
+      expect(failure).toMatchObject({
+        _tag:
+          first === "timeout"
+            ? "AnalysisTimeoutError"
+            : "AnalysisCancelledError",
+        cause: first === "timeout" ? timeoutReason : callerReason,
+      });
+    } finally {
+      AbortSignal.timeout = originalTimeout;
+      child.stdout.destroy();
+      child.stderr.destroy();
+    }
+  },
+);
+
+test.each([false, true])(
+  "retains incomplete cleanup while cancelling an empty framed stream (close reported=%s)",
+  async (closed) => {
+    const controller = new AbortController();
+    const reason = Error("caller stopped while awaiting frame header");
+    const child = Object.assign(new EventEmitter(), {
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+      exitCode: null,
+      signalCode: null,
+      kill: () => false,
+    });
+    let allowCleanup = false;
+    let cleanupCalls = 0;
+    let retained: ProviderProcessSupervisor | undefined;
+    const pending = runFirmwareCommand({
+      engine: "unblob",
+      operation: "extract_firmware",
+      command: "/unused",
+      limiter: "/unused",
+      args: [],
+      cwd: "/tmp",
+      environment: {},
+      signal: controller.signal,
+      launcher: async () => ({
+        process: child,
+        ownership: { runId: "test", leaderPid: 123, processGroupId: 123 },
+        cleanup: async () => {
+          cleanupCalls++;
+          return allowCleanup
+            ? { cleaned: true, signaled: false }
+            : { cleaned: false, reason: "service cleanup remains pending" };
+        },
+      }),
+      retainCleanup: (owner) => {
+        retained = owner;
+      },
+      consumeStdout: async (stream, protocolSignal) => {
+        for await (const _frame of readUnblobSystemdFrames(stream, {
+          maxBytes: 100,
+          maxEntries: 8,
+          signal: protocolSignal,
+        })) {
+          /* Consume frames at the production boundary. */
+        }
+      },
+    }).catch((cause: unknown) => cause);
+    try {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      if (closed) child.emit("close", 0, null);
+      controller.abort(reason);
+      const failure = await Promise.race([
+        pending,
+        new Promise((resolve) => setTimeout(() => resolve("pending"), 500)),
+      ]);
+      expect(failure).toMatchObject({
+        cleanupIncomplete: true,
+        diagnostics: { primary_error: { code: "cancelled" } },
+        cleanupPrimary: { cause: reason },
+      });
+      expect(retained).toBeDefined();
+      expect(cleanupCalls).toBe(1);
+      expect(child.stdout.destroyed).toBe(false);
+      expect(child.stdout.isPaused()).toBe(true);
+      expect(() =>
+        child.stdout.emit("error", Error("late retained pipe failure")),
+      ).not.toThrow();
+      expect(retained?.snapshot().outputIncomplete).toBe(true);
+      allowCleanup = true;
+      child.stdout.end();
+      child.stderr.end();
+      child.emit("exit", 0, null);
+      child.emit("close", 0, null);
+      expect(await retained?.stop()).toMatchObject({
+        status: "verified-cleanup",
+      });
+    } finally {
+      allowCleanup = true;
+      child.stdout.end();
+      child.stderr.end();
+      child.emit("exit", 0, null);
+      child.emit("close", 0, null);
+      await pending;
+      await retained?.stop();
+      child.stdout.destroy();
+      child.stderr.destroy();
+    }
+  },
+);
+
+test.each([
+  "success",
+  "command-failure",
+  "cleanup-failure",
+  "protocol-failure",
+] as const)(
+  "observes final stop cancellation while preserving %s",
+  async (outcome) => {
+    const controller = new AbortController();
+    const reason = Error("cancel during stop");
+    const child = Object.assign(new EventEmitter(), {
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+      exitCode: null,
+      signalCode: null,
+      kill: () => false,
+    });
+    const failure = await runFirmwareCommand({
+      engine: "unblob",
+      operation: "extract_firmware",
+      command: "/unused",
+      limiter: "/unused",
+      args: [],
+      cwd: "/tmp",
+      environment: {},
+      signal: controller.signal,
+      retainCleanup: () => {},
+      ...(outcome === "protocol-failure"
+        ? {
+            consumeStdout: async (
+              stream: Readable,
+              protocolSignal: AbortSignal,
+            ) => {
+              for await (const _frame of readUnblobSystemdFrames(stream, {
+                maxBytes: 100,
+                maxEntries: 8,
+                signal: protocolSignal,
+              })) {
+                /* Decode the malformed producer. */
+              }
+            },
+          }
+        : {}),
+      launcher: async () => {
+        setImmediate(() => {
+          child.stdout.end(
+            outcome === "protocol-failure"
+              ? Buffer.alloc(40)
+              : "producer evidence",
+          );
+          child.emit("exit", outcome === "command-failure" ? 2 : 0, null);
+          child.emit("close", outcome === "command-failure" ? 2 : 0, null);
+        });
+        return {
+          process: child,
+          ownership: { runId: "test", leaderPid: 123, processGroupId: 123 },
+          cleanup: async () => {
+            controller.abort(reason);
+            return outcome === "cleanup-failure"
+              ? { cleaned: false, reason: "service pending" }
+              : { cleaned: true, signaled: false };
+          },
+        };
+      },
+    }).catch((cause: unknown) => cause);
+    if (outcome === "success")
+      expect(failure).toBeInstanceOf(AnalysisCancelledError);
+    else if (outcome === "command-failure")
+      expect(failure).toMatchObject({
+        _tag: "ProviderAdapterError",
+        diagnostics: { exit_code: 2 },
+      });
+    else if (outcome === "protocol-failure")
+      expect(failure).toMatchObject({
+        _tag: "AnalysisOutputError",
+        reason: expect.stringContaining("invalid header"),
+      });
+    else
+      expect(failure).toMatchObject({
+        cleanupIncomplete: true,
+        diagnostics: { primary_error: { code: "cancelled" } },
+      });
+    expect(failure).toMatchObject({
+      capturedOutput: {
+        stdout: outcome === "protocol-failure" ? "" : "producer evidence",
+      },
+    });
+  },
+);
+
+test("cleans the owned process when a protocol consumer throws before returning its promise", async () => {
+  const primary = new AnalysisProtocolError("synchronous protocol refusal");
+  const child = Object.assign(new EventEmitter(), {
+    stdout: new PassThrough(),
+    stderr: new PassThrough(),
+    exitCode: null,
+    signalCode: null,
+    kill: () => false,
+  });
+  let cleanups = 0;
+  const failure = await runFirmwareCommand({
+    engine: "unblob",
+    operation: "extract_firmware",
+    command: "/unused",
+    limiter: "/unused",
+    args: [],
+    cwd: "/tmp",
+    environment: {},
+    signal: new AbortController().signal,
+    retainCleanup: () => {},
+    consumeStdout: () => {
+      throw primary;
+    },
+    launcher: async () => {
+      setImmediate(() => {
+        child.stdout.end();
+        child.stderr.end();
+        child.emit("exit", 0, null);
+        child.emit("close", 0, null);
+      });
+      return {
+        process: child,
+        ownership: { runId: "test", leaderPid: 123, processGroupId: 123 },
+        cleanup: async () => {
+          cleanups++;
+          return { cleaned: true, signaled: false };
+        },
+      };
+    },
+  }).catch((cause: unknown) => cause);
+  expect(failure).toBe(primary);
+  expect(cleanups).toBe(1);
+});
 
 it("preserves a caller-selected executable invocation path separately from resolved identity", async () => {
   const root = await createTestTempDirectory("rea-firmware-invocation-");

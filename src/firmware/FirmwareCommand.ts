@@ -34,6 +34,8 @@ import {
   inventoryFirmwareOutput,
 } from "./FirmwareFiles.js";
 
+import { firmwareFailure } from "./FirmwareFailures.js";
+
 /** Injectable owned launcher for production protocol and lifecycle tests. */
 export type FirmwareLauncher = (
   options: OwnedProviderProcessSpawnOptions,
@@ -209,13 +211,20 @@ export const runFirmwareCommand = async (context: {
   launcher?: FirmwareLauncher;
   outputBudget?: { root: string; bytes: number; entries: number };
   systemdProfile?: UnblobSystemdProfile;
-  consumeStdout?: (stream: Readable) => Promise<unknown>;
+  consumeStdout?: (stream: Readable, signal: AbortSignal) => Promise<unknown>;
   acceptReportedExtractionFailure?: boolean;
   retainCleanup(supervisor: ProviderProcessSupervisor): void;
 }): Promise<FirmwareCommandResult> => {
-  const { engine, operation, signal } = context;
-  if (signal.aborted)
-    throw new AnalysisCancelledError(operation, { cause: signal.reason });
+  const { engine, operation } = context;
+  const timeout = AbortSignal.timeout(FIRMWARE_LIMITS.timeoutMs);
+  const signal = AbortSignal.any([context.signal, timeout]);
+  const interruption = () =>
+    timeout.aborted && signal.reason === timeout.reason
+      ? new AnalysisTimeoutError(operation, FIRMWARE_LIMITS.timeoutMs, {
+          cause: signal.reason,
+        })
+      : new AnalysisCancelledError(operation, { cause: signal.reason });
+  if (signal.aborted) throw interruption();
   const runId = `rea-firmware-${randomUUID()}`;
   const launchOptions: OwnedProviderProcessSpawnOptions = {
     command: context.limiter,
@@ -319,19 +328,26 @@ export const runFirmwareCommand = async (context: {
         : {}),
     };
   };
+  const protocolStop = new AbortController();
+  const protocolSignal = AbortSignal.any([signal, protocolStop.signal]);
   let stdoutResult: unknown;
   let stdoutFailure: unknown;
+  const consumeStdout = context.consumeStdout;
   const stdoutResultPromise =
-    context.consumeStdout === undefined
+    consumeStdout === undefined
       ? undefined
-      : context.consumeStdout(supervisor.launch.process.stdout!).then(
-          (value) => {
-            stdoutResult = value;
-          },
-          (cause: unknown) => {
-            stdoutFailure = cause;
-          },
-        );
+      : Promise.resolve()
+          .then(() =>
+            consumeStdout(supervisor.launch.process.stdout!, protocolSignal),
+          )
+          .then(
+            (value) => {
+              stdoutResult = value;
+            },
+            (cause: unknown) => {
+              stdoutFailure = cause;
+            },
+          );
   const checkDiagnostics = () => {
     const snapshot = supervisor.snapshot();
     if (
@@ -356,8 +372,7 @@ export const runFirmwareCommand = async (context: {
     while (!(await supervisor.waitForOutputClose(100))) {
       if (stdoutFailure !== undefined) throw stdoutFailure;
       checkDiagnostics();
-      if (signal.aborted)
-        throw new AnalysisCancelledError(operation, { cause: signal.reason });
+      if (signal.aborted) throw interruption();
       if (performance.now() >= deadline)
         throw new AnalysisTimeoutError(operation, FIRMWARE_LIMITS.timeoutMs);
       if (context.outputBudget !== undefined)
@@ -372,18 +387,65 @@ export const runFirmwareCommand = async (context: {
     await stdoutResultPromise;
     if (stdoutFailure !== undefined) throw stdoutFailure;
     checkDiagnostics();
-    if (signal.aborted)
-      throw new AnalysisCancelledError(operation, { cause: signal.reason });
+    if (signal.aborted) throw interruption();
   } catch (cause: unknown) {
     failure = cause;
   }
+  if (failure !== undefined) protocolStop.abort(failure);
+  // Once the protocol stops, drain without retaining private wire bytes only
+  // during the bounded process stop. Incomplete owners keep their paused pipe.
+  const protocolStream =
+    context.consumeStdout === undefined ? undefined : spawned.process.stdout;
+  if (protocolStop.signal.aborted) protocolStream?.resume();
   const stopped = await supervisor.stop();
-  await stdoutResultPromise;
+  if (stopped.status === "incomplete") context.retainCleanup(supervisor);
+  try {
+    await stdoutResultPromise;
+  } finally {
+    if (protocolStop.signal.aborted) protocolStream?.pause();
+  }
+  failure ??= stdoutFailure;
   const snapshot = supervisor.snapshot();
   const captured = capture();
-  if (failure instanceof AnalysisError) failure.retainCapturedOutput(captured);
+  if (
+    failure === undefined &&
+    snapshot.exitCode !== undefined &&
+    snapshot.exitCode !== 0 &&
+    !(
+      context.acceptReportedExtractionFailure === true &&
+      snapshot.exitCode === 1
+    )
+  )
+    failure = new ProviderAdapterError(engine, operation, {
+      capturedOutput: captured,
+      diagnostics: {
+        reason:
+          "Tool failed; inspect exit status and stderr for format, dependency, sandbox or resource-limit failures",
+        exit_code: snapshot.exitCode ?? null,
+        signal: snapshot.signal ?? null,
+        stdout: snapshot.stdout.text,
+        stderr: snapshot.stderr.text,
+        ...(context.consumeStdout === undefined
+          ? { stdout_bytes: snapshot.stdout.bytes }
+          : {}),
+        stderr_bytes: snapshot.stderr.bytes,
+      },
+    });
+  if (failure === undefined && signal.aborted) failure = interruption();
+  if (failure !== undefined) {
+    if (
+      failure instanceof AnalysisCancelledError &&
+      timeout.aborted &&
+      failure.cause === timeout.reason
+    )
+      failure = new AnalysisTimeoutError(operation, FIRMWARE_LIMITS.timeoutMs, {
+        cause: failure.cause,
+      });
+    const normalized = firmwareFailure(failure, engine, operation);
+    normalized.retainCapturedOutput(captured);
+    failure = normalized;
+  }
   if (stopped.status === "incomplete") {
-    context.retainCleanup(supervisor);
     throw new ProviderCleanupError(
       engine,
       [runId, context.cwd],
@@ -405,32 +467,17 @@ export const runFirmwareCommand = async (context: {
             ? projectAnalysisError(failure)
             : null,
       },
-      { operation, cause: failure, capturedOutput: captured },
+      {
+        operation,
+        cause: failure,
+        capturedOutput: captured,
+        ...(failure instanceof AnalysisError
+          ? { cleanupPrimary: failure }
+          : {}),
+      },
     );
   }
   if (failure !== undefined) throw failure;
-  if (
-    snapshot.exitCode !== 0 &&
-    !(
-      context.acceptReportedExtractionFailure === true &&
-      snapshot.exitCode === 1
-    )
-  )
-    throw new ProviderAdapterError(engine, operation, {
-      capturedOutput: captured,
-      diagnostics: {
-        reason:
-          "Tool failed; inspect exit status and stderr for format, dependency, sandbox or resource-limit failures",
-        exit_code: snapshot.exitCode ?? null,
-        signal: snapshot.signal ?? null,
-        stdout: snapshot.stdout.text,
-        stderr: snapshot.stderr.text,
-        ...(context.consumeStdout === undefined
-          ? { stdout_bytes: snapshot.stdout.bytes }
-          : {}),
-        stderr_bytes: snapshot.stderr.bytes,
-      },
-    });
   return {
     stdout: snapshot.stdout,
     stderr: snapshot.stderr,

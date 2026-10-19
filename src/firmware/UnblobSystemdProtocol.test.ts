@@ -1,5 +1,7 @@
 import { expect, it } from "vitest";
 import { createHash } from "node:crypto";
+import { PassThrough, Readable } from "node:stream";
+import { AnalysisCancelledError } from "../domain/analysisErrorCore.js";
 import { readUnblobSystemdFrames } from "./UnblobSystemdProtocol.js";
 
 const frameBytes = (
@@ -40,12 +42,99 @@ const frameBytes = (
   return Buffer.concat([prefix, report, ...payloads]);
 };
 
-const split = (value: Buffer): AsyncIterable<Buffer> => ({
-  async *[Symbol.asyncIterator]() {
-    for (let offset = 0; offset < value.length; offset += 7)
-      yield value.subarray(offset, Math.min(value.length, offset + 7));
+const split = (value: Buffer): Readable =>
+  Readable.from({
+    async *[Symbol.asyncIterator]() {
+      for (let offset = 0; offset < value.length; offset += 7)
+        yield value.subarray(offset, Math.min(value.length, offset + 7));
+    },
+  });
+
+it.each(["header", "report", "body", "end"] as const)(
+  "cancels a pending %s read without destroying or continuing to consume the owned stream",
+  async (stage) => {
+    const stream = new PassThrough();
+    const controller = new AbortController();
+    const reason = { caller: "stopped" };
+    const bytes = frameBytes(
+      stage === "body"
+        ? [{ kind: 1, path: "file", bytes: Buffer.from("ok") }]
+        : [],
+    );
+    if (stage === "report") stream.write(bytes.subarray(0, 40));
+    if (stage === "body") stream.write(bytes.subarray(0, bytes.length - 1));
+    if (stage === "end") stream.write(bytes);
+    const frames = readUnblobSystemdFrames(stream, {
+      maxBytes: 100,
+      maxEntries: 8,
+      signal: controller.signal,
+    });
+    let pending: Promise<unknown>;
+    if (stage === "body") {
+      await frames.next();
+      const entry = await frames.next();
+      if (entry.value?.type !== "file") throw Error("Expected file frame");
+      const body = entry.value.bytes;
+      pending = (async () => {
+        for await (const _chunk of body) {
+          /* Drain the declared body. */
+        }
+      })();
+    } else {
+      if (stage === "end") await frames.next();
+      pending = frames.next();
+    }
+    const observed = pending.catch((cause: unknown) => cause);
+    try {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      controller.abort(reason);
+      const timeout = Symbol("pending parser did not cancel");
+      const failure = await Promise.race([
+        observed,
+        new Promise((resolve) => setTimeout(() => resolve(timeout), 100)),
+      ]);
+      expect(failure).toBeInstanceOf(AnalysisCancelledError);
+      expect(failure).toMatchObject({ cause: reason });
+      expect(stream.destroyed).toBe(false);
+      stream.write("late");
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(stream.readableLength).toBe(4);
+      expect(stream.listenerCount("readable")).toBe(0);
+      expect(stream.listenerCount("error")).toBe(0);
+    } finally {
+      stream.end();
+      await observed;
+      await frames.return(undefined);
+      stream.destroy();
+    }
   },
-});
+);
+
+it.each(["end", "destroy", "error"] as const)(
+  "requires physical EOF after a complete result frame (%s)",
+  async (completion) => {
+    const stream = new PassThrough();
+    const frames = readUnblobSystemdFrames(stream, {
+      maxBytes: 100,
+      maxEntries: 8,
+    });
+    stream.write(frameBytes([]));
+    expect((await frames.next()).value).toMatchObject({ type: "result" });
+    const pending = frames.next();
+    const observed = pending.catch((cause: unknown) => cause);
+    const transportError = Error("pipe failed before EOF");
+    if (completion === "end") stream.end();
+    else stream.destroy(completion === "error" ? transportError : undefined);
+    const result = await observed;
+    if (completion === "end")
+      expect(result).toEqual({ done: true, value: undefined });
+    else if (completion === "error") expect(result).toBe(transportError);
+    else expect(result).toMatchObject({ _tag: "AnalysisOutputError" });
+    expect(stream.listenerCount("readable")).toBe(0);
+    await frames.return(undefined);
+    stream.destroy();
+  },
+);
 
 it("streams bounded report and file frames, preserving bytes and metadata", async () => {
   const bytes = Buffer.from("verified firmware payload");
