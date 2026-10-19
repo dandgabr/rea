@@ -1,3 +1,5 @@
+import type { CallRelationshipDirection } from "../contracts/enhancedInputs.js";
+import { CALL_RELATIONSHIP_TRAVERSALS } from "./CallRelationshipTraversal.js";
 import type {
   AnalysisExecution,
   AnalysisOperation,
@@ -30,7 +32,7 @@ type RelationshipCall = (
 export interface CallPathTraceInput {
   readonly start: string;
   readonly goal?: string | undefined;
-  readonly direction: "forward" | "backward";
+  readonly direction: CallRelationshipDirection;
 }
 
 interface TraceState {
@@ -137,9 +139,8 @@ const expandAddress = async (
   expansion: AddressExpansion,
 ): Promise<Result<boolean, AnalysisError>> => {
   const { input, state, address, current, signal } = expansion;
-  const relation = input.direction === "forward" ? "callees" : "callers";
-  const tool =
-    input.direction === "forward" ? "procedure_callees" : "procedure_callers";
+  const { relation, operation: tool } =
+    CALL_RELATIONSHIP_TRAVERSALS[input.direction];
   const result = await call(tool, { procedure: address }, signal, "provider");
   if (!result.ok) {
     if (
@@ -158,7 +159,7 @@ const expandAddress = async (
     state.residual.add(`Call relationships were unavailable for ${address}.`);
     return ok(false);
   }
-  const related = parseRelatedAddresses(result.value.result, relation);
+  const related = parseRelatedAddresses(result.value.result, relation, tool);
   if (!related.ok) {
     state.failures.push({
       address,

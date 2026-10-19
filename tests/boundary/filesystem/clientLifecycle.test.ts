@@ -16,6 +16,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { parse as parseJsonc, type ParseError } from "jsonc-parser";
 
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
+import { ClientConfigurationPublication } from "../../../src/application/ClientConfigurationPublication.js";
 import { clearClientLocationEnvironment } from "../../fixtures/clientEnvironment.js";
 import { supportedClients } from "../../../src/application/SupportedClients.js";
 import { PRODUCT_IDENTITY } from "../../../src/identity.js";
@@ -64,13 +65,16 @@ describe("client configuration filesystem lifecycle", () => {
       "copilot_cli",
       "commandcode",
       "qwen_code",
+      "kimi",
       "vscode",
       "trae",
+      "workbuddy",
       "grok_build",
       "omp",
       "pi",
       "hermes",
       "qoder",
+      "droid",
       "zcode",
       "dsh",
       "grok_bot",
@@ -109,6 +113,7 @@ describe("client configuration filesystem lifecycle", () => {
     expect(configured).toContain("[mcp_servers.rea]");
     expect(configured).toContain('command = "rea"');
     expect(configured).toContain("startup_timeout_sec = 30");
+    expect(configured).toContain("tool_timeout_sec = 450");
     expect(configured).toContain('GHIDRA_INSTALL_DIR = "/opt/ghidra"');
     expect(configured).toContain('JAVA_HOME = "/opt/jdk-21"');
     expect(
@@ -131,7 +136,7 @@ describe("client configuration filesystem lifecycle", () => {
     await mkdir(dirname(configPath), { recursive: true });
     await writeFile(
       configPath,
-      `[mcp_servers.rea]\ncommand = "rea"\nargs = ["mcp"]\nstartup_timeout_sec = 30\n\n[mcp_servers.rea.env]\nJAVA_HOME = "/opt/jdk-21"\nHOPPER_LAUNCHER_PATH = "/Hopper Path"\nGHIDRA_INSTALL_DIR = "/opt/ghidra"\n`,
+      `[mcp_servers.rea]\ncommand = "rea"\nargs = ["mcp"]\nstartup_timeout_sec = 30\ntool_timeout_sec = 450\n\n[mcp_servers.rea.env]\nJAVA_HOME = "/opt/jdk-21"\nHOPPER_LAUNCHER_PATH = "/Hopper Path"\nGHIDRA_INSTALL_DIR = "/opt/ghidra"\n`,
     );
 
     const original = await readFile(configPath, "utf8");
@@ -151,7 +156,52 @@ describe("client configuration filesystem lifecycle", () => {
       readFile(`${configPath}.rea.backup`, "utf8"),
     ).rejects.toThrow();
   });
+});
 
+describe("Codex MCP tool deadlines", () => {
+  it("derives the Codex tool deadline from an explicit Ghidra startup allowance", async () => {
+    const home = await createTestTempDirectory("rea-codex-long-timeout-");
+    roots.push(home);
+    const configPath = join(home, ".codex/config.toml");
+    await mkdir(dirname(configPath), { recursive: true });
+    expect(
+      await configureClientConfiguration(
+        { name: "codex", configPath, format: "toml" },
+        { REA_GHIDRA_STARTUP_TIMEOUT_MS: "2700001" },
+        ["rea", "mcp"],
+      ),
+    ).toMatchObject({ status: "configured" });
+    expect(await readFile(configPath, "utf8")).toContain(
+      "tool_timeout_sec = 2821",
+    );
+    expect(await readFile(configPath, "utf8")).toContain(
+      'REA_GHIDRA_STARTUP_TIMEOUT_MS = "2700001"',
+    );
+  });
+
+  it("preserves positive caller-selected Codex startup and tool deadlines", async () => {
+    const home = await createTestTempDirectory("rea-codex-custom-timeout-");
+    roots.push(home);
+    const configPath = join(home, ".codex/config.toml");
+    await mkdir(dirname(configPath), { recursive: true });
+    await writeFile(
+      configPath,
+      '[mcp_servers.rea]\ncommand = "old-rea"\nargs = ["mcp"]\nstartup_timeout_sec = 5\ntool_timeout_sec = 10\n',
+    );
+    expect(
+      await configureClientConfiguration(
+        { name: "codex", configPath, format: "toml" },
+        {},
+        ["rea", "mcp"],
+      ),
+    ).toMatchObject({ status: "configured" });
+    const configured = await readFile(configPath, "utf8");
+    expect(configured).toContain("startup_timeout_sec = 5");
+    expect(configured).toContain("tool_timeout_sec = 10");
+  });
+});
+
+describe("client configuration filesystem lifecycle", () => {
   it("updates a symlink target without replacing the TOML config symlink", async () => {
     const home = await createTestTempDirectory("rea-toml-symlink-");
     roots.push(home);
@@ -1332,7 +1382,7 @@ describe("Codex configuration comments", () => {
       await configureClientConfiguration(
         { name: "codex", configPath, format: "toml" },
         {},
-        ["/isolated prefix/bin/rea", "mcp"],
+        [PRODUCT_IDENTITY.cliBinary, "mcp"],
       ),
     ).toMatchObject({ status: "configured" });
     const configured = await readFile(configPath, "utf8");
@@ -1502,7 +1552,7 @@ describe("client configuration filesystem removal", () => {
       cursor,
       JSON.stringify({
         mcpServers: {
-          rea: { command: "/isolated prefix/bin/rea", args: ["mcp"] },
+          rea: { command: PRODUCT_IDENTITY.cliBinary, args: ["mcp"] },
           other: { command: "other" },
         },
       }),
@@ -1592,7 +1642,9 @@ describe("client configuration filesystem removal", () => {
       }
     },
   );
+});
 
+describe("uninstall configuration symlink ownership", () => {
   it("removes an owned entry through a symlink without replacing it", async () => {
     const home = await createTestTempDirectory("rea-uninstall-symlink-");
     roots.push(home);
@@ -1608,8 +1660,14 @@ describe("client configuration filesystem removal", () => {
     await writeFile(targetPath, original);
     await symlink(targetPath, configPath);
 
-    expect((await runUninstall(false, systemUninstallHost(home))).status).toBe(
-      "complete",
+    const result = await runUninstall(false, systemUninstallHost(home));
+    expect(result.status).toBe("complete");
+    expect(result.items).toContainEqual(
+      expect.objectContaining({
+        name: "cursor",
+        status: "removed",
+        configuration_path: configPath,
+      }),
     );
     expect((await lstat(configPath)).isSymbolicLink()).toBe(true);
     expect(await readFile(`${configPath}.rea.backup`, "utf8")).toBe(original);
@@ -1630,6 +1688,7 @@ describe("client configuration filesystem removal", () => {
     expect(result.items).toContainEqual({
       name: "cursor",
       status: "failed",
+      configuration_path: configPath,
       detail:
         "Configuration path could not be safely verified. Check its permissions and, if it is a symbolic link, verify that the link resolves to a regular file owned by the current user, then rerun uninstall.",
     });
@@ -1637,6 +1696,184 @@ describe("client configuration filesystem removal", () => {
     await expect(
       readFile(`${configPath}.rea.backup`, "utf8"),
     ).rejects.toThrow();
+  });
+});
+
+describe("uninstall registration ownership preflight", () => {
+  it("removes repeated owned registrations from the table the client reads", async () => {
+    const home = await createTestTempDirectory("rea-uninstall-repeated-owned-");
+    roots.push(home);
+    const config = join(home, ".claude.json");
+    await mkdir(dirname(config), { recursive: true });
+    const owned = {
+      command: PRODUCT_IDENTITY.cliBinary,
+      args: ["mcp"],
+    };
+    const original =
+      `{"mcpServers":{"rea":${JSON.stringify(owned)},` +
+      `"peer":{"command":"peer"},` +
+      `"rea":${JSON.stringify(owned)}}}\n`;
+    await writeFile(config, original);
+
+    const result = await runUninstall(false, systemUninstallHost(home));
+
+    expect(result.status).toBe("complete");
+    expect(result.items).toContainEqual(
+      expect.objectContaining({ name: "claude_code", status: "removed" }),
+    );
+    expect(JSON.parse(await readFile(config, "utf8"))).toEqual({
+      mcpServers: { peer: { command: "peer" } },
+    });
+    expect(await readFile(`${config}.rea.backup`, "utf8")).toBe(original);
+  });
+
+  it("refuses an unowned repeat before changing any client or making backups", async () => {
+    const home = await createTestTempDirectory(
+      "rea-uninstall-repeated-foreign-",
+    );
+    roots.push(home);
+    const claude = join(home, ".claude.json");
+    const cursor = join(home, ".cursor/mcp.json");
+    await mkdir(dirname(claude), { recursive: true });
+    await mkdir(dirname(cursor), { recursive: true });
+    const owned = {
+      command: PRODUCT_IDENTITY.cliBinary,
+      args: ["mcp"],
+    };
+    const claudeOriginal = JSON.stringify({ mcpServers: { rea: owned } });
+    const cursorOriginal = `{"mcpServers":{"rea":null,"rea":${JSON.stringify(owned)}}}`;
+    await writeFile(claude, claudeOriginal);
+    await writeFile(cursor, cursorOriginal);
+
+    const result = await runUninstall(false, systemUninstallHost(home));
+
+    expect(result.status).toBe("failed");
+    expect(result.items).toContainEqual(
+      expect.objectContaining({ name: "cursor", status: "failed" }),
+    );
+    expect(result.items).toContainEqual(
+      expect.objectContaining({ name: "uninstall", status: "skipped" }),
+    );
+    expect(await readFile(claude, "utf8")).toBe(claudeOriginal);
+    expect(await readFile(cursor, "utf8")).toBe(cursorOriginal);
+    await expect(
+      readFile(`${claude}.rea.backup`, "utf8"),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(
+      readFile(`${cursor}.rea.backup`, "utf8"),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("keeps an owned OpenCode V2 registration when its V1 fallback is foreign", async () => {
+    const home = await createTestTempDirectory(
+      "rea-uninstall-opencode-fallback-",
+    );
+    roots.push(home);
+    const config = join(home, ".config/opencode/opencode.json");
+    await mkdir(dirname(config), { recursive: true });
+    const original = JSON.stringify({
+      mcp: {
+        servers: {
+          rea: {
+            type: "local",
+            command: [PRODUCT_IDENTITY.cliBinary, "mcp"],
+            enabled: true,
+          },
+        },
+        rea: { type: "local", command: ["/usr/bin/false"] },
+      },
+    });
+    await writeFile(config, original);
+
+    const result = await runUninstall(false, systemUninstallHost(home));
+
+    expect(result.status).toBe("failed");
+    expect(result.items).toContainEqual(
+      expect.objectContaining({ name: "opencode", status: "failed" }),
+    );
+    expect(await readFile(config, "utf8")).toBe(original);
+    await expect(
+      readFile(`${config}.rea.backup`, "utf8"),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+});
+
+describe("layered uninstall outcomes", () => {
+  it("reports an earlier layered OpenCode removal when a later backup is blocked", async () => {
+    const home = await createTestTempDirectory(
+      "rea-uninstall-opencode-layers-",
+    );
+    roots.push(home);
+    const directory = join(home, ".config/opencode");
+    const json = join(directory, "opencode.json");
+    const jsonc = join(directory, "opencode.jsonc");
+    const blocker = `${jsonc}.rea.backup`;
+    await mkdir(directory, { recursive: true });
+    const registration = {
+      type: "local",
+      command: [PRODUCT_IDENTITY.cliBinary, "mcp"],
+      enabled: true,
+    };
+    const jsonOriginal = JSON.stringify({
+      mcp: { servers: { rea: registration } },
+    });
+    const jsoncOriginal = `// OpenCode's later JSONC layer\n${JSON.stringify({
+      mcp: { servers: { rea: registration } },
+    })}\n`;
+    await writeFile(json, jsonOriginal);
+    await writeFile(jsonc, jsoncOriginal);
+    await mkdir(blocker);
+
+    const host = systemUninstallHost(home);
+    const blocked = await runUninstall(false, {
+      ...host,
+      close: async () => {
+        await host.close?.();
+        return "Controlled final cleanup diagnostic.";
+      },
+    });
+
+    expect(blocked.status).toBe("failed");
+    expect(await readFile(json, "utf8")).not.toContain('"rea"');
+    expect(await readFile(jsonc, "utf8")).toBe(jsoncOriginal);
+    const client = blocked.items.find(({ name }) => name === "opencode");
+    expect(client?.status).toBe("failed");
+    expect(client?.detail).toContain(`Removed registration from ${json}.`);
+    expect(client?.detail).toContain("Configuration could not be backed up");
+    expect(client?.detail).toContain("Check file permissions");
+    expect(client?.actions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          configuration_path: json,
+          status: "removed",
+        }),
+        expect.objectContaining({
+          configuration_path: jsonc,
+          status: "failed",
+        }),
+      ]),
+    );
+    expect(
+      client?.actions?.filter(
+        ({ configuration_path }) => configuration_path === json,
+      ),
+    ).toHaveLength(1);
+    expect(blocked.items).toContainEqual({
+      name: "uninstall_cleanup",
+      status: "failed",
+      detail: "Controlled final cleanup diagnostic.",
+    });
+
+    await rm(blocker, { recursive: true });
+    const recovered = await runUninstall(false, systemUninstallHost(home));
+
+    expect(recovered.status).toBe("complete");
+    expect(recovered.items).toContainEqual(
+      expect.objectContaining({ name: "opencode", status: "removed" }),
+    );
+    expect(parseJsonc(await readFile(jsonc, "utf8"))).toEqual({
+      mcp: { servers: {} },
+    });
   });
 });
 
@@ -1684,6 +1921,7 @@ describe("uninstall configuration preflight", () => {
       expect(result.items).toContainEqual({
         name: "cursor",
         status: "failed",
+        configuration_path: config,
         detail: `Configuration was not changed: ${problem}. Repair it, then rerun uninstall.`,
       });
       expect(await readFile(config, "utf8")).toBe(content);
@@ -1752,6 +1990,45 @@ describe("uninstall configuration preflight", () => {
 });
 
 describe("client configuration changed during uninstall", () => {
+  it("rechecks duplicate ownership after preflight and keeps the changed source", async () => {
+    const home = await createTestTempDirectory("rea-uninstall-repeat-race-");
+    roots.push(home);
+    const cursor = join(home, ".cursor/mcp.json");
+    await mkdir(dirname(cursor), { recursive: true });
+    const owned = {
+      command: PRODUCT_IDENTITY.cliBinary,
+      args: ["mcp"],
+    };
+    const original = JSON.stringify({ mcpServers: { rea: owned } });
+    const changed = `{"mcpServers":{"rea":null,"rea":${JSON.stringify(owned)}}}`;
+    await writeFile(cursor, original);
+    let reads = 0;
+    const fileSystem: UninstallFileSystem = {
+      ...testFileSystem,
+      readText: async (path) => {
+        if (path !== cursor) return readFile(path, "utf8");
+        reads += 1;
+        if (reads === 2) await writeFile(cursor, changed);
+        return readFile(path, "utf8");
+      },
+    };
+
+    const result = await runUninstall(
+      false,
+      systemUninstallHost(home, fileSystem),
+    );
+
+    expect(reads).toBe(2);
+    expect(result.status).toBe("failed");
+    expect(result.items).toContainEqual(
+      expect.objectContaining({ name: "cursor", status: "failed" }),
+    );
+    expect(await readFile(cursor, "utf8")).toBe(changed);
+    await expect(
+      readFile(`${cursor}.rea.backup`, "utf8"),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("stops the remaining removals when a configuration fails after preflight", async () => {
     const home = await createTestTempDirectory("rea-uninstall-race-");
     roots.push(home);
@@ -1814,25 +2091,34 @@ describe("client configuration filesystem failure reporting", () => {
   it.each([
     [
       "read",
-      "Configuration could not be read. Check file permissions, then rerun uninstall.",
+      () =>
+        "Configuration could not be read. Check file permissions, then rerun uninstall.",
     ],
     [
       "backup",
-      "Configuration could not be backed up, so no change was made. Check file permissions, then rerun uninstall.",
+      () =>
+        "Configuration could not be backed up, so no change was made. Check file permissions, then rerun uninstall.",
     ],
     [
       "update",
-      "Configuration could not be updated. The original was restored and its `.rea.backup` was retained. Repair the configuration or restore the backup, then rerun uninstall.",
+      (config: string) =>
+        `Configuration could not be updated. The original was restored and its backup at ${config}.rea.backup was retained. Repair the configuration or restore that backup, then rerun uninstall.`,
+    ],
+    [
+      "publication",
+      (config: string) =>
+        `Configuration could not be updated or restored. Restore the backup at ${config}.rea.backup manually, then rerun uninstall.`,
     ],
     [
       "restore",
-      "Configuration could not be updated or restored. Restore its `.rea.backup` manually, then rerun uninstall.",
+      (config: string) =>
+        `Configuration could not be updated or restored. Restore the backup at ${config}.rea.backup manually, then rerun uninstall.`,
     ],
   ] as const)(
     "reports an actionable client %s failure",
-    async (failure, detail) => {
+    async (failure, expectedDetail) => {
       const { home, config } = await uninstallFixture();
-      let writes = 0;
+      const detail = expectedDetail(config);
       const fileSystem: UninstallFileSystem = {
         ...testFileSystem,
         readText: (path) =>
@@ -1843,11 +2129,23 @@ describe("client configuration filesystem failure reporting", () => {
           failure === "backup"
             ? Promise.reject(new Error("SECRET backup failure"))
             : copyFile(source, destination, fsConstants.COPYFILE_EXCL),
-        writeText: async (path, contents) => {
-          writes += 1;
-          if ((failure === "update" && writes === 1) || failure === "restore")
-            throw new Error("SECRET write failure");
-          await writeFile(path, contents);
+        publishConfiguration: async (path, contents, original) => {
+          if (failure === "publication")
+            throw new Error("SECRET publication failure");
+          const publication = await ClientConfigurationPublication.write(
+            path,
+            contents,
+            original,
+          );
+          if (failure === "update" || failure === "restore")
+            publication.assertCurrent = async () => {
+              throw new Error("SECRET verification failure");
+            };
+          if (failure === "restore")
+            publication.restore = async () => {
+              throw new Error("SECRET restore failure");
+            };
+          return publication;
         },
       };
       const result = await runUninstall(
@@ -1867,13 +2165,18 @@ describe("client configuration filesystem failure reporting", () => {
     const current = await readFile(config, "utf8");
     const initial = '{"existing":true}\n';
     await writeFile(`${config}.rea.backup`, initial);
-    let writes = 0;
     const result = await systemUninstallHost(home, {
       ...testFileSystem,
-      writeText: async (path, contents) => {
-        writes += 1;
-        await writeFile(path, contents);
-        if (writes === 1) throw new Error("update failed after writing");
+      publishConfiguration: async (path, contents, original) => {
+        const publication = await ClientConfigurationPublication.write(
+          path,
+          contents,
+          original,
+        );
+        publication.assertCurrent = async () => {
+          throw new Error("verification failed after writing");
+        };
+        return publication;
       },
     }).removeClient({ name: "cursor", format: "json", configPath: config });
     expect(result.status).toBe("failed");
@@ -1894,14 +2197,11 @@ describe("client configuration filesystem failure reporting", () => {
         remove: () => Promise.reject(new Error("SECRET removal failure")),
       }),
     );
-    expect(result.items).toContainEqual(
-      expect.objectContaining({
-        name: "skill",
-        status: "failed",
-        detail: expect.stringContaining(
-          `Managed file could not be removed: ${join(skillRoot, "SKILL.md")}`,
-        ),
-      }),
+    const skillItem = result.items.find(({ name }) => name === "skill");
+    expect(skillItem?.status).toBe("failed");
+    expect(skillItem?.detail).toContain(`shared (${skillRoot}): failed (`);
+    expect(skillItem?.detail).toContain(
+      `Managed file could not be removed: ${join(skillRoot, "SKILL.md")}`,
     );
     expect(JSON.stringify(result)).not.toContain("SECRET");
     expect(await readFile(join(skillRoot, "SKILL.md"), "utf8")).toBe(
@@ -1943,11 +2243,48 @@ describe("client configuration filesystem failure reporting", () => {
   });
 });
 
+describe("skill root client identifier labels", () => {
+  it("labels each retained or removed skill root by its client identifier", async () => {
+    const home = await createTestTempDirectory("rea-uninstall-skill-labels-");
+    roots.push(home);
+    const customClaudeDirectory = join(home, "claude-config");
+    const sharedRoot = join(home, ".agents/skills/reverse-engineer-anything");
+    const claudeRoot = join(
+      customClaudeDirectory,
+      "skills/reverse-engineer-anything",
+    );
+    await mkdir(sharedRoot, { recursive: true });
+    await mkdir(claudeRoot, { recursive: true });
+    await writeFile(
+      join(sharedRoot, "SKILL.md"),
+      "---\nname: another-skill\n---\n# Not REA-owned\n",
+    );
+    await writeFile(join(claudeRoot, "SKILL.md"), ownedSkillManifest);
+
+    const skillItem = await systemUninstallHost(home, testFileSystem, {
+      CLAUDE_CONFIG_DIR: customClaudeDirectory,
+    }).removeSkill();
+
+    expect(skillItem.name).toBe("skill");
+    expect(skillItem.detail).toContain(`shared (${sharedRoot}): retained (`);
+    expect(skillItem.detail).toContain(
+      `claude_code (${claudeRoot}): removed (`,
+    );
+    await expect(
+      readFile(join(claudeRoot, "SKILL.md"), "utf8"),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await readFile(join(sharedRoot, "SKILL.md"), "utf8")).toContain(
+      "another-skill",
+    );
+  });
+});
+
 const testFileSystem: UninstallFileSystem = {
   readText: (path) => readFile(path, "utf8"),
   copy: (source, destination) =>
     copyFile(source, destination, fsConstants.COPYFILE_EXCL),
-  writeText: (path, contents) => writeFile(path, contents),
+  publishConfiguration: (path, contents, original) =>
+    ClientConfigurationPublication.write(path, contents, original),
   stat: (path) => lstat(path),
   realpath: (path) => realpath(path),
   remove: (path) => rm(path, { recursive: true }),

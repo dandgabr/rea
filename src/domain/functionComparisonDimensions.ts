@@ -1,4 +1,5 @@
 import { canonicalJson } from "./comparisonSemantics.js";
+import { compareFunctionReferences } from "./functionReferenceComparison.js";
 import { diffLines } from "diff";
 
 import type { FunctionSnapshot } from "./functionDossierEvidence.js";
@@ -7,10 +8,9 @@ import {
   identityProjection,
   isAutoName,
   normalizeCfg,
-  referenceKindProjection,
-  referenceProjection,
   sorted,
   stringAndNameProjection,
+  swiftLiteralSitesConflict,
 } from "./functionComparisonNormalization.js";
 import type {
   DimensionName,
@@ -51,7 +51,67 @@ export const compareDimensions = (
     compareReferences(left, right, context),
     compareStringsAndNames(left, right, context),
     compareCfg(left, right, context),
-  ];
+  ].map((result) => {
+    const limitations = [
+      ...facetLimitations(left, result.dimension).map(
+        (reason) => `Left: ${reason}`,
+      ),
+      ...facetLimitations(right, result.dimension).map(
+        (reason) => `Right: ${reason}`,
+      ),
+    ];
+    return limitations.length === 0
+      ? result
+      : unresolvedDimension({
+          dimension: result.dimension,
+          links: context.links,
+          leftCount: null,
+          rightCount: null,
+          limitations: [...result.limitations, ...limitations],
+        });
+  });
+};
+
+/** An empty undeclared facet is not evidence of observed absence. */
+const facetLimitations = (
+  snapshot: FunctionSnapshot,
+  dimension: DimensionName,
+): string[] => {
+  const { dossier } = snapshot;
+  const fields = {
+    identity: [],
+    pseudocode: [["pseudocode", dossier.pseudocode.length]],
+    assembly: [["assembly", dossier.assembly.length]],
+    comments: [["comments", dossier.comments.length]],
+    calls: [
+      ["callers", dossier.callers.length],
+      ["callees", dossier.callees.length],
+    ],
+    references: [
+      [
+        "references",
+        dossier.incoming_references.length + dossier.outgoing_references.length,
+      ],
+    ],
+    strings_names: [
+      [
+        "strings_names",
+        dossier.referenced_strings.length + dossier.referenced_names.length,
+      ],
+    ],
+    cfg: [["cfg", dossier.basic_blocks.length]],
+  } satisfies Record<
+    DimensionName,
+    [keyof NonNullable<typeof dossier.facet_availability>, number][]
+  >;
+  return fields[dimension].flatMap(([field, count]) => {
+    const availability = dossier.facet_availability?.[field];
+    if (availability?.available === false)
+      return [`${field}: ${availability.reason}`];
+    return availability === undefined && count === 0
+      ? [`${field}: Provider did not declare coverage for this empty facet.`]
+      : [];
+  });
 };
 
 const compareText = (
@@ -60,12 +120,14 @@ const compareText = (
   right: string,
   context: ComparisonContext,
 ): FunctionDimension => {
-  const limitations =
-    dimension === "assembly"
+  const limitations = [
+    "Exact provider text is compared without address or generated-name normalization; layout-only differences do not establish a behavior change.",
+    ...(dimension === "assembly"
       ? [
           "Assembly is opaque provider text; relocation normalization is unavailable.",
         ]
-      : [];
+      : []),
+  ];
   if (context.providersDiffer)
     return unresolvedDimension({
       dimension,
@@ -88,6 +150,7 @@ const compareText = (
       leftCount: [...left].length,
       rightCount: [...right].length,
       limitations: [
+        ...limitations,
         "Bounded line diff exceeded its time or edit-distance limit.",
       ],
     });
@@ -139,8 +202,12 @@ const compareStringsAndNames = (
   right: FunctionSnapshot,
   context: ComparisonContext,
 ): FunctionDimension => {
-  const leftValues = stringAndNameProjection(left);
-  const rightValues = stringAndNameProjection(right);
+  const complete =
+    swiftLiteralCoverage(left) === swiftLiteralCoverage(right) &&
+    swiftLiteralCoverage(left) !== "partial";
+  // Facts both dossiers record decide a change before Swift literal coverage can.
+  const leftValues = stringAndNameProjection(left, complete);
+  const rightValues = stringAndNameProjection(right, complete);
   if (leftValues === null || rightValues === null)
     return unresolvedDimension({
       dimension: "strings_names",
@@ -151,52 +218,59 @@ const compareStringsAndNames = (
         "Reference source locations could not be normalized to function offsets.",
       ],
     });
-  return compareValues("strings_names", leftValues, rightValues, context);
+  const compared = compareValues(
+    "strings_names",
+    leftValues,
+    rightValues,
+    context,
+  );
+  if (complete || compared.status === "changed") return compared;
+  // A retained literal differs only when the opposite dossier establishes its absence.
+  if (swiftLiteralSitesConflict(left, right)) {
+    const leftAll = stringAndNameProjection(left);
+    const rightAll = stringAndNameProjection(right);
+    if (leftAll !== null && rightAll !== null)
+      return compareValues("strings_names", leftAll, rightAll, context);
+  }
+  return unresolvedDimension({
+    dimension: "strings_names",
+    links: context.links,
+    leftCount: null,
+    rightCount: null,
+    limitations: [
+      "Swift String literal coverage differs or is partial; referenced strings and names match, and complete coverage does not establish a differing literal.",
+    ],
+  });
 };
+
+const swiftLiteralCoverage = (
+  snapshot: FunctionSnapshot,
+): "absent" | "complete" | "partial" =>
+  (snapshot.dossier.swift_string_literal_omissions ?? []).length > 0
+    ? "partial"
+    : snapshot.dossier.swift_string_literals === undefined
+      ? "absent"
+      : "complete";
 
 const compareReferences = (
   left: FunctionSnapshot,
   right: FunctionSnapshot,
   context: ComparisonContext,
 ): FunctionDimension => {
-  const leftProjection = referenceProjection(left);
-  const rightProjection = referenceProjection(right);
-  if (leftProjection.length === 0 && rightProjection.length === 0)
-    return compareValues(
-      "references",
-      leftProjection,
-      rightProjection,
-      context,
-    );
-  if (
-    canonicalJson(leftProjection, "Function comparison") !==
-    canonicalJson(rightProjection, "Function comparison")
-  )
-    return dimensionResult({
+  const compared = compareFunctionReferences(left, right);
+  if (compared.status === "unknown")
+    return unresolvedDimension({
       dimension: "references",
-      status: "changed",
-      left: leftProjection,
-      right: rightProjection,
-      ...context,
-      leftCount: leftProjection.length,
-      rightCount: rightProjection.length,
-      textDelta: null,
-      limitations: [
-        "Reference endpoints differ independently of provider reference-kind metadata.",
-      ],
+      links: context.links,
+      leftCount: compared.leftCount,
+      rightCount: compared.rightCount,
+      limitations: compared.limitations,
     });
-  const leftKinds = referenceKindProjection(left);
-  const rightKinds = referenceKindProjection(right);
-  if (leftKinds !== null && rightKinds !== null)
-    return compareValues("references", leftKinds, rightKinds, context);
-  return unresolvedDimension({
+  return dimensionResult({
     dimension: "references",
-    links: context.links,
-    leftCount: leftProjection.length,
-    rightCount: rightProjection.length,
-    limitations: [
-      "At least one provider did not expose reference kinds, so equal endpoints do not prove equal edge semantics.",
-    ],
+    ...compared,
+    ...context,
+    textDelta: null,
   });
 };
 
@@ -234,8 +308,12 @@ const compareCalls = (
   const leftValues = callProjection(left);
   const rightValues = callProjection(right);
   const coverageLimitations = [
-    ...left.callCoverageLimitations.map((reason) => `Left: ${reason}`),
-    ...right.callCoverageLimitations.map((reason) => `Right: ${reason}`),
+    ...left.callCoverageBlockers.map((reason) => `Left: ${reason}`),
+    ...right.callCoverageBlockers.map((reason) => `Right: ${reason}`),
+  ];
+  const coverageDiagnostics = [
+    ...left.callCoverageDiagnostics.map((reason) => `Left: ${reason}`),
+    ...right.callCoverageDiagnostics.map((reason) => `Right: ${reason}`),
   ];
   if (coverageLimitations.length > 0)
     return unresolvedDimension({
@@ -243,7 +321,7 @@ const compareCalls = (
       links: context.links,
       leftCount: leftValues.length,
       rightCount: rightValues.length,
-      limitations: coverageLimitations,
+      limitations: [...coverageLimitations, ...coverageDiagnostics],
     });
   if ([...leftValues, ...rightValues].some(({ name }) => isAutoName(name)))
     return unresolvedDimension({
@@ -253,6 +331,7 @@ const compareCalls = (
       rightCount: rightValues.length,
       limitations: [
         "Address-derived callee or caller names cannot be matched safely.",
+        ...coverageDiagnostics,
       ],
     });
   return compareValues(
@@ -260,6 +339,7 @@ const compareCalls = (
     sorted(leftValues),
     sorted(rightValues),
     context,
+    coverageDiagnostics,
   );
 };
 
@@ -301,6 +381,7 @@ const compareValues = (
   left: unknown,
   right: unknown,
   context: ComparisonContext,
+  limitations: readonly string[] = [],
 ): FunctionDimension => {
   const leftJson = canonicalJson(left, "Function comparison");
   const rightJson = canonicalJson(right, "Function comparison");
@@ -313,6 +394,6 @@ const compareValues = (
     leftCount: Array.isArray(left) ? left.length : null,
     rightCount: Array.isArray(right) ? right.length : null,
     textDelta: null,
-    limitations: [],
+    limitations,
   });
 };

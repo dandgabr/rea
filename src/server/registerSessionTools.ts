@@ -1,5 +1,6 @@
 import type { EvidenceMcpServer } from "./EvidenceMcpServer.js";
 import type { ArtifactResourceScope } from "../artifacts/ArtifactResourceScope.js";
+import { workflowUnknownInput } from "../application/investigation/WorkflowUnknown.js";
 
 import {
   getNavigationContext,
@@ -12,10 +13,9 @@ import { captureProcessScenario } from "../process/capture/ProcessHarness.js";
 import { ProcessCaptureResourceScope } from "../process/capture/ProcessCaptureLifecycle.js";
 import { ProcessCaptureError } from "../process/capture/ProcessCaptureError.js";
 import { toolContract } from "../contracts/toolContracts.js";
-import type { AnalysisSnapshot } from "../domain/analysisSnapshot.js";
 import { binaryTargetSummary } from "../application/binary/BinaryTargetSummary.js";
 import { UnknownRegistryError } from "../domain/unknownRegistryError.js";
-import type { AnalysisError } from "../domain/analysisErrorBase.js";
+import { AnalysisError } from "../domain/analysisErrorBase.js";
 import type { Evidence } from "../domain/evidence.js";
 import type { ProcessCapture } from "../domain/process/processCaptureParsing.js";
 import { err, ok, type Result } from "../domain/result.js";
@@ -32,7 +32,10 @@ import {
   registerEvidenceTools,
   registerUnknownTools,
 } from "./registerSessionRecordTools.js";
-import { registerSessionStatusTool } from "./registerSessionStatusTool.js";
+import {
+  registerSessionStatusTool,
+  type SessionAvailabilityProbes,
+} from "./registerSessionStatusTool.js";
 import { sessionAvailabilityPolicy } from "./sessionAvailabilityPolicy.js";
 import type { AvailabilityPolicy } from "../application/CapabilityInventory.js";
 import { logToolExecution } from "./toolLogging.js";
@@ -46,12 +49,10 @@ const recordProcessResidualUnknowns = (
   residuals: ProcessCapture["residual_unknowns"],
 ): Result<null, AnalysisError> => {
   for (const residual of residuals) {
-    const unknown = session.recordUnknown({
+    const input = workflowUnknownInput(evidence.evidence_id, {
       question: `Was ${residual.scope} behavior fully observed during capture?`,
       severity: "medium",
       domain: `process-${residual.scope}`,
-      supporting_evidence_ids: [evidence.evidence_id],
-      contradicting_evidence_ids: [],
       required_authority: "controlled-replay",
       required_confidence: "observed",
       required_environment: evidence.environment,
@@ -64,6 +65,8 @@ const recordProcessResidualUnknowns = (
       ],
       relationships: [],
     });
+    if (!input.ok) return input;
+    const unknown = session.recordUnknown(input.value);
     if (
       !unknown.ok &&
       !(
@@ -143,7 +146,7 @@ const registerProcessTools = ({
   );
 };
 
-export interface LifecycleToolRegistration {
+export interface LifecycleToolRegistration extends SessionAvailabilityProbes {
   readonly server: EvidenceMcpServer;
   readonly session: BinarySessionPort;
   readonly logger: Logger;
@@ -152,9 +155,6 @@ export interface LifecycleToolRegistration {
   readonly statusContract: ReturnType<typeof toolContract<"binary_session">>;
   readonly startedAt: string;
   readonly availabilityPolicy: () => AvailabilityPolicy;
-  readonly androidAnalysisAvailability: (
-    signal: AbortSignal,
-  ) => Promise<ProviderAvailability>;
   readonly closeProcessResources: () => Promise<Result<null, AnalysisError>>;
 }
 
@@ -162,23 +162,11 @@ const registerLifecycleTools = (
   registration: LifecycleToolRegistration,
   artifactResources: ArtifactResourceScope,
 ): void => {
-  const {
-    server,
-    session,
-    statusContract,
-    startedAt,
-    availabilityPolicy,
-    androidAnalysisAvailability,
-  } = registration;
   registerOpenLifecycleTool(registration, artifactResources);
   registerCloseLifecycleTool(registration);
   registerSessionStatusTool({
-    server,
-    session,
-    contract: statusContract,
-    startedAt,
-    availabilityPolicy,
-    androidAnalysisAvailability,
+    ...registration,
+    contract: registration.statusContract,
   });
 };
 
@@ -190,17 +178,7 @@ const registerOpenLifecycleTool = (
     openContract.name,
     toolRegistrationOptions(openContract),
     async (input, context) => {
-      let snapshot: AnalysisSnapshot | undefined;
-      if (input.snapshot_path !== undefined) {
-        const loaded = await readAnalysisSnapshot(
-          input.snapshot_path,
-          context.mcpReq.signal,
-          artifactResources,
-        );
-        if (!loaded.ok)
-          return server.delivery.toCallToolResult(loaded, openContract);
-        snapshot = loaded.value;
-      }
+      const snapshotPath = input.snapshot_path;
       const opened = await logToolExecution(logger, openContract.name, () =>
         session.open(input.path, {
           signal: context.mcpReq.signal,
@@ -214,7 +192,18 @@ const registerOpenLifecycleTool = (
           ...(input.provider_id === undefined
             ? {}
             : { providerId: input.provider_id }),
-          ...(snapshot === undefined ? {} : { snapshot }),
+          ...(snapshotPath === undefined
+            ? {}
+            : {
+                // Read inside the open's turn: calls issued after it must not
+                // overtake a file read that precedes its place in the order.
+                loadSnapshot: () =>
+                  readAnalysisSnapshot(
+                    snapshotPath,
+                    context.mcpReq.signal,
+                    artifactResources,
+                  ),
+              }),
         }),
       );
       return opened.ok
@@ -231,13 +220,10 @@ const registerOpenLifecycleTool = (
 };
 
 /** Register MCP-only target lifecycle operations on a long-lived session. */
-export interface SessionToolOptions {
+export interface SessionToolOptions extends Partial<SessionAvailabilityProbes> {
   readonly artifactResources: ArtifactResourceScope;
   readonly startedAt?: string;
   readonly availabilityPolicy?: () => AvailabilityPolicy;
-  readonly androidAnalysisAvailability?: (
-    signal: AbortSignal,
-  ) => Promise<ProviderAvailability>;
 }
 
 const registerContextTools = (
@@ -304,6 +290,7 @@ export const registerSessionTools = (
   const processResources = new ProcessCaptureResourceScope();
   registerLifecycleTools(
     {
+      ...options,
       server,
       session,
       logger,
@@ -322,13 +309,17 @@ export const registerSessionTools = (
           await processResources.retryCleanup();
           return ok(null);
         } catch (cause: unknown) {
+          if (cause instanceof AnalysisError) return err(cause);
           return err(
             new ProcessCaptureError(
               "process capture cleanup remains incomplete",
               {
                 cause,
                 reason: "cleanup_incomplete",
-                cleanupResources: ["process_capture_resources"],
+                cleanup: {
+                  reason: "process capture cleanup remains incomplete",
+                  resources: ["process_capture_resources"],
+                },
                 executionFailure:
                   cause instanceof Error
                     ? cause.message || cause.name

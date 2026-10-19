@@ -1,4 +1,4 @@
-import { apiSurfaceHar } from "./historicalHar.js";
+import { apiSurfaceHar, environmentManifestHar } from "./historicalHar.js";
 import { webNetworkCaptureSchema } from "../../src/domain/webNetworkCapture.js";
 import { BINARY_LAYOUT_TEST_PROVIDER } from "./binaryDiagnostics/layout.js";
 import { binaryLayoutFixture } from "./binaryDiagnostics/layout.js";
@@ -13,6 +13,27 @@ import {
 import { createJavaScriptSemanticGraph } from "../../src/domain/javascript/javascriptSemanticGraph.js";
 import type { BinaryLayout } from "../../src/domain/native/binaryLayout.js";
 import { binaryLayoutSchema } from "../../src/domain/native/binaryLayout.js";
+import { ghidraFunctionDossier } from "../../src/domain/ghidraValues.fixture.js";
+import { functionDossierSchema } from "../../src/domain/hopperValues.js";
+import type { RelationshipCoverage } from "../../src/domain/relationshipCoverage.js";
+
+/** Canonical portable Evidence; no native provider is started by this fixture. */
+export const analysisViewNativeEvidence = (
+  relationshipCoverage?: RelationshipCoverage,
+): Evidence =>
+  createEvidence(
+    { path: "/fixtures/native.exe", format: "pe", sha256: "a".repeat(64) },
+    { id: "fixture", name: "Fixture", version: "1" },
+    {
+      operation: "analyze_function",
+      parameters: { address: "0x401000" },
+      result: {
+        ...functionDossierSchema.parse(ghidraFunctionDossier()),
+        limitations: ["Fixture dossier caveat"],
+      },
+      ...(relationshipCoverage === undefined ? {} : { relationshipCoverage }),
+    },
+  );
 
 const hex = (value: number): string =>
   value === 0 ? "0x0" : `0x${value.toString(16)}`;
@@ -265,5 +286,20 @@ export const analysisViewObjectDenseCapture = (headerCount = 100_000) => {
       })),
     },
   };
+  return capture;
+};
+
+/** Capture parent decoded from the Grafana-shaped HAR with producer ordinals intact. */
+export const environmentManifestCaptureFixture = () => {
+  const capture = analysisViewCaptureFixture();
+  const entries = environmentManifestHar().log.entries;
+  capture.artifact.path = "/fixtures/environment-manifest.har";
+  capture.total_records = entries.length;
+  capture.records = entries.map((reported, ordinal) => ({
+    ...capture.records[0]!,
+    ordinal,
+    location: { kind: "json-pointer", pointer: `/log/entries/${ordinal}` },
+    reported,
+  }));
   return capture;
 };

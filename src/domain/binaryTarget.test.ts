@@ -17,6 +17,7 @@ describe("executable header parsing", () => {
   it.each([
     [elf(1, 1, 62), "elf", "x86_64"],
     [elf(2, 2, 183), "elf", "arm64"],
+    [elf(1, 1, 164), "elf", "hexagon"],
     [thinMach(0xfeedfacf, 0x0100000c), "mach-o", "arm64"],
     [thinMach(0xcefaedfe, 0x01000007), "mach-o", "x86_64"],
     [pe(0x8664), "pe", "x86_64"],
@@ -24,6 +25,13 @@ describe("executable header parsing", () => {
   ] as const)("parses metadata for %s", (bytes, format, architecture) => {
     const result = parseExecutableHeader(bytes, "arm64");
     expect(result.ok && result.value).toMatchObject({ format, architecture });
+  });
+
+  it("retains ELF32 x86-64 identity for the x32 ABI", () => {
+    expect(parseExecutableHeader(elf(1, 1, 62), "x64")).toMatchObject({
+      ok: true,
+      value: { format: "elf", architecture: "x86_64" },
+    });
   });
 
   it("distinguishes native PE applications, DLLs, and managed assemblies", () => {

@@ -5,7 +5,6 @@ import {
   disassemblySchema,
   idaAddressSchema,
   modernCalleesSchema,
-  modernStringsSchema,
   modernXrefsSchema,
 } from "./IdaProtocolValues.js";
 
@@ -63,22 +62,25 @@ const nativeErrorSchema = z
   .nullish()
   .transform((value) => value ?? undefined);
 export const nativeCalleesSchema = z
-  .array(modernCalleesSchema.element.extend({ error: nativeErrorSchema }))
+  .array(
+    modernCalleesSchema.element
+      .extend({ error: nativeErrorSchema })
+      .transform((page) => {
+        if (
+          page.error === undefined &&
+          page.callees !== null &&
+          page.more === undefined
+        )
+          throw new AnalysisProtocolError(
+            "Native IDA callees omitted an explicit truncation marker.",
+          );
+        return page;
+      }),
+  )
   .length(1);
 export const nativeXrefsSchema = z
   .array(modernXrefsSchema.element.extend({ error: nativeErrorSchema }))
   .length(1);
-
-/** Native regex failures carry an empty page, which must not imply absence. */
-export const nativeStringsSchema = modernStringsSchema
-  .extend({ error: z.string().optional() })
-  .transform((page) => {
-    if (page.error !== undefined)
-      throw new AnalysisProtocolError(
-        `Native IDA string search failed: ${page.error}`,
-      );
-    return page;
-  });
 
 /**
  * Native regexes fold bytes, while REA's insensitive literal search folds

@@ -5,11 +5,93 @@ import { parseProcessCapture } from "./processCaptureParsing.js";
 import { partialProcessCaptureObservationSchema } from "./processCapture.js";
 import { FINALIZED_PROCESS_CAPTURE_EXAMPLE } from "./processCaptureExample.js";
 import { finalizationConsistencyIssue } from "./processCaptureValidation.js";
+import type { FilesystemCoverage } from "./processCaptureCoverage.js";
 import {
   compareUnverifiedProcessCaptures as compareProcessCaptures,
   emptyUnverifiedProcessCapture as emptyCapture,
   processCaptureIssues,
 } from "./processCapture.fixture.js";
+
+const captureWithEnumerationOmission = (
+  omission: FilesystemCoverage["enumeration_omissions"][number],
+) => {
+  const capture = emptyCapture();
+  const scenario = {
+    ...capture.manifest.scenario,
+    filesystem_observation_paths: ["/fixture/selected"],
+  };
+  return {
+    ...capture,
+    manifest: {
+      ...capture.manifest,
+      scenario,
+      full_scenario_sha256: digestProcessCommitment(scenario),
+    },
+    truncated: true,
+    filesystem_checkpoints: capture.filesystem_checkpoints.map((checkpoint) =>
+      checkpoint.name === "after_settlement"
+        ? { ...checkpoint, truncated: true }
+        : checkpoint,
+    ),
+    truncation_details: {
+      ...capture.truncation_details,
+      filesystem_after: {
+        ...capture.truncation_details.filesystem_after,
+        enumeration_truncated: true,
+        enumeration_reasons: [omission.reason],
+        enumeration_omissions: [omission],
+      },
+    },
+  };
+};
+
+it.each([
+  { path: "root_0:.", reason: "entry_unavailable", system_code: "ENOENT" },
+  { path: "root_0:.", reason: "identity_changed", system_code: null },
+] as const)("accepts a partial entry with $reason evidence", (omission) => {
+  const capture = captureWithEnumerationOmission(omission);
+  expect(parseProcessCapture(capture)).toEqual(capture);
+});
+
+it.each([
+  { path: "root_0:.", reason: "entry_unavailable", system_code: null },
+  { path: "root_0:.", reason: "identity_changed", system_code: "ENOENT" },
+  { path: "root_0:.", reason: "directory_unavailable", system_code: "ENOENT" },
+] as const)("rejects an inconsistent omission %j", (omission) => {
+  expect(() =>
+    parseProcessCapture(captureWithEnumerationOmission(omission)),
+  ).toThrow("enumeration_omissions");
+});
+
+it("requires entry-unavailability details and matching aggregate reasons", () => {
+  const capture = captureWithEnumerationOmission({
+    path: "root_0:.",
+    reason: "entry_unavailable",
+    system_code: "ENOENT",
+  });
+  for (const changes of [
+    { enumeration_omissions: [] },
+    { enumeration_reasons: ["identity_changed"] },
+    {
+      enumeration_omissions: [
+        ...capture.truncation_details.filesystem_after.enumeration_omissions,
+        ...capture.truncation_details.filesystem_after.enumeration_omissions,
+      ],
+    },
+  ])
+    expect(() =>
+      parseProcessCapture({
+        ...capture,
+        truncation_details: {
+          ...capture.truncation_details,
+          filesystem_after: {
+            ...capture.truncation_details.filesystem_after,
+            ...changes,
+          },
+        },
+      }),
+    ).toThrow("enumeration_omissions");
+});
 
 it("never considers truncated captures equivalent", () => {
   const complete = emptyCapture();
@@ -60,6 +142,37 @@ it("requires producer coverage accounting in every parsed capture", () => {
   expect(() => parseProcessCapture(missingCoverage)).toThrow(
     "truncation_details",
   );
+});
+
+it("does not infer normalized retention budget from missing scenario defaults", () => {
+  const capture = emptyCapture();
+  const scenario = {
+    ...capture.manifest.scenario,
+    limits: {
+      files: 10_000,
+      file_bytes: 10_000_000,
+      processes: 1_000,
+      filesystem_depth: 16,
+    },
+  };
+  expect(() =>
+    parseProcessCapture({
+      ...capture,
+      manifest: {
+        ...capture.manifest,
+        scenario,
+        full_scenario_sha256: digestProcessCommitment(scenario),
+      },
+      truncation_details: {
+        ...capture.truncation_details,
+        normalized_terminal: {
+          budget_bytes: 1_000_000,
+          retained_bytes: 0,
+          omitted_frames: 0,
+        },
+      },
+    }),
+  ).toThrow("manifest.scenario.limits.output_bytes");
 });
 
 it("rejects settlement and cleanup combinations that cannot occur", () => {
@@ -838,4 +951,28 @@ it("requires compatible contracts and enforces capture age through a clock seam"
       ],
     }),
   );
+});
+
+it("requires interaction dispatch times to follow their sequence", () => {
+  const capture = emptyCapture();
+  const interaction = (sequence: number, dispatched: number) => ({
+    sequence,
+    scheduled_at_ms: 0,
+    dispatched_at_ms: dispatched,
+    type: "input" as const,
+    data: "x",
+    outcome: "dispatched" as const,
+  });
+  const issues = (dispatched: readonly number[]) =>
+    processCaptureIssues({
+      ...capture,
+      interaction_events: dispatched.map((at, index) => interaction(index, at)),
+    }).filter(({ message }) => message.includes("dispatch timestamps"));
+  expect(issues([5, 5, 10])).toEqual([]);
+  expect(issues([10, 5])).toEqual([
+    {
+      path: "interaction_events",
+      message: expect.stringContaining("dispatch timestamps must be ordered"),
+    },
+  ]);
 });

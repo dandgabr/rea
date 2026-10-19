@@ -1,15 +1,17 @@
+import { relationshipCoverageLimitations } from "./relationshipCoverage.js";
 import {
   callPathInputSchema,
   callPathResultSchema,
-  parseCallPathAddress,
   type CallPathInput,
   type CallPathResult,
   type OutputCallPath,
 } from "./callPathSchemas.js";
+import { parseNativeAddress } from "./native/nativeAddress.js";
 import {
   parseFunctionEvidence,
   type FunctionSnapshot,
 } from "./functionDossierEvidence.js";
+import { isCallerOnlyIncompleteCoverage } from "./functionCallCoverage.js";
 import { compareUnicodeCodePoints } from "./unicodeCodePointOrder.js";
 
 /** Minimal directed caller-to-callee adjacency for call-path search. */
@@ -156,9 +158,9 @@ const parseSnapshots = (
   const snapshots = new Map<string, FunctionSnapshot>();
   for (const group of groups) {
     const snapshot = parseFunctionEvidence(group);
-    const address = parseCallPathAddress(snapshot.dossier.procedure.address);
+    const address = parseNativeAddress(snapshot.dossier.procedure.address);
     for (const callee of snapshot.dossier.callees)
-      parseCallPathAddress(callee.address);
+      parseNativeAddress(callee.address);
     if (snapshots.has(address))
       throw new TypeError(`Duplicate function Evidence for ${address}`);
     snapshots.set(address, snapshot);
@@ -195,7 +197,7 @@ const createGraph = (
   for (const [address, snapshot] of snapshots) {
     graph.mergeNode(address);
     for (const callee of snapshot.dossier.callees) {
-      const calleeAddress = parseCallPathAddress(callee.address);
+      const calleeAddress = parseNativeAddress(callee.address);
       graph.mergeNode(calleeAddress);
       graph.mergeDirectedEdge(address, calleeAddress);
     }
@@ -239,26 +241,32 @@ const inspectSearch = ({
       const coverage = snapshot.evidence.relationship_coverage;
       for (const limitation of snapshot.limitations)
         limitations.push(limitation);
-      if (coverage?.status === "partial")
-        for (const limitation of coverage.limitations)
+      if (coverage !== null) {
+        for (const limitation of relationshipCoverageLimitations(coverage))
           limitations.push(limitation);
-      else if (coverage?.status === "unknown")
-        limitations.push(coverage.reason);
-      for (const diagnostic of coverage !== null && "diagnostics" in coverage
-        ? coverage.diagnostics
-        : [])
-        limitations.push(diagnostic);
+        for (const diagnostic of coverage.diagnostics ?? [])
+          limitations.push(diagnostic);
+      }
       // The requested goal is a terminal for this search. Its outgoing edges
       // cannot add a path to the goal, so its dossier limits are contextual
       // but do not make the searched start-to-goal closure incomplete.
       if (node === goal) continue;
+      const callees = snapshot.dossier.facet_availability?.callees;
+      if (callees?.available === false) {
+        limitations.push(callees.reason);
+        incompleteExpandedCoverage = true;
+      }
       // Explicit, Evidence-bound relationship coverage owns completeness;
       // generic provider/dossier limitations remain contextual. Legacy Evidence
       // without that metadata retains its conservative limitation-based rule.
+      // The search only expands callee edges, so coverage that is unknown
+      // solely because callers are unobservable does not make the searched
+      // callee closure incomplete; the caller caveat stays in limitations.
       if (
         coverage === null
           ? snapshot.limitations.length > 0
-          : coverage.status !== "complete"
+          : coverage.status !== "complete" &&
+            !isCallerOnlyIncompleteCoverage(coverage)
       )
         incompleteExpandedCoverage = true;
     } else if (node === goal) {

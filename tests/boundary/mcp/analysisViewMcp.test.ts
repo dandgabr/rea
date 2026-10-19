@@ -1,10 +1,15 @@
+import { advertisedMcpToolSchemas } from "../../fixtures/advertisedMcpTool.js";
 import { API_SURFACE_EXAMPLE } from "../../../src/contracts/analysisViewApiSurfaceExample.js";
+import { ENVIRONMENT_MANIFEST_EXAMPLE } from "../../../src/contracts/analysisViewEnvironmentManifestExample.js";
 import { createHash } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import { WebNetworkCaptureService } from "../../../src/application/WebNetworkCaptureService.js";
 import { decodeHarCapture } from "../../../src/browser/history/HarCapture.js";
 import { join } from "node:path";
-import { apiSurfaceHar } from "../../fixtures/historicalHar.js";
+import {
+  apiSurfaceHar,
+  environmentManifestHar,
+} from "../../fixtures/historicalHar.js";
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
 import { parseMcpToolError } from "../../fixtures/mcpToolError.js";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
@@ -36,9 +41,14 @@ import {
   analysisViewCaptureFixture,
   analysisViewCaptureEvidence,
   analysisViewObjectDenseCapture,
+  analysisViewNativeEvidence,
+  environmentManifestCaptureFixture,
 } from "../../fixtures/analysisView.js";
 import { createTestBinarySession } from "../../fixtures/binarySession.js";
 import { BINARY_LAYOUT_TEST_PROVIDER } from "../../fixtures/binaryDiagnostics/layout.js";
+import { wasmArtifactFixture } from "../../fixtures/wasm/artifact.js";
+import { evmInterfaceFixture } from "../../fixtures/evm/interface.js";
+import type { RelationshipCoverage } from "../../../src/domain/relationshipCoverage.js";
 
 const connect = async (
   binaryLayout?: BinaryLayoutService,
@@ -67,8 +77,191 @@ const connect = async (
   return { client, session };
 };
 
+it("preserves native relationship coverage through inline and retained MCP views", async () => {
+  const { client, session } = await connect();
+  const { ajv, outputSchema } = await advertisedMcpToolSchemas(
+    client,
+    "inspect_analysis_view",
+  );
+  const coverages: (RelationshipCoverage | undefined)[] = [
+    {
+      status: "partial",
+      limited_directions: ["callees"],
+      limitations: ["Callees: fixture read limit"],
+      diagnostics: ["Fixture relationship diagnostic"],
+    },
+    { status: "partial", limitations: ["Historical read limit"] },
+    {
+      status: "unknown",
+      limited_directions: ["callees"],
+      reason: "Callees not measured",
+      diagnostics: ["Unknown coverage diagnostic"],
+    },
+    {
+      status: "complete",
+      diagnostics: ["Only direct references are observed"],
+    },
+    { status: "complete" },
+    undefined,
+  ];
+  for (const coverage of coverages) {
+    const parent = analysisViewNativeEvidence(coverage);
+    const parentBefore = JSON.stringify(parent);
+    const recorded = session.recordEvidence(parent);
+    if (!recorded.ok) throw recorded.error;
+    const outputs = [];
+    for (const source of [
+      { kind: "inline", evidence: parent },
+      { kind: "retained-evidence", evidence_id: parent.evidence_id },
+    ]) {
+      const response = await client.callTool({
+        name: "inspect_analysis_view",
+        arguments: {
+          source,
+          view: { kind: "native", facet: "callees", offset: 0, limit: 1 },
+        },
+      });
+      expect(response.isError).not.toBe(true);
+      expect(
+        ajv.validate(outputSchema, response.structuredContent),
+        JSON.stringify(ajv.errors),
+      ).toBe(true);
+      const evidence = parseEvidence(response.structuredContent);
+      expect(evidence.relationship_coverage).toEqual(
+        parent.relationship_coverage,
+      );
+      expect(evidence.normalized_result).toMatchObject({
+        item: [],
+        coverage: { total: 0, exhausted: true },
+        limitations: expect.arrayContaining(["Fixture dossier caveat"]),
+      });
+      expect(session.evidenceById(evidence.evidence_id)).toEqual(evidence);
+      outputs.push(evidence);
+    }
+    expect(outputs[0]).toEqual(outputs[1]);
+    expect(JSON.stringify(parent)).toBe(parentBefore);
+  }
+});
+
+it("advertises typed module references and preserves portable/retained Evidence parity", async () => {
+  const { client, session } = await connect();
+  const parent = analysisViewJavaScriptEvidence(
+    analysisViewJavaScriptAnalysisWithSource(),
+  );
+  const recorded = session.recordEvidence(parent);
+  if (!recorded.ok) throw recorded.error;
+  const { ajv, inputSchema, outputSchema } = await advertisedMcpToolSchemas(
+    client,
+    "inspect_analysis_view",
+  );
+  const view = {
+    kind: "javascript",
+    collection: "modules",
+    projection: "references",
+    where: { path: "renderer.js" },
+    limit: 1,
+  };
+  const outputs = [];
+  for (const source of [
+    { kind: "inline", evidence: parent },
+    { kind: "retained-evidence", evidence_id: parent.evidence_id },
+  ]) {
+    expect(ajv.validate(inputSchema, { source, view })).toBe(true);
+    expect(
+      ajv.validate(inputSchema, {
+        source,
+        view: { ...view, where: { glob: "*" } },
+      }),
+    ).toBe(false);
+    const response = await client.callTool({
+      name: "inspect_analysis_view",
+      arguments: { source, view },
+    });
+    expect(response.isError).not.toBe(true);
+    expect(
+      ajv.validate(outputSchema, response.structuredContent),
+      JSON.stringify(ajv.errors),
+    ).toBe(true);
+    const evidence = parseEvidence(response.structuredContent);
+    expect(evidence).toMatchObject({
+      evidence_links: [parent.evidence_id],
+      normalized_result: {
+        kind: "javascript",
+        rows: [
+          {
+            path: "renderer.js",
+            identity: expect.any(Object),
+            basis: expect.any(Array),
+          },
+        ],
+        coverage: { exhausted: true },
+      },
+    });
+    expect(session.evidenceById(evidence.evidence_id)).toEqual(evidence);
+    outputs.push(evidence.normalized_result);
+  }
+  expect(outputs[0]).toEqual(outputs[1]);
+});
+
+it("projects opted-in query names identically from retained and portable MCP Evidence", async () => {
+  const { client, session } = await connect();
+  const capture = analysisViewCaptureFixture();
+  capture.records = capture.records.slice(0, 2);
+  capture.total_records = 2;
+  capture.records.forEach((record, index) => {
+    record.reported = {
+      request: {
+        method: "GET",
+        url:
+          index === 0
+            ? "https://api.test/products?a+b=one&a%2Bb=two&=three&a+b=four"
+            : "https://api.test/products?a+b=five&snow=six#ignored",
+      },
+    };
+  });
+  const parent = analysisViewCaptureEvidence(capture);
+  const retained = session.recordEvidence(parent);
+  if (!retained.ok) throw retained.error;
+  const outputs = [];
+  for (const source of [
+    { kind: "inline", evidence: parent },
+    { kind: "retained-evidence", evidence_id: parent.evidence_id },
+  ]) {
+    const response = await client.callTool({
+      name: "inspect_analysis_view",
+      arguments: {
+        source,
+        view: { kind: "api-surface", include_query_parameter_names: true },
+      },
+    });
+    expect(response.isError).not.toBe(true);
+    const evidence = parseEvidence(response.structuredContent);
+    expect(evidence.normalized_result).toMatchObject({
+      parent_evidence_id: parent.evidence_id,
+      groups: [
+        {
+          query_parameter_names: [
+            { name: "", record_ordinals: [0] },
+            { name: "a b", record_ordinals: [0, 1] },
+            { name: "a+b", record_ordinals: [0] },
+            { name: "snow", record_ordinals: [1] },
+          ],
+        },
+      ],
+    });
+    outputs.push(evidence.normalized_result);
+  }
+  expect(outputs[0]).toEqual(outputs[1]);
+});
+
 it("discovers an oversized native dossier by exact metadata and reads its retained view", async () => {
   const { client, session } = await connect();
+  const advertised = (await client.listTools()).tools.find(
+    (tool) => tool.name === "inspect_analysis_view",
+  );
+  expect(advertised?.description).toContain(
+    'Native function Evidence requires kind native: view: {kind: "native", facet: "procedure"}',
+  );
   const provider = { id: "ghidra", name: "Ghidra", version: "12.1.4" };
   const profile = createAnalysisProfile(provider, { language: "fixture" });
   const parent = createEvidence(
@@ -98,6 +291,24 @@ it("discovers an oversized native dossier by exact metadata and reads its retain
     const retained = session.recordEvidence(record);
     if (!retained.ok) throw retained.error;
   }
+  const unsupportedSummary = await client.callTool({
+    name: "inspect_analysis_view",
+    arguments: {
+      source: { kind: "retained-evidence", evidence_id: parent.evidence_id },
+      view: { kind: "summary" },
+    },
+  });
+  expect(parseMcpToolError(unsupportedSummary).error).toMatchObject({
+    code: "invalid_request",
+    details: {
+      issues: [
+        {
+          path: ["view"],
+          message: "analyze_function Evidence requires a native view.",
+        },
+      ],
+    },
+  });
   const broad = await client.callTool({
     name: "get_evidence_bundle",
     arguments: {},
@@ -186,16 +397,10 @@ it("advertises exact schemas and projects one layout section from retained Evide
     inspect: () => Promise.resolve(ok(layout)),
   });
   const { client, session } = await connect(service);
-  const advertised = (await client.listTools()).tools.find(
-    (tool) => tool.name === "inspect_analysis_view",
+  const { ajv, inputSchema, outputSchema } = await advertisedMcpToolSchemas(
+    client,
+    "inspect_analysis_view",
   );
-  if (advertised?.outputSchema === undefined)
-    throw new Error("inspect_analysis_view must publish both schemas");
-  const ajv = new Ajv2020({ strict: false, validateFormats: false });
-  const inputSchema: Record<string, unknown> = advertised.inputSchema;
-  const outputSchema: Record<string, unknown> = advertised.outputSchema;
-  expect(ajv.validateSchema(inputSchema)).toBe(true);
-  expect(ajv.validateSchema(outputSchema)).toBe(true);
   expect(
     ajv.validate(inputSchema, {
       source: { kind: "inline", evidence: analysisViewLayoutEvidence() },
@@ -257,6 +462,39 @@ it("advertises exact schemas and projects one layout section from retained Evide
   );
 });
 
+it("points omitted inline messages to the caller's parent without promising session recovery", async () => {
+  const { client, session } = await connect();
+  const messages = Array.from(
+    { length: 65 },
+    (_, index) => `Limitation ${String(index).padStart(2, "0")}`,
+  ).concat("z".repeat(300_000));
+  const parent = analysisViewLayoutEvidence({
+    ...analysisViewLayoutFixture(),
+    limitations: messages,
+  });
+  expect(session.evidenceById(parent.evidence_id)).toBeUndefined();
+  const response = await client.callTool({
+    name: "inspect_analysis_view",
+    arguments: {
+      source: { kind: "inline", evidence: parent },
+      view: { kind: "summary" },
+    },
+  });
+  expect(response.isError).not.toBe(true);
+  const view = toolContract("inspect_analysis_view").outputSchema.parse(
+    response.structuredContent,
+  );
+  const projected = z
+    .object({ limitations: z.array(z.string()) })
+    .parse(view.normalized_result);
+  expect(projected.limitations).toEqual([
+    ...messages.slice(0, 65),
+    `1 additional limitations omitted from this view; consult source parent Evidence ${parent.evidence_id} for the complete list (the caller-supplied record, or its retaining session).`,
+  ]);
+  expect(session.evidenceById(parent.evidence_id)).toBeUndefined();
+  expect(session.evidenceById(view.evidence_id)).toEqual(parseEvidence(view));
+});
+
 it("reports a tampered inline Evidence ID at its full MCP source path", async () => {
   const { client } = await connect();
   const parent = analysisViewLayoutEvidence();
@@ -284,6 +522,65 @@ it("reports a tampered inline Evidence ID at its full MCP source path", async ()
       ],
     },
   });
+});
+
+it("rejects self-contained WASM and EVM Evidence views when the subject format differs", async () => {
+  const { client } = await connect();
+  const wasm = wasmArtifactFixture();
+  const evm = evmInterfaceFixture();
+  const cases = [
+    {
+      evidence: createEvidence(
+        {
+          path: wasm.artifact.path,
+          format: "elf",
+          sha256: wasm.artifact.sha256,
+        },
+        { id: "fixture-wabt", name: "WABT", version: "1" },
+        {
+          operation: "inspect_wasm_artifact",
+          parameters: { path: wasm.artifact.path },
+          result: wasm,
+        },
+      ),
+    },
+    {
+      evidence: createEvidence(
+        {
+          path: evm.artifact.path,
+          format: "elf",
+          sha256: evm.artifact.sha256,
+        },
+        { id: "fixture-evm", name: "EVMole", version: "1" },
+        {
+          operation: "inspect_evm_interface",
+          parameters: { path: evm.artifact.path, encoding: "hex" },
+          result: evm,
+        },
+      ),
+    },
+  ] as const;
+
+  for (const { evidence } of cases) {
+    const response = await client.callTool({
+      name: "inspect_analysis_view",
+      arguments: {
+        source: { kind: "inline", evidence },
+        view: { kind: "summary" },
+      },
+    });
+    expect(parseMcpToolError(response).error).toMatchObject({
+      code: "invalid_request",
+      details: {
+        issues: [
+          expect.objectContaining({
+            path: ["source", "subject"],
+            reason: "invalid_value",
+          }),
+        ],
+      },
+    });
+  }
 });
 
 it("admits portable captures before SDK Evidence parsing and preserves capture caveats", async () => {
@@ -800,37 +1097,153 @@ it("projects an actual HAR capture retained by the public MCP workflow", async (
   });
 });
 
-it("reproduces the published API surface example from decoded fixture bytes", async () => {
-  const fixture = apiSurfaceHar();
-  fixture.log.entries = fixture.log.entries.slice(0, 2);
-  const bytes = Buffer.from(JSON.stringify(fixture));
-  const service = new WebNetworkCaptureService({
-    inspect: async () =>
-      ok({
-        ...decodeHarCapture(bytes.toString("utf8"), []),
-        artifact: {
-          path: "/fixtures/api-surface.har",
-          sha256: createHash("sha256").update(bytes).digest("hex"),
-          bytes: bytes.length,
-        },
-        format: "har",
-        runtime_attribution: "unknown",
-        limitations: [],
+const PUBLISHED_EXAMPLES: readonly (readonly [
+  name: string,
+  example: {
+    readonly input: {
+      readonly source: { readonly evidence_id: string };
+      readonly view: Record<string, unknown>;
+    };
+    readonly output: { readonly artifact: { readonly path: string } };
+  },
+  fixture: () => unknown,
+])[] = [
+  [
+    "API surface",
+    API_SURFACE_EXAMPLE,
+    () => {
+      const fixture = apiSurfaceHar();
+      fixture.log.entries = fixture.log.entries.slice(0, 2);
+      return fixture;
+    },
+  ],
+  [
+    "environment manifest",
+    ENVIRONMENT_MANIFEST_EXAMPLE,
+    () => {
+      const fixture = environmentManifestHar();
+      fixture.log.entries = [10, 20, 27].map(
+        (index) => fixture.log.entries[index]!,
+      );
+      return fixture;
+    },
+  ],
+];
+
+it.each(PUBLISHED_EXAMPLES)(
+  "reproduces the published %s example from decoded fixture bytes",
+  async (_name, example, fixture) => {
+    const bytes = Buffer.from(JSON.stringify(fixture()));
+    const path = example.output.artifact.path;
+    const service = new WebNetworkCaptureService({
+      inspect: async () =>
+        ok({
+          ...decodeHarCapture(bytes.toString("utf8"), []),
+          artifact: {
+            path,
+            sha256: createHash("sha256").update(bytes).digest("hex"),
+            bytes: bytes.length,
+          },
+          format: "har",
+          runtime_attribution: "unknown",
+          limitations: [],
+        }),
+    });
+    const { client } = await connect(undefined, service);
+    const capture = await client.callTool({
+      name: "inspect_web_network_capture",
+      arguments: { capture_path: path, format: "har" },
+    });
+    expect(parseEvidence(capture.structuredContent).evidence_id).toBe(
+      example.input.source.evidence_id,
+    );
+    const response = await client.callTool({
+      name: "inspect_analysis_view",
+      arguments: example.input,
+    });
+    expect(parseEvidence(response.structuredContent).normalized_result).toEqual(
+      example.output,
+    );
+  },
+);
+
+it("projects an environment manifest identically from retained and portable MCP Evidence", async () => {
+  const { client, session } = await connect();
+  const { ajv, inputSchema, outputSchema } = await advertisedMcpToolSchemas(
+    client,
+    "inspect_analysis_view",
+  );
+  const capture = environmentManifestCaptureFixture();
+  const parent = analysisViewCaptureEvidence(capture);
+  expect(session.recordEvidence(parent).ok).toBe(true);
+  const view = {
+    kind: "environment-manifest",
+    template_rules: ["after-uid-literal", "opaque-token", "sibling-variance"],
+  };
+  const outputs = [];
+  for (const source of [
+    { kind: "inline", evidence: parent },
+    { kind: "retained-evidence", evidence_id: parent.evidence_id },
+  ]) {
+    expect(ajv.validate(inputSchema, { source, view })).toBe(true);
+    expect(
+      ajv.validate(inputSchema, {
+        source,
+        view: { ...view, template_rules: ["glob"] },
       }),
-  });
-  const { client } = await connect(undefined, service);
-  const capture = await client.callTool({
-    name: "inspect_web_network_capture",
-    arguments: { capture_path: "/fixtures/api-surface.har", format: "har" },
-  });
-  expect(parseEvidence(capture.structuredContent).evidence_id).toBe(
-    API_SURFACE_EXAMPLE.input.source.evidence_id,
+    ).toBe(false);
+    const response = await client.callTool({
+      name: "inspect_analysis_view",
+      arguments: { source, view },
+    });
+    expect(response.isError).not.toBe(true);
+    expect(
+      ajv.validate(outputSchema, response.structuredContent),
+      JSON.stringify(ajv.errors),
+    ).toBe(true);
+    const evidence = parseEvidence(response.structuredContent);
+    expect(evidence.confidence).toBe("inferred");
+    expect(evidence.normalized_result).toMatchObject({
+      kind: "environment-manifest",
+      name: "grafana-example",
+      templated_groups: 13,
+      tools: expect.arrayContaining([
+        expect.objectContaining({
+          name: "get_plugins_settings_by_plugin_id",
+          path_template: "/api/plugins/{plugin_id}/settings",
+        }),
+        expect.objectContaining({
+          name: "get_folders_by_uid",
+          path_template: "/api/folders/{uid}",
+        }),
+      ]),
+    });
+    expect(session.evidenceById(evidence.evidence_id)).toEqual(evidence);
+    for (const value of ["probe folder", "Main Org", "JFIF", "console.log"])
+      expect(JSON.stringify(response)).not.toContain(value);
+    outputs.push(evidence.normalized_result);
+  }
+  expect(outputs[0]).toEqual(outputs[1]);
+  const hidden = createEvidence(
+    {
+      path: capture.artifact.path,
+      sha256: capture.artifact.sha256!,
+      format: "file",
+    },
+    { id: "fixture", name: "fixture", version: "1" },
+    {
+      operation: "inspect_web_network_capture",
+      parameters: { sensitive_value_count: 1 },
+      result: capture,
+      confidence: "observed",
+    },
   );
-  const response = await client.callTool({
+  const refused = await client.callTool({
     name: "inspect_analysis_view",
-    arguments: API_SURFACE_EXAMPLE.input,
+    arguments: { source: { kind: "inline", evidence: hidden }, view },
   });
-  expect(parseEvidence(response.structuredContent).normalized_result).toEqual(
-    API_SURFACE_EXAMPLE.output,
-  );
+  expect(parseMcpToolError(refused).error.code).toBe("unsupported_target");
+  expect(JSON.stringify(refused)).toContain("sensitive_values_unretained");
+  expect(JSON.stringify(refused)).not.toContain("/api/folders");
+  await client.ping();
 });

@@ -1,3 +1,4 @@
+import { INSPECT_ANALYSIS_VIEW_OPERATION } from "../../domain/analysisView/analysisViewErrors.js";
 import { z } from "zod";
 
 import { ANALYSIS_VIEW_PROVIDER } from "../InvestigationProviders.js";
@@ -14,15 +15,20 @@ import {
   type Evidence,
 } from "../../domain/evidence.js";
 import {
-  INSPECT_ANALYSIS_VIEW_OPERATION,
   inspectAnalysisViewInputSchema,
   projectAnalysisView,
   type AnalysisViewResult,
   type InspectAnalysisViewInput,
 } from "../../domain/analysisView/analysisView.js";
 import { jsonValueSchema } from "../../domain/jsonValue.js";
+import {
+  immutableJsonSnapshotMember,
+  isImmutableJsonSnapshot,
+} from "../../domain/immutableJson.js";
 import { err, ok, type Result } from "../../domain/result.js";
 import { WebNetworkApiSurfaceAccumulator } from "../../domain/analysisView/WebNetworkApiSurfaceAccumulator.js";
+import { EnvironmentManifestAccumulator } from "../../domain/analysisView/EnvironmentManifestAccumulator.js";
+import { admitAnalysisViewData } from "../../domain/analysisView/analysisViewDataAdmission.js";
 
 /** Authenticate a selected-view request and project already completed Evidence. */
 export const inspectAnalysisView = (
@@ -47,18 +53,27 @@ export const inspectAnalysisViewValidated = (
   input: InspectAnalysisViewInput,
   lookup?: EvidenceLookup,
 ): Result<Evidence, AnalysisError> => {
-  const inline = input.source.kind === "inline" ? input.source.evidence : null;
-  const inlineCapture =
-    typeof inline === "object" &&
-    inline !== null &&
-    Object.getOwnPropertyDescriptor(inline, "operation")?.value ===
-      "inspect_web_network_capture";
-  const accumulator =
-    input.view.kind === "api-surface" || inlineCapture
-      ? new WebNetworkApiSurfaceAccumulator()
+  const apiSurfaceAccumulator =
+    input.view.kind === "api-surface"
+      ? new WebNetworkApiSurfaceAccumulator(
+          undefined,
+          input.view.include_query_parameter_names === true,
+        )
       : undefined;
-  if (input.source.kind === "inline" && accumulator !== undefined) {
-    const admitted = accumulator.admitInlineEvidence(input.source.evidence);
+  const manifestAccumulator =
+    input.view.kind === "environment-manifest"
+      ? new EnvironmentManifestAccumulator(
+          undefined,
+          input.view.include_query_parameter_names,
+          input.view.template_rules,
+        )
+      : undefined;
+  const accumulator = apiSurfaceAccumulator ?? manifestAccumulator;
+  if (input.source.kind === "inline") {
+    const admitted =
+      accumulator === undefined
+        ? admitAnalysisViewData(input.source.evidence, true)
+        : accumulator.admitInlineEvidence(input.source.evidence);
     if (!admitted.ok) return admitted;
   }
   const resolved = resolveAnalysisViewSource(input.source, lookup);
@@ -68,7 +83,11 @@ export const inspectAnalysisViewValidated = (
     {
       evidenceId: parent.evidence_id,
       operation: parent.operation,
-      normalizedResult: parent.normalized_result,
+      normalizedResult:
+        immutableJsonSnapshotMember(parent, "normalized_result") ??
+        parent.normalized_result,
+      // Sealing an Evidence root deep-freezes it; only the root is registered.
+      sealedResult: isImmutableJsonSnapshot(parent),
       subject: parent.subject,
       limitations: parent.limitations,
       parameters: parent.parameters,
@@ -81,7 +100,8 @@ export const inspectAnalysisViewValidated = (
             },
     },
     input.view,
-    accumulator,
+    apiSurfaceAccumulator,
+    manifestAccumulator,
   );
   if (!projected.ok) return projected;
   if (
@@ -214,12 +234,17 @@ const createAnalysisViewEvidence = (
     result: jsonValueSchema.parse(result),
     rawResult: null,
     confidence:
-      // Paging follows the full grouping, so any templated group makes every page inferred.
-      result.kind === "api-surface" && result.templated_groups > 0
+      // Grouping is whole-capture, so any templated group or parameter makes the result inferred.
+      (result.kind === "api-surface" ||
+        result.kind === "environment-manifest") &&
+      result.templated_groups > 0
         ? "inferred"
         : "derived",
     authority: parent.authority,
     limitations: result.limitations,
+    ...(result.kind === "native" && parent.relationship_coverage !== null
+      ? { relationshipCoverage: parent.relationship_coverage }
+      : {}),
     locations: [
       ...(result.artifact.path.length > 0
         ? [{ kind: "artifact-path" as const, path: result.artifact.path }]

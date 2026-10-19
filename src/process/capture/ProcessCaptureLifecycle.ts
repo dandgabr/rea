@@ -5,6 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setImmediate, setTimeout as delay } from "node:timers/promises";
 import type { IPty } from "@lydell/node-pty";
+import {
+  AnalysisCleanupLease,
+  AnalysisCleanupLeaseGroup,
+} from "../../artifacts/AnalysisCleanupLease.js";
 
 import type { ProcessCapture } from "../../domain/process/processCaptureParsing.js";
 import type { ProcessScenario } from "../../domain/process/processScenario.js";
@@ -38,16 +42,18 @@ import { assertNotCancelled } from "./ProcessScenarioRuntimeValidation.js";
 import {
   normalizeProcessElapsedTime,
   normalizeProcessSamples,
-  normalizeProcessText,
+  type BoundedProcessTextNormalization,
 } from "./ProcessNormalization.js";
 import { PROCESS_PROVIDER } from "../../domain/process/processEvidenceProvider.js";
 import { TerminalRenderer } from "./TerminalRenderer.js";
 import {
   hasCaptureTruncation,
+  type NormalizedTerminalRetention,
   type TerminalRetention,
   type ProcessCaptureTruncationDetails,
 } from "../../domain/process/processCaptureCoverage.js";
 import { scheduleProcessInterval, type ProcessTimer } from "./ProcessTimer.js";
+import { monotonicProcessCaptureClock } from "./ProcessCaptureClock.js";
 
 import type {
   FilesystemCheckpoint,
@@ -266,10 +272,10 @@ export const settleProcessCaptureJournal = async (
   quietMs = 25,
   maxWaitMs = 500,
 ): Promise<void> => {
-  const deadline = Date.now() + maxWaitMs;
+  const deadline = monotonicProcessCaptureClock() + maxWaitMs;
   let observed = journal.length;
-  let lastChangeAt = Date.now();
-  while (Date.now() < deadline) {
+  let lastChangeAt = monotonicProcessCaptureClock();
+  while (monotonicProcessCaptureClock() < deadline) {
     await new Promise<void>((resolve) => setTimeout(resolve, 4));
     // A stalled event loop can leave timer and poll callbacks that were already
     // due queued behind this wake-up. Drain them before judging silence so a
@@ -277,8 +283,8 @@ export const settleProcessCaptureJournal = async (
     await setImmediate();
     if (journal.length !== observed) {
       observed = journal.length;
-      lastChangeAt = Date.now();
-    } else if (Date.now() - lastChangeAt >= quietMs) return;
+      lastChangeAt = monotonicProcessCaptureClock();
+    } else if (monotonicProcessCaptureClock() - lastChangeAt >= quietMs) return;
   }
 };
 
@@ -337,6 +343,12 @@ export const buildCaptureResult = (
     truncation_details: options.truncationDetails,
     limitations: [
       "The executable digest is a prelaunch file sample; matching path metadata immediately after spawn does not prove an atomic operating-system image binding.",
+      ...(Date.parse(options.manifest.completed_at) <
+      Date.parse(options.manifest.started_at)
+        ? [
+            "Wall-clock completion time precedes start time; elapsed capture timing is recorded separately and remains monotonic.",
+          ]
+        : []),
       "Process trees are sampled and may omit short-lived descendants.",
       ...(options.samplingPartial
         ? ["Process-tree sampling ended with an incomplete observation."]
@@ -402,7 +414,9 @@ const captureCoverageUnknowns = (
     unknowns.push({
       scope: "terminal",
       reason:
-        "Raw PTY chunks exceeded output_bytes and were omitted; rendered states also lack those inputs. See truncation_details.raw_terminal.",
+        (details.normalized_terminal?.omitted_frames ?? 0) > 0
+          ? "Raw PTY chunks were omitted because original input exceeded output_bytes or an ordered normalization stage exceeded its remaining bound; final normalized sizes for the latter omissions are unknown. Rendered states also lack those inputs. See raw_terminal and normalized_terminal retention details, including the normalized omission count."
+          : "Raw PTY chunks exceeded output_bytes and were omitted; rendered states also lack those inputs. See truncation_details.raw_terminal.",
     });
   if (
     details.rendered_terminal.observed_frames >
@@ -411,7 +425,9 @@ const captureCoverageUnknowns = (
     unknowns.push({
       scope: "terminal",
       reason:
-        "Cumulative rendered state and visible-line bytes exceeded output_bytes; whole rendered frames were omitted. Raw PTY coverage is reported separately. See truncation_details.rendered_terminal.",
+        (details.rendered_terminal.unknown_size_frames ?? 0) > 0
+          ? "Rendered frames were omitted because a normalization stage exceeded the remaining output_bytes budget; final rendered byte totals are unknown for those frames. See truncation_details.rendered_terminal."
+          : "Cumulative rendered state and visible-line bytes exceeded output_bytes; whole rendered frames were omitted. Raw PTY coverage is reported separately. See truncation_details.rendered_terminal.",
     });
   for (const [name, coverage] of [
     ["before", details.filesystem_before],
@@ -660,7 +676,7 @@ export const observeSettlement = async (
     recordEvent("lifecycle", 1);
     return { state: "unverifiable", elapsed_ms: 0 };
   }
-  const started = Date.now();
+  const started = monotonicProcessCaptureClock();
   let consecutiveEmpty = 0;
   let sawLive = false;
   let deadlineReached = false;
@@ -678,19 +694,25 @@ export const observeSettlement = async (
       [...observations.values()].some(({ state }) => state === "unverifiable")
     ) {
       recordEvent("lifecycle", 1);
-      return { state: "unverifiable", elapsed_ms: Date.now() - started };
+      return {
+        state: "unverifiable",
+        elapsed_ms: monotonicProcessCaptureClock() - started,
+      };
     }
     if ([...observations.values()].every(({ state }) => state === "empty")) {
       consecutiveEmpty += 1;
       if (consecutiveEmpty >= 2) {
         recordEvent("lifecycle", 1);
-        return { state: "quiesced", elapsed_ms: Date.now() - started };
+        return {
+          state: "quiesced",
+          elapsed_ms: monotonicProcessCaptureClock() - started,
+        };
       }
     } else {
       consecutiveEmpty = 0;
       sawLive = true;
     }
-    deadlineReached = Date.now() - started >= settleMs;
+    deadlineReached = monotonicProcessCaptureClock() - started >= settleMs;
     if (deadlineReached) break;
     await delay(50, undefined, { signal });
   }
@@ -698,8 +720,14 @@ export const observeSettlement = async (
   // A lone empty observation proves neither liveness nor quiescence; only an
   // observed live member justifies alive_at_deadline.
   return sawLive
-    ? { state: "alive_at_deadline", elapsed_ms: Date.now() - started }
-    : { state: "unverifiable", elapsed_ms: Date.now() - started };
+    ? {
+        state: "alive_at_deadline",
+        elapsed_ms: monotonicProcessCaptureClock() - started,
+      }
+    : {
+        state: "unverifiable",
+        elapsed_ms: monotonicProcessCaptureClock() - started,
+      };
 };
 
 /** Name why an attempt is unverified; a blank message never reaches the capture schema. */
@@ -786,7 +814,10 @@ export const awaitTerminalExit = async ({
       if (finalizationStartedAt === undefined) return;
       const record: (typeof finalizationSignals)[number] = {
         signal: finalizationSignal,
-        sent_at_ms: Math.round(performance.now() - finalizationStartedAt),
+        sent_at_ms: Math.max(
+          0,
+          monotonicProcessCaptureClock() - finalizationStartedAt,
+        ),
         delivery: "unverified" as FinalizationDelivery,
         reason: "delivery had not settled when the record was published",
       };
@@ -856,7 +887,7 @@ export const awaitTerminalExit = async ({
         terminal.kill("SIGKILL");
         return;
       }
-      finalizationStartedAt = performance.now();
+      finalizationStartedAt = monotonicProcessCaptureClock();
       attempt("SIGTERM");
     };
     terminal.onExit((exit) => {
@@ -867,7 +898,7 @@ export const awaitTerminalExit = async ({
       const finalizationElapsedMs =
         finalizationStartedAt === undefined
           ? undefined
-          : Math.round(performance.now() - finalizationStartedAt);
+          : Math.max(0, monotonicProcessCaptureClock() - finalizationStartedAt);
       recordEvent("lifecycle", 0);
       for (const [eventIndex, event] of scenario.events.entries()) {
         if (dispatchedEventIndexes.has(eventIndex)) continue;
@@ -875,7 +906,10 @@ export const awaitTerminalExit = async ({
         interactions.push({
           sequence,
           scheduled_at_ms: event.at_ms,
-          dispatched_at_ms: Math.max(0, Date.now() - started),
+          dispatched_at_ms: Math.max(
+            0,
+            monotonicProcessCaptureClock() - started,
+          ),
           type: event.type,
           data:
             event.type === "input"
@@ -935,14 +969,20 @@ export const awaitTerminalExit = async ({
         forceKill();
       } else if (finalizationStartedAt !== undefined) {
         if (
-          performance.now() - finalizationStartedAt >=
+          monotonicProcessCaptureClock() - finalizationStartedAt >=
           scenario.finalization_ms
         )
           forceKill();
-      } else if (Date.now() - started >= scenario.timeout_ms) {
+      } else if (
+        monotonicProcessCaptureClock() - started >=
+        scenario.timeout_ms
+      ) {
         reason = "timeout";
         terminateAtDeadline();
-      } else if (Date.now() - lastOutput() >= scenario.idle_timeout_ms) {
+      } else if (
+        monotonicProcessCaptureClock() - lastOutput() >=
+        scenario.idle_timeout_ms
+      ) {
         reason = "idle_timeout";
         terminateAtDeadline();
       }
@@ -971,10 +1011,11 @@ const PROCESS_CLEANUP_VERIFICATION_INTERVAL_MS = 25;
 const verifyTokenOwnedProcessesUntilSettled = async (
   verify: () => Promise<ProcessCleanupResult>,
 ): Promise<ProcessCleanupResult> => {
-  const deadline = Date.now() + PROCESS_CLEANUP_VERIFICATION_GRACE_MS;
+  const deadline =
+    monotonicProcessCaptureClock() + PROCESS_CLEANUP_VERIFICATION_GRACE_MS;
   let result = await verify();
   while (!result.cleaned) {
-    const remaining = deadline - Date.now();
+    const remaining = deadline - monotonicProcessCaptureClock();
     if (remaining <= 0) return result;
     await new Promise<void>((resolve) =>
       setTimeout(
@@ -1058,8 +1099,16 @@ export interface ProcessCaptureResourceCleanupOptions {
   readonly host?: ProcessCaptureCleanupHost;
 }
 
+/** Historical cleanup facts and the exact authority that can confirm recovery. */
+export interface ProcessCaptureCleanupOutcome {
+  readonly report: ProcessCaptureCleanupReport;
+  /** Undefined means that only historical facts, not an owner, are available. */
+  readonly cleanupLease: AnalysisCleanupLease | undefined;
+}
+
 /** One capture's exact resource owner, with completion tracked per resource. */
 class ProcessCaptureResourceOwner {
+  readonly cleanupLease: AnalysisCleanupLease;
   readonly #host: ProcessCaptureCleanupHost;
   #terminalRenderer:
     | ProcessCaptureCleanupReport["terminal_renderer"]
@@ -1075,14 +1124,27 @@ class ProcessCaptureResourceOwner {
       this.#terminalRenderer = { state: "not_required", reason: null };
     if (options.terminal === undefined)
       this.#ownedProcessGroup = { state: "not_required", reason: null };
+    this.cleanupLease = new AnalysisCleanupLease(async () => {
+      const report = await this.close();
+      const failure = cleanupReportFailure(report);
+      if (failure === undefined) return;
+      const error = new ProcessCaptureError(failure, {
+        reason: "cleanup_incomplete",
+        cleanup: { reason: failure, resources: this.cleanupResources },
+        cleanupReport: report,
+      });
+      new AnalysisCleanupLeaseGroup(error, [this.cleanupLease]);
+      throw error;
+    }, this);
   }
 
-  async close(): Promise<ProcessCaptureCleanupReport> {
-    for (const timer of this.options.timers) timer.cancel();
-    await this.#releaseRenderer();
-    await this.#releaseOwnedProcessGroup();
-    await this.#releaseTemporaryRoot();
-    return {
+  get cleanupResources(): readonly string[] {
+    return unresolvedCleanupResources(this.report);
+  }
+
+  get report(): ProcessCaptureCleanupReport {
+    // Reports are observations; consumers cannot edit the owner's completion state.
+    return structuredClone({
       owned_process_group: this.#ownedProcessGroup ?? {
         state: "unverified",
         reason: "owned process cleanup was not attempted",
@@ -1095,7 +1157,29 @@ class ProcessCaptureResourceOwner {
         state: "unverified",
         reason: "temporary root cleanup was not attempted",
       },
-    };
+    });
+  }
+
+  async close(): Promise<ProcessCaptureCleanupReport> {
+    for (const timer of this.options.timers) timer.cancel();
+    await this.#releaseRenderer();
+    await this.#releaseOwnedProcessGroup();
+    await this.#releaseTemporaryRoot();
+    return this.report;
+  }
+
+  async release(): Promise<ProcessCaptureCleanupOutcome> {
+    try {
+      await this.cleanupLease.release();
+      return { report: this.report, cleanupLease: this.cleanupLease };
+    } catch (cause: unknown) {
+      if (
+        !(cause instanceof ProcessCaptureError) ||
+        cause.cleanupReport === undefined
+      )
+        throw cause;
+      return { report: cause.cleanupReport, cleanupLease: this.cleanupLease };
+    }
   }
 
   async #releaseRenderer(): Promise<void> {
@@ -1168,12 +1252,12 @@ const cleanupFailureMessage = (cause: unknown, fallback: string): string =>
 /** Release one capture's resources, retaining the exact owner for scoped retry. */
 export const releaseProcessResources = async (
   options: ProcessCaptureResourceCleanupOptions,
-): Promise<ProcessCaptureCleanupReport> =>
-  new ProcessCaptureResourceOwner(options).close();
+): Promise<ProcessCaptureCleanupOutcome> =>
+  new ProcessCaptureResourceOwner(options).release();
 
 /** Run-local owner collection for resources whose first cleanup did not finish. */
 export class ProcessCaptureResourceScope {
-  readonly #pending = new Set<ProcessCaptureResourceOwner>();
+  readonly #pending = new Set<AnalysisCleanupLease>();
   readonly #active = new Set<Promise<unknown>>();
   #draining: Promise<void> | undefined;
   #closed = false;
@@ -1200,13 +1284,12 @@ export class ProcessCaptureResourceScope {
 
   async release(
     options: ProcessCaptureResourceCleanupOptions,
-  ): Promise<ProcessCaptureCleanupReport> {
+  ): Promise<ProcessCaptureCleanupOutcome> {
     const owner = new ProcessCaptureResourceOwner(options);
-    const report = await owner.close();
-    if (cleanupReportFailure(report) !== undefined) {
-      this.#pending.add(owner);
-    }
-    return report;
+    this.#pending.add(owner.cleanupLease);
+    const outcome = await owner.release();
+    if (owner.cleanupLease.released) this.#pending.delete(owner.cleanupLease);
+    return outcome;
   }
 
   /** Drain active captures, then retry their retained resources without closing admission. */
@@ -1226,35 +1309,64 @@ export class ProcessCaptureResourceScope {
 
   async #drainAndRetry(): Promise<void> {
     while (this.#active.size > 0) await Promise.allSettled(this.#active);
-    const failures: string[] = [];
-    for (const owner of this.#pending) {
+    const failures: {
+      readonly lease: AnalysisCleanupLease;
+      readonly cause: unknown;
+    }[] = [];
+    for (const lease of this.#pending) {
       try {
-        const report = await owner.close();
-        if (cleanupReportFailure(report) === undefined)
-          this.#pending.delete(owner);
-        else
-          failures.push(cleanupReportFailure(report) ?? "cleanup incomplete");
+        await lease.release();
+        this.#pending.delete(lease);
       } catch (cause: unknown) {
-        failures.push(
-          cause instanceof Error ? cause.message || cause.name : String(cause),
-        );
+        failures.push({ lease, cause });
       }
     }
-    if (failures.length > 0)
-      throw new AggregateError(
-        failures,
-        `Process capture cleanup remains incomplete: ${failures.join("; ")}`,
-      );
+    if (failures.length === 0) return;
+    const reason = failures
+      .map(({ cause }) => cleanupFailureMessage(cause, "cleanup incomplete"))
+      .join("; ");
+    const error = new ProcessCaptureError(
+      `Process capture cleanup remains incomplete: ${reason}`,
+      {
+        cause: new AggregateError(
+          failures.map(({ cause }) => cause),
+          "Process capture resources remain owned",
+        ),
+        reason: "cleanup_incomplete",
+        cleanup: {
+          reason,
+          resources: [
+            ...new Set(
+              failures.flatMap(({ lease }) => lease.cleanupResources ?? []),
+            ),
+          ],
+        },
+      },
+    );
+    new AnalysisCleanupLeaseGroup(
+      error,
+      failures.map(({ lease }) => lease),
+    );
+    throw error;
   }
 }
+
+const unresolvedCleanupOutcomes = (
+  report: ProcessCaptureCleanupReport,
+): [string, ProcessCaptureCleanupReport[keyof ProcessCaptureCleanupReport]][] =>
+  Object.entries(report).filter(
+    ([, outcome]) =>
+      outcome.state === "failed" || outcome.state === "unverified",
+  );
+
+const unresolvedCleanupResources = (
+  report: ProcessCaptureCleanupReport,
+): string[] => unresolvedCleanupOutcomes(report).map(([resource]) => resource);
 
 export const cleanupReportFailure = (
   report: ProcessCaptureCleanupReport,
 ): string | undefined => {
-  const failures = Object.entries(report).filter(
-    ([, outcome]) =>
-      outcome.state === "failed" || outcome.state === "unverified",
-  );
+  const failures = unresolvedCleanupOutcomes(report);
   return failures.length === 0
     ? undefined
     : failures
@@ -1270,62 +1382,81 @@ export const captureTerminalFrames = (options: {
   readonly scenario: ProcessScenario;
   readonly frames: TerminalFrame[];
   readonly started: number;
-  readonly temporaryRoot: string;
   readonly onOutput: () => void;
   readonly renderer: TerminalRenderer;
+  readonly normalizeText: (
+    value: string,
+    maxBytes: number,
+  ) => BoundedProcessTextNormalization;
   readonly recordEvent: RecordProcessCaptureEvent;
-}): (() => TerminalRetention) => {
-  let outputBytes = 0;
+}): (() => TerminalCaptureRetention) => {
+  let rawBytes = 0;
+  let normalizedBytes = 0;
   let observedBytes = 0;
   let observedFrames = 0;
+  let normalizedOmittedFrames = 0;
   options.terminal.onData((data) => {
     options.onOutput();
     const bytes = Buffer.byteLength(data);
     observedBytes += bytes;
     observedFrames += 1;
-    if (outputBytes + bytes > options.scenario.limits.output_bytes) {
+    const budget = options.scenario.limits.output_bytes;
+    if (bytes > budget - rawBytes) {
       return;
     }
-    outputBytes += bytes;
+    const normalized = options.normalizeText(data, budget - normalizedBytes);
+    if (normalized.state === "over_budget") {
+      normalizedOmittedFrames += 1;
+      return;
+    }
+    rawBytes += bytes;
+    normalizedBytes += normalized.utf8Bytes;
     const atMs = normalizeProcessElapsedTime(
-      Date.now() - options.started,
+      monotonicProcessCaptureClock() - options.started,
       options.scenario.normalization.time_bucket_ms,
-    );
-    const normalized = normalizeProcessText(
-      data,
-      options.scenario,
-      options.temporaryRoot,
-      options.terminal.pid,
     );
     const sequence = options.frames.length;
     options.frames.push({
       sequence,
       at_ms: atMs,
-      data: normalized,
-      ...(normalized === data ? {} : { raw_data: data }),
+      data: normalized.value,
+      ...(normalized.value === data ? {} : { raw_data: data }),
     });
     options.renderer.write(data, atMs);
     options.recordEvent("frames", sequence);
   });
   return () => ({
-    budget_bytes: options.scenario.limits.output_bytes,
-    observed_bytes: observedBytes,
-    retained_bytes: outputBytes,
-    observed_frames: observedFrames,
-    retained_frames: options.frames.length,
+    raw_terminal: {
+      budget_bytes: options.scenario.limits.output_bytes,
+      observed_bytes: observedBytes,
+      retained_bytes: rawBytes,
+      observed_frames: observedFrames,
+      retained_frames: options.frames.length,
+    },
+    normalized_terminal: {
+      budget_bytes: options.scenario.limits.output_bytes,
+      retained_bytes: normalizedBytes,
+      omitted_frames: normalizedOmittedFrames,
+    },
   });
 };
+
+export interface TerminalCaptureRetention {
+  readonly raw_terminal: TerminalRetention;
+  readonly normalized_terminal: NormalizedTerminalRetention;
+}
 
 export const resolveProcessResult = (
   capture: PendingProcessCapture | ProcessCapture | undefined,
   executionFailure: unknown,
-  cleanup: ProcessCaptureCleanupReport,
+  cleanupOutcome: ProcessCaptureCleanupOutcome,
   observations?: IncompleteProcessCaptureObservations,
   partialContext?: {
     readonly scenario: ProcessScenario;
     readonly rootPid?: number;
   },
 ): ProcessCapture => {
+  const cleanup = cleanupOutcome.report;
   const cleanupFailure = cleanupReportFailure(cleanup);
   const executionFailureReason =
     describeProcessCaptureExecutionFailure(executionFailure);
@@ -1374,45 +1505,39 @@ export const resolveProcessResult = (
     }
   }
   if (cleanupFailure !== undefined) {
-    const cleanupResources = Object.entries(cleanup)
-      .filter(
-        ([, outcome]) =>
-          outcome.state === "failed" || outcome.state === "unverified",
-      )
-      .map(([resource]) => resource);
-    throw new ProcessCaptureError(cleanupFailure, {
+    const cleanupResources = unresolvedCleanupResources(cleanup);
+    const cleanupError = new ProcessCaptureError(cleanupFailure, {
       cause: executionFailure,
       reason: "cleanup_incomplete",
-      cleanupResources,
+      cleanup: { reason: cleanupFailure, resources: cleanupResources },
       ...(executionFailureReason === undefined
         ? {}
         : { executionFailure: executionFailureReason }),
       ...(partialObservation === undefined ? {} : { partialObservation }),
       cleanupReport: cleanup,
     });
+    if (cleanupOutcome.cleanupLease !== undefined)
+      new AnalysisCleanupLeaseGroup(cleanupError, [
+        cleanupOutcome.cleanupLease,
+      ]);
+    if (executionFailure instanceof ProcessCaptureError)
+      throw executionFailure.withFinalization({
+        ...(executionFailureReason === undefined
+          ? {}
+          : { executionFailure: executionFailureReason }),
+        ...(partialObservation === undefined ? {} : { partialObservation }),
+        cleanupReport: cleanup,
+        cleanupFailure: cleanupError,
+      });
+    throw cleanupError;
   }
   if (executionFailure instanceof ProcessCaptureError) {
-    const retainedExecutionFailure =
-      executionFailure.executionFailure ?? executionFailureReason;
-    const retainedPartialObservation =
-      executionFailure.partialObservation ?? partialObservation;
-    throw new ProcessCaptureError(executionFailure.message, {
-      cause: executionFailure,
-      ...(executionFailure.userMessage === undefined
+    throw executionFailure.withFinalization({
+      ...(executionFailureReason === undefined
         ? {}
-        : { userMessage: executionFailure.userMessage }),
-      ...(executionFailure.userCategory === undefined
-        ? {}
-        : { userCategory: executionFailure.userCategory }),
-      reason: executionFailure.reason,
-      cleanupResources: executionFailure.cleanupResources,
-      ...(retainedExecutionFailure === undefined
-        ? {}
-        : { executionFailure: retainedExecutionFailure }),
-      ...(retainedPartialObservation === undefined
-        ? {}
-        : { partialObservation: retainedPartialObservation }),
-      cleanupReport: executionFailure.cleanupReport ?? cleanup,
+        : { executionFailure: executionFailureReason }),
+      ...(partialObservation === undefined ? {} : { partialObservation }),
+      cleanupReport: cleanup,
     });
   }
   if (executionFailure !== undefined) {

@@ -19,6 +19,10 @@ import type {
   UnknownStatus,
   UpdateUnknownInput,
 } from "../../domain/residualUnknown.js";
+import type {
+  UnknownPage,
+  UnknownQuery,
+} from "../investigation/InvestigationRecordPort.js";
 import { err, ok, type Result } from "../../domain/result.js";
 import type {
   AnalysisExecution,
@@ -51,6 +55,10 @@ export interface WorkflowSnapshotRecordInput {
 export abstract class BinarySessionRecords {
   readonly #records: InvestigationRecords;
   readonly #writeResources = new ArtifactResourceScope();
+
+  protected get hasPendingFileResources(): boolean {
+    return this.#writeResources.hasPending;
+  }
   readonly #snapshot = new AnalysisSnapshotCache();
   #snapshotInvalidated = false;
   readonly #snapshotListeners = new Set<() => void | Promise<void>>();
@@ -348,6 +356,10 @@ export abstract class BinarySessionRecords {
     } = {},
   ): ResidualUnknown[] {
     return this.#records.listUnknowns(filters);
+  }
+
+  listUnknownsPage(query: UnknownQuery = {}): UnknownPage {
+    return this.#records.listUnknownsPage(query);
   }
 
   verifyUnknownResolution(unknownId: string): Result<
