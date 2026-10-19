@@ -251,40 +251,16 @@ export const runFirmwareCommand = async (context: {
   }
   const stopped = await supervisor.stop();
   const snapshot = supervisor.snapshot();
-  if (stopped.status === "incomplete") {
-    context.retainCleanup(supervisor);
-    const error = new ProviderCleanupError(engine, [runId, context.cwd], {
-      reason: stopped.reason,
-      leader_pid: spawned.ownership.leaderPid,
-      process_group_id: spawned.ownership.processGroupId,
-      exit_code: snapshot.exitCode ?? null,
-      signal: snapshot.signal ?? null,
-      stdout: snapshot.stdout.text,
-      stderr: snapshot.stderr.text,
-      stdout_bytes: snapshot.stdout.bytes,
-      stderr_bytes: snapshot.stderr.bytes,
-      ...(failure instanceof AnalysisError
-        ? { primary_error: projectAnalysisError(failure) }
-        : {
-            previous_error: failure instanceof Error ? failure.message : null,
-          }),
-    });
-    error.retainCapturedOutput(capturedOutput());
-    throw error;
-  }
-  if (failure !== undefined) {
-    if (failure instanceof AnalysisError)
-      failure.retainCapturedOutput(capturedOutput());
-    throw failure;
-  }
   if (
+    failure === undefined &&
+    snapshot.exitCode !== undefined &&
     snapshot.exitCode !== 0 &&
     !(
       context.acceptReportedExtractionFailure === true &&
       snapshot.exitCode === 1
     )
   )
-    throw new ProviderAdapterError(engine, operation, {
+    failure = new ProviderAdapterError(engine, operation, {
       diagnostics: {
         reason:
           "Tool failed; inspect exit status and stderr for format, dependency, sandbox or resource-limit failures",
@@ -296,6 +272,45 @@ export const runFirmwareCommand = async (context: {
         stderr_bytes: snapshot.stderr.bytes,
       },
     }).retainCapturedOutput(capturedOutput());
+  if (failure === undefined && signal.aborted)
+    failure = new AnalysisCancelledError(operation, { cause: signal.reason });
+  if (stopped.status === "incomplete") {
+    context.retainCleanup(supervisor);
+    const error = new ProviderCleanupError(
+      engine,
+      [runId, context.cwd],
+      {
+        reason: stopped.reason,
+        leader_pid: spawned.ownership.leaderPid,
+        process_group_id: spawned.ownership.processGroupId,
+        exit_code: snapshot.exitCode ?? null,
+        signal: snapshot.signal ?? null,
+        stdout: snapshot.stdout.text,
+        stderr: snapshot.stderr.text,
+        stdout_bytes: snapshot.stdout.bytes,
+        stderr_bytes: snapshot.stderr.bytes,
+        ...(failure instanceof AnalysisError
+          ? { primary_error: projectAnalysisError(failure) }
+          : {
+              previous_error: failure instanceof Error ? failure.message : null,
+            }),
+      },
+      {
+        operation,
+        cause: failure,
+        ...(failure instanceof AnalysisError
+          ? { cleanupPrimary: failure }
+          : {}),
+      },
+    );
+    error.retainCapturedOutput(capturedOutput());
+    throw error;
+  }
+  if (failure !== undefined) {
+    if (failure instanceof AnalysisError)
+      failure.retainCapturedOutput(capturedOutput());
+    throw failure;
+  }
   return {
     stdout: snapshot.stdout,
     stderr: snapshot.stderr,

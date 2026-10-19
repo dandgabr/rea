@@ -1,5 +1,7 @@
 import { chmod, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
 
 import { expect, it as test, vi } from "vitest";
 
@@ -16,6 +18,71 @@ import {
 } from "./FirmwareCommand.js";
 
 const it = test.skipIf(process.platform !== "linux");
+
+test.each(["success", "command-failure", "cleanup-failure"] as const)(
+  "observes cancellation during final stop without erasing %s",
+  async (outcome) => {
+    const controller = new AbortController();
+    const reason = new Error("cancel during final stop");
+    const child = Object.assign(new EventEmitter(), {
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+      exitCode: null,
+      signalCode: null,
+      kill: () => false,
+    });
+    const retained: unknown[] = [];
+    const failure: unknown = await runFirmwareCommand({
+      engine: "podman",
+      operation: "firmware_container_runtime",
+      command: "/unused",
+      limiter: "/unused",
+      args: [],
+      cwd: "/tmp",
+      environment: {},
+      signal: controller.signal,
+      limitProfile: "container-transport",
+      retainCleanup: (owner) => retained.push(owner),
+      launcher: async () => {
+        setImmediate(() => {
+          child.stdout.end("producer bytes");
+          child.emit("exit", outcome === "command-failure" ? 1 : 0, null);
+          child.emit("close", outcome === "command-failure" ? 1 : 0, null);
+        });
+        return {
+          process: child,
+          ownership: { runId: "test", leaderPid: 123, processGroupId: 123 },
+          cleanup: async () => {
+            controller.abort(reason);
+            return outcome === "cleanup-failure"
+              ? { cleaned: false, reason: "retained direct client" }
+              : { cleaned: true, signaled: false };
+          },
+        };
+      },
+    }).catch((cause: unknown) => cause);
+    expect(controller.signal.aborted).toBe(true);
+    if (outcome === "success") {
+      expect(failure).toBeInstanceOf(AnalysisCancelledError);
+      expect(failure).toMatchObject({ cause: reason });
+    } else if (outcome === "command-failure") {
+      expect(failure).toMatchObject({
+        _tag: "ProviderAdapterError",
+        cleanupIncomplete: false,
+        diagnostics: { exit_code: 1 },
+      });
+    } else {
+      expect(failure).toMatchObject({
+        cleanupIncomplete: true,
+        diagnostics: { primary_error: { code: "cancelled" } },
+      });
+      expect(retained).toHaveLength(1);
+    }
+    expect(failure).toMatchObject({
+      capturedOutput: { stdout: "producer bytes", stdout_bytes: 14 },
+    });
+  },
+);
 
 test("keeps pre-launch firmware cancellation in the tagged error algebra", async () => {
   const controller = new AbortController();

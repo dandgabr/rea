@@ -5,6 +5,8 @@ import { z } from "zod";
 import type { ArtifactResourceScope } from "../../artifacts/ArtifactResourceScope.js";
 import { AnalysisError } from "../../domain/analysisErrorBase.js";
 import { AnalysisCancelledError } from "../../domain/analysisErrorCore.js";
+import { ArtifactReaderFailure } from "../../artifacts/ArtifactReader.js";
+import { firmwareFailure } from "../FirmwareFailures.js";
 import {
   podmanExistingStoreProfileSchema,
   type PodmanDescriptorIdentity,
@@ -125,13 +127,16 @@ export class AdmittedPodmanStore {
       await admitted.recheck(signal, scope);
       return admitted;
     } catch (cause: unknown) {
+      if (cause instanceof ArtifactReaderFailure)
+        throw firmwareFailure(cause, "podman", "firmware_container_runtime");
       if (cause instanceof AnalysisError) throw cause;
-      if (signal.aborted)
+      if (signal.aborted && cause === signal.reason)
         throw new AnalysisCancelledError("firmware_container_runtime", {
           cause,
         });
       throw podmanProfileUnavailable(
         `Selected existing-store profile admission failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+        { cause },
       );
     }
   }
@@ -289,13 +294,16 @@ export class AdmittedPodmanStore {
         database,
       };
     } catch (cause: unknown) {
+      if (cause instanceof ArtifactReaderFailure)
+        throw firmwareFailure(cause, "podman", "firmware_container_runtime");
       if (cause instanceof AnalysisError) throw cause;
-      if (signal.aborted)
+      if (signal.aborted && cause === signal.reason)
         throw new AnalysisCancelledError("firmware_container_runtime", {
           cause,
         });
       throw podmanProfileUnavailable(
         `Existing store admission failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+        { cause },
       );
     }
   }
