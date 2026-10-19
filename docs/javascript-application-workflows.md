@@ -195,6 +195,17 @@ earlier read or captured alias. Unproved ordering across branches or function
 activations remains conservative. Returned-reference effects use the same
 read-position facts as call resolution.
 
+Returned-reference effects share one property-projection state per source read.
+When several paths reach that read, differing keys at the same depth become
+wildcards; differing depths become an unknown-depth selection. This retains a
+conservative superset of the represented local targets rather than enumerating
+every alias history or dropping paths at a query cap. It can add possible effects,
+including for finite projection cycles. Static limitations disclose this loss of
+precision; semantic graphs retain `dynamic-property` unknowns at the affected
+callee coordinates, and captured web bundles identify the affected script keys.
+These candidates do not prove runtime calls or mutations. Existing source-worker
+and result-admission limits still apply.
+
 Mutation tracking covers explicit member assignments, updates, deletion, and
 loop assignment targets, including the supported local aliases and shared
 nested references. Calls conservatively invalidate exposed mutable references;
@@ -287,6 +298,27 @@ facts. Each item is `unchanged`, `added`, `removed`, `changed`, or `unknown`,
 and the result includes its basis, candidates, changed dimensions, Evidence
 links, limitations, and a `changed_from` graph containing all compared nodes,
 their observations, and relationships.
+
+A matched pair whose only differing dimension is `location` counts as
+`unchanged` when both input graphs have complete coverage and its neighboring
+relationship identities are resolved. This includes an
+identical module shifted by an earlier bundle edit and a named IPC channel
+observed at a new offset. The item still reports `dimensions: ["location"]`
+and both node IDs; the graph retains both original observations and coordinates.
+Content, property, and complete relationship differences still count as
+`changed`. With incomplete coverage, relocation alone remains `unknown` and
+retains the location and coverage dimensions. Matching confidence is unchanged:
+an inferred pair is not promoted to exact identity by this classification.
+
+Complete inventory does not resolve ambiguous or unmatched relationship targets.
+A matched module with identical bytes can therefore remain `unknown` when a
+neighbor, including its containing chunk, has no cross-version match. The item
+retains its exact content match, coordinates, candidate inventory, and an explicit
+relationship-identity limitation. `coverage` is added to its dimensions only for
+incomplete inventory. Definite content, property, or complete topology differences
+remain `changed` while retaining any separate relationship uncertainty.
+An unknown item with no observed content, property, or relationship difference
+does not emit a `changed_from` edge; its pairing and uncertainty remain in the item.
 
 One-sided absence is `added` or `removed` only when the opposite input graph has
 complete coverage. With partial, unavailable, or truncated input, the same
