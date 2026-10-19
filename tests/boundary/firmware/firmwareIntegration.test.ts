@@ -17,7 +17,7 @@ import { projectAnalysisError } from "../../../src/domain/analysisErrorProjectio
 import { AnalysisError } from "../../../src/domain/analysisErrorBase.js";
 import { ProviderCleanupError } from "../../../src/domain/providerCleanupError.js";
 import { AnalysisOutputError } from "../../../src/domain/analysisErrorCore.js";
-import { FirmwareFileCleanupError } from "../../../src/firmware/FirmwareFiles.js";
+import { ArtifactReaderFailure } from "../../../src/artifacts/ArtifactReader.js";
 import { FIRMWARE_LIMITS } from "../../../src/firmware/FirmwareRelease.js";
 import { PrivateRuntimeRoot } from "../../../src/process/PrivateRuntimeRoot.js";
 import { toolContract } from "../../../src/contracts/toolContracts.js";
@@ -1266,7 +1266,7 @@ it("cancels an owned active process and refuses already-cancelled admission", as
 });
 
 it.each(["admitted", "running"])(
-  "rejects busy capacity without admitting a waiter: %s",
+  "serializes firmware requests and cancels a queued request: %s",
   async (stage) => {
     const fixture = await firmwareFixture("stall");
     const activeController = new AbortController();
@@ -1284,24 +1284,15 @@ it.each(["admitted", "running"])(
         { path: fixture.path },
         { signal: otherController.signal },
       );
-      const observed = await Promise.race([
-        refusal,
-        new Promise((resolve) => {
-          const timer = setTimeout(() => {
-            otherController.abort();
-            resolve("admitted waiter");
-          }, 200);
-          void refusal.finally(() => clearTimeout(timer));
-        }),
-      ]);
+      otherController.abort();
+      const observed = await refusal;
       expect(observed).toMatchObject({
         ok: false,
-        error: {
-          _tag: "AnalysisResourceConstraintError",
-          resource: "capacity",
-        },
+        error: { _tag: "AnalysisCancelledError" },
       });
-      if (stage === "running") expect(fixture.launches).toHaveLength(2);
+      expect(fixture.launches.length).toBeLessThanOrEqual(
+        stage === "running" ? 2 : 1,
+      );
     } finally {
       activeController.abort();
       expect((await active).ok).toBe(false);
@@ -1640,16 +1631,16 @@ const expectFirmwareDescriptorPrimary = (
     cause = cause.cause;
   }
   const descriptor = causeChain.find(
-    (error): error is FirmwareFileCleanupError =>
-      error instanceof FirmwareFileCleanupError,
+    (error): error is ArtifactReaderFailure =>
+      error instanceof ArtifactReaderFailure,
   );
   expect(descriptor).toBeDefined();
   expect(causeChain).toContain(primary);
-  expect(descriptor?.diagnostics?.primary_error).toMatchObject({
-    code: "unreadable_output",
-    details: { reason: primary.reason },
-  });
-  expect(descriptor?.resourceScope).toBeDefined();
+  expect(descriptor?.cleanup?.resources).toEqual(
+    expect.arrayContaining([expect.stringContaining("config")]),
+  );
+  expect(descriptor?.cleanup?.reason).toMatch(/descriptor close failure/iu);
+  expect(descriptor?.cleanupLeases).toBeDefined();
   return descriptor!;
 };
 
@@ -1738,7 +1729,7 @@ it.skip.each(["none", "caller", "deadline"] as const)(
       const scope = expectFirmwareDescriptorPrimary(
         outcome.error,
         primary,
-      ).resourceScope;
+      ).cleanupLeases;
       const staging = fixture.launches.at(-1)?.cwd;
       expect(staging).toBeDefined();
       expect(outcome.error.cleanupResources).toEqual(
@@ -1785,7 +1776,9 @@ it.skip.each(["none", "caller", "deadline"] as const)(
         cleanupIncomplete: true,
       });
       await expectRetainedFirmwareWorkspace(staging!, bytes);
-      await expect(scope!.retryCleanup()).rejects.toBeDefined();
+      await expect(
+        Promise.all(scope!.map((lease) => lease.release())),
+      ).rejects.toBeDefined();
       await expectRetainedFirmwareWorkspace(staging!, bytes);
       fileCloseFailure.enabled = false;
       write.mockRestore();

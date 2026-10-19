@@ -15,6 +15,7 @@ import { ProviderCleanupError } from "../domain/providerCleanupError.js";
 import { jsonValueSchema } from "../domain/jsonValue.js";
 import { firmwareResultSchemas } from "../domain/firmware/firmwareAnalysis.js";
 import type { FirmwareFileAccess, FirmwareEntry } from "./FirmwareFiles.js";
+import type { FirmwarePartialObservation } from "../domain/firmware/firmwareAnalysis.js";
 import type { normalizeUnblobReport } from "./FirmwareReports.js";
 import type { extractionGap } from "../domain/firmware/firmwareAnalysis.js";
 
@@ -93,6 +94,7 @@ export const publishFirmwareExtraction = async (context: {
   outputDirectory: string;
   entries: readonly FirmwareEntry[];
   normalized: ReturnType<typeof normalizeUnblobReport>;
+  observation: FirmwarePartialObservation;
   selection: { offset: number; length: number; sha256: string };
   /** Caller-selected extraction depth, for boundary-aware continuations. */
   maxDepth: number;
@@ -233,8 +235,7 @@ export const publishFirmwareExtraction = async (context: {
       );
       if (tree !== undefined && treeLease !== undefined)
         context.retainCleanup(tree, treeLease, cleanup);
-      if (publishedResult !== undefined)
-        primary.retainPartialObservation(publishedResult);
+      primary.retainPartialObservation(publishedResult ?? context.observation);
       throw analysisErrorWithCleanupFailure(
         primary,
         cleanup,
@@ -242,6 +243,7 @@ export const publishFirmwareExtraction = async (context: {
       ).bindCleanupDependencies([primary, cleanup]);
     }
     if (tree?.published === true && result !== undefined) return result;
+    primary.retainPartialObservation(context.observation);
     throw primary;
   }
 };

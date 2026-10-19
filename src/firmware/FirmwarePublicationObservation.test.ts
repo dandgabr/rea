@@ -5,6 +5,8 @@ import { expect, it, vi } from "vitest";
 import { createTestTempDirectory } from "../../tests/fixtures/temporaryDirectory.js";
 import { normalizeUnblobReport } from "./FirmwareReports.js";
 import { publishFirmwareExtraction } from "./FirmwarePublication.js";
+import { createFirmwareExtractionObservation } from "./FirmwareExtractionObservation.js";
+import { FirmwareFileAccess } from "./FirmwareFiles.js";
 
 it("the publisher itself retains producer facts without provider fallback or authority over an existing output", async () => {
   const root = await createTestTempDirectory("rea-firmware-publication-facts-");
@@ -70,12 +72,30 @@ it("the publisher itself retains producer facts without provider fallback or aut
   await mkdir(output);
   await writeFile(join(output, "sentinel"), "caller bytes");
   const retainCleanup = vi.fn();
+  const files = new FirmwareFileAccess();
   await expect(
     publishFirmwareExtraction({
+      files,
+      workspacePath: root,
+      deadline: AbortSignal.timeout(10_000),
       maxDepth: 3,
       outputDirectory: output,
       entries: [],
       normalized,
+      observation: createFirmwareExtractionObservation({
+        outputDirectory: output,
+        maxDepth: 3,
+        normalized,
+        selection: { offset: 0, length: 1025, sha256 },
+        engine: {
+          name: "unblob",
+          version: "26.6.4",
+          executable_path: "/fixture/unblob",
+          executable_sha256: "a".repeat(64),
+          source_revision: null,
+          worker_count: 1,
+        },
+      }),
       selection: { offset: 0, length: 1025, sha256 },
       engine: {
         name: "unblob",
@@ -114,4 +134,5 @@ it("the publisher itself retains producer facts without provider fallback or aut
   expect(await readdir(output)).toEqual(["sentinel"]);
   expect(await readFile(join(output, "sentinel"), "utf8")).toBe("caller bytes");
   expect(await readFile(path)).toEqual(bytes);
+  await files.close();
 });

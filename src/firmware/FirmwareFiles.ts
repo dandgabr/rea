@@ -89,6 +89,8 @@ export class FirmwareFileAccess {
   }
 
   async #snapshot(request: FirmwareRequest, root: string, signal: AbortSignal) {
+    if (request.operation === "inspect_firmware_provider")
+      throw new TypeError("Provider inventory does not snapshot an input file");
     const sourcePath = absoluteCallerPath(request.input.path);
     const source = await realpath(sourcePath);
     const fullPath = join(root, "firmware.bin");
@@ -127,10 +129,7 @@ export class FirmwareFileAccess {
     });
     const { size, sha256 } = copied;
     await chmod(fullPath, 0o400);
-    const selected =
-      request.operation === "extract_firmware"
-        ? request.input.range
-        : undefined;
+    const selected = request.input.range;
     const offset = selected?.offset ?? 0;
     const length = selected?.length ?? size;
     if (length === 0 || offset > size || length > size - offset)

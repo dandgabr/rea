@@ -1,47 +1,14 @@
-import type { ArtifactResourceScope } from "../artifacts/ArtifactResourceScope.js";
-import { readBoundedFileBytes } from "../process/BoundedFileBytes.js";
-import { AnalysisOutputError } from "../domain/analysisErrorCore.js";
 import { firmwareResultSchemas } from "../domain/firmware/firmwareAnalysis.js";
-import { FIRMWARE_LIMITS } from "./FirmwareRelease.js";
-import { withFirmwareFile } from "./FirmwareFiles.js";
+import type { FirmwareFileAccess } from "./FirmwareFiles.js";
 import type { runFirmwareCommand } from "./FirmwareCommand.js";
+import { FIRMWARE_LIMITS } from "./FirmwareRelease.js";
 
 /** Read only the native public documentation emitted into this invocation's staging. */
 export const readUnblobDocumentation = (
+  files: FirmwareFileAccess,
   path: string,
   signal: AbortSignal,
-  scope: ArtifactResourceScope,
-) =>
-  withFirmwareFile(
-    path,
-    "inspect_firmware_provider",
-    signal,
-    scope,
-    async (handle) => {
-      const bytes = await readBoundedFileBytes(
-        handle,
-        FIRMWARE_LIMITS.reportBytes,
-        signal,
-      );
-      if (bytes === undefined)
-        throw new AnalysisOutputError(
-          "inspect_firmware_provider",
-          "Native handler documentation exceeded the report budget",
-        );
-      try {
-        return new TextDecoder("utf-8", {
-          fatal: true,
-          ignoreBOM: true,
-        }).decode(bytes);
-      } catch (cause: unknown) {
-        throw new AnalysisOutputError(
-          "inspect_firmware_provider",
-          "Native handler documentation is not valid UTF-8",
-          { cause },
-        );
-      }
-    },
-  );
+): Promise<string> => files.readText(path, "inspect_firmware_provider", signal);
 
 /** Native dependency marks are PATH availability observations, not extractor execution tests. */
 export const normalizeUnblobInventory = (

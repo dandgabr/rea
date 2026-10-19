@@ -38,7 +38,10 @@ describe.skipIf(process.platform === "win32")(
       // Concatenate: path.join would collapse `link/..` itself.
       const path = `${root}/link/../image.bin`;
       const snapshot = await new FirmwareFileAccess().snapshot(
-        { operation: "inspect_firmware_regions", input: { path } },
+        {
+          operation: "inspect_firmware_regions",
+          input: { path, provider_id: "binwalk" },
+        },
         work,
         new AbortController().signal,
       );

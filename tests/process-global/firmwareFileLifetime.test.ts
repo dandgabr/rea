@@ -114,6 +114,7 @@ vi.mock("../../src/firmware/FirmwareCommand.js", async (importOriginal) => {
 import { FirmwareFileAccess } from "../../src/firmware/FirmwareFiles.js";
 import { publishFirmwareExtraction } from "../../src/firmware/FirmwarePublication.js";
 import { normalizeUnblobReport } from "../../src/firmware/FirmwareReports.js";
+import { createFirmwareExtractionObservation } from "../../src/firmware/FirmwareExtractionObservation.js";
 import { SafeOutputTree } from "../../src/artifacts/SafeOutputTree.js";
 import { AnalysisCleanupLease } from "../../src/artifacts/AnalysisCleanupLease.js";
 import { ArtifactReaderFailure } from "../../src/artifacts/ArtifactReader.js";
@@ -172,6 +173,15 @@ it.each(["snapshot", "range"] as const)(
             operation: "extract_firmware",
             input: {
               path,
+              provider_id: "unblob",
+              options: {
+                workers: 1,
+                randomness_depth: 0,
+                keep_extracted_chunks: false,
+                delete_extracted_files: { mode: "none" as const },
+                carve_suffix: "_extract",
+                extract_suffix: "_extract",
+              },
               output_directory: join(root, "unused"),
               max_depth: 3,
               max_output_bytes: 1024,
@@ -216,7 +226,10 @@ it("copies a stable firmware file exactly at the input allowance", async () => {
   const files = new FirmwareFileAccess();
   try {
     const snapshot = await files.snapshot(
-      { operation: "inspect_firmware_regions", input: { path } },
+      {
+        operation: "inspect_firmware_regions",
+        input: { path, provider_id: "binwalk" },
+      },
       work,
       new AbortController().signal,
     );
@@ -264,11 +277,20 @@ it.each(
     };
     const request =
       operation === "inspect_firmware_regions"
-        ? { operation, input: { path } }
+        ? { operation, input: { path, provider_id: "binwalk" as const } }
         : {
             operation,
             input: {
               path,
+              provider_id: "unblob" as const,
+              options: {
+                workers: 1,
+                randomness_depth: 0,
+                keep_extracted_chunks: false,
+                delete_extracted_files: { mode: "none" as const },
+                carve_suffix: "_extract",
+                extract_suffix: "_extract",
+              },
               output_directory: join(root, "unused"),
               max_depth: 3,
               max_output_bytes: 1024,
@@ -463,7 +485,7 @@ it.each(["descriptor-first", "workspace-first"])(
     providers.push(provider);
     const result = await provider.execute({
       operation: "inspect_firmware_regions",
-      input: { path },
+      input: { path, provider_id: "binwalk" },
     });
     if (result.ok) throw new Error("Expected descriptor and workspace failure");
     expect(result.error.cleanupIncomplete).toBe(true);
@@ -471,7 +493,7 @@ it.each(["descriptor-first", "workspace-first"])(
     expect(fault.handles).toHaveLength(1);
     const blocked = await provider.execute({
       operation: "inspect_firmware_regions",
-      input: { path },
+      input: { path, provider_id: "binwalk" },
     });
     expect(blocked).toMatchObject({
       ok: false,
@@ -513,7 +535,10 @@ it("retains completed firmware observation when cancellation arrives during work
   const provider = new FirmwareProvider({});
   providers.push(provider);
   const result = await provider.execute(
-    { operation: "inspect_firmware_regions", input: { path } },
+    {
+      operation: "inspect_firmware_regions",
+      input: { path, provider_id: "binwalk" },
+    },
     { signal: controller.signal },
   );
   expect(result).toMatchObject({
@@ -541,7 +566,10 @@ it.skipIf(process.platform === "win32").each(["snapshot", "report"] as const)(
     const raw = await (
       kind === "snapshot"
         ? files.snapshot(
-            { operation: "inspect_firmware_regions", input: { path } },
+            {
+              operation: "inspect_firmware_regions",
+              input: { path, provider_id: "binwalk" },
+            },
             work,
             new AbortController().signal,
           )
@@ -580,7 +608,7 @@ it.each([false, true])(
     providers.push(provider);
     const result = await provider.execute({
       operation: "inspect_firmware_regions",
-      input: { path },
+      input: { path, provider_id: "binwalk" },
     });
     if (result.ok) throw new Error("Expected timeout");
     expect(result.error.partialObservation).toMatchObject({ kind: "firmware" });
@@ -664,24 +692,35 @@ const publication = async (
   );
   const retained: AnalysisCleanupLease[] = [];
   const workspacePath = join(root, "private");
+  const outputDirectory = join(root, "published");
+  const selection = { offset: 0, length: 8, sha256 };
+  const engine = {
+    name: "unblob" as const,
+    version: "26.6.4",
+    executable_path: "/fixture/unblob",
+    executable_sha256: sha256,
+    source_revision: null,
+    worker_count: 1 as const,
+  };
+  const observation = createFirmwareExtractionObservation({
+    outputDirectory,
+    maxDepth: 3,
+    normalized,
+    selection,
+    engine,
+  });
   await mkdir(workspacePath);
   const context = {
     files: new FirmwareFileAccess(),
     workspacePath,
     deadline,
-    outputDirectory: join(root, "published"),
+    outputDirectory,
     entries: [],
     normalized,
-    selection: { offset: 0, length: 8, sha256 },
+    observation,
+    selection,
     maxDepth: 3,
-    engine: {
-      name: "unblob",
-      version: "26.6.4",
-      executable_path: "/fixture/unblob",
-      executable_sha256: sha256,
-      source_revision: null,
-      worker_count: 1 as const,
-    },
+    engine,
     signal,
     retainCleanup: (
       _tree: SafeOutputTree,
@@ -846,6 +885,15 @@ it("waits through selected-range snapshot finalization when shutdown starts duri
       operation: "extract_firmware",
       input: {
         path,
+        provider_id: "unblob",
+        options: {
+          workers: 1,
+          randomness_depth: 0,
+          keep_extracted_chunks: false,
+          delete_extracted_files: { mode: "none" as const },
+          carve_suffix: "_extract",
+          extract_suffix: "_extract",
+        },
         output_directory: join(root, "unused"),
         max_depth: 3,
         max_output_bytes: 1024,
@@ -983,7 +1031,7 @@ it("shares one workspace cleanup attempt across concurrent shutdown callers", as
   providers.push(provider);
   const result = await provider.execute({
     operation: "inspect_firmware_regions",
-    input: { path },
+    input: { path, provider_id: "binwalk" },
   });
   if (result.ok) throw new Error("Expected retained workspace cleanup");
   blocked = false;

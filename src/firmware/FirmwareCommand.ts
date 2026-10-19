@@ -458,7 +458,6 @@ export const readFirmwareCommandReport = async (context: {
   signal?: AbortSignal;
   execution: Awaited<ReturnType<typeof runFirmwareCommand>>;
   files: FirmwareFileAccess;
-  signal?: AbortSignal;
 }): Promise<unknown> => {
   try {
     return await context.files.report(

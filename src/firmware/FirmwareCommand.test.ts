@@ -25,6 +25,7 @@ it("preserves a caller-selected executable invocation path separately from resol
   await mkdir(binDirectory, { recursive: true });
   const actual = await executableFixture(binDirectory, "actual-tool");
   const python = await executableFixture(binDirectory, "python3");
+  const files = new FirmwareFileAccess();
   const selected = join(binDirectory, "selected-entrypoint");
   await symlink("actual-tool", selected);
   const admitted = await resolveFirmwareCommand(
@@ -34,6 +35,7 @@ it("preserves a caller-selected executable invocation path separately from resol
     },
     "unblob",
     "inspect_firmware_regions",
+    files,
   );
   expect(admitted.command).toBe(selected);
   expect(admitted).toMatchObject({
@@ -42,6 +44,7 @@ it("preserves a caller-selected executable invocation path separately from resol
     sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
   });
   expect(python).toContain(runtimeRoot);
+  await files.close();
 });
 
 test("names the host and tool requirement of an unconfigured engine", async () => {
