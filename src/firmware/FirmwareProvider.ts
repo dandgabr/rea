@@ -271,7 +271,7 @@ const unblobGuestExecution = (
     transport: {
       command: transportCapture?.command ?? null,
       arguments: transportCapture?.arguments ?? null,
-      resource_limiter: transport.resource_limiter ?? null,
+      resource_limiter: transportCapture?.command ?? null,
       exit_code: transportExitCode ?? null,
       signal: transportSignal,
       stdout: transportStdout,
