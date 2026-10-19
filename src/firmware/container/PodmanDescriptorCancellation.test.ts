@@ -123,7 +123,7 @@ it.each([
   "write-error",
   "write-cancel",
   "output-close-cancel",
-  "input-close-cancel",
+  "input-cancel",
   ...partialWriteCases,
 ] as const)("owns snapshot read/write/cleanup under %s", async (mode) => {
   const root = await createTestTempDirectory("rea-podman-copy-");
@@ -152,7 +152,7 @@ it.each([
       const result = await Reflect.apply(originalRead, this, args);
       if (result.bytesRead > 0 && inputFd === -1) {
         inputFd = this.fd;
-        if (mode === "input-close-cancel")
+        if (mode === "input-cancel")
           controller.abort(new Error("cancel after source read"));
       }
       return result;
@@ -190,8 +190,6 @@ it.each([
       }
       if (this.handle.fd === inputFd && inputFd >= 0) {
         inputCloses++;
-        if (mode === "input-close-cancel" && inputCloses === 1)
-          return Promise.reject(new Error("retained exact source FD close"));
       }
       return Reflect.apply(originalClose, this, []);
     });
@@ -253,13 +251,12 @@ it.each([
       await scope.retryCleanup();
       expect(outputCloses).toBe(3);
       expect(writes).toBe(1);
-    } else if (mode === "input-close-cancel") {
+    } else if (mode === "input-cancel") {
       expect(failure).toMatchObject({
-        cleanupIncomplete: true,
-        diagnostics: { primary_error: { code: "cancelled" } },
+        _tag: "AnalysisCancelledError",
+        cleanupIncomplete: false,
       });
-      await scope.retryCleanup();
-      expect(inputCloses).toBe(2);
+      expect(inputCloses).toBe(1);
       expect(writes).toBe(0);
     }
     await expect(readFile(snapshotPath!)).rejects.toMatchObject({

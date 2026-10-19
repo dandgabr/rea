@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, expect, it, vi } from "vitest";
 import { ArtifactResourceScope } from "../../artifacts/ArtifactResourceScope.js";
+import { ArtifactReaderFailure } from "../../artifacts/ArtifactReader.js";
 import * as regularFile from "../../filesystem/RegularFile.js";
 import {
   decodePodmanProfileText,
@@ -83,14 +84,11 @@ it("preserves primary cancellation through actual FD close failure and retries o
     controller.signal,
     scope,
   ).catch((cause: unknown) => cause);
+  expect(failure).toBeInstanceOf(ArtifactReaderFailure);
   expect(failure).toMatchObject({
-    _tag: "ProviderAdapterError",
-    cleanupIncomplete: true,
-    resourceScope: scope,
-    diagnostics: {
-      primary_error: { code: "cancelled", category: "cancelled" },
-    },
+    cleanup: { resources: [path] },
   });
+  expect(scope.cleanupResources).toContain(path);
   expect(closes).toBe(1);
   await scope.retryCleanup();
   expect(closes).toBe(2);

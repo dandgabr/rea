@@ -11,6 +11,7 @@ import {
 import { launchPodmanDirectClient } from "./PodmanClientCleanup.js";
 import { z } from "zod";
 import type { ArtifactResourceScope } from "../../artifacts/ArtifactResourceScope.js";
+import { withArtifactRegularFile } from "../../artifacts/ArtifactFileOperation.js";
 import { AnalysisError } from "../../domain/analysisErrorBase.js";
 import { AnalysisCancelledError } from "../../domain/analysisErrorCore.js";
 import { ProviderAdapterError } from "../../domain/providerAdapterError.js";
@@ -19,10 +20,6 @@ import { projectAnalysisError } from "../../domain/analysisErrorProjection.js";
 import { sameRegularFileState } from "../../filesystem/RegularFile.js";
 import { OwnedFileHandle } from "../../filesystem/OwnedFileHandle.js";
 import { PrivateRuntimeRoot } from "../../process/PrivateRuntimeRoot.js";
-import {
-  FirmwareFileCleanupError,
-  withFirmwareFiles,
-} from "../FirmwareFiles.js";
 import {
   identifyPodmanProfileFile,
   observePodmanProfileFile,
@@ -106,16 +103,11 @@ export const observePodmanDatabase = async (
     signal.throwIfAborted();
     const path = selected.database.path;
     const snapshot = join(root.path, "db.sql");
-    const source = await withFirmwareFiles(
-      [path],
-      "firmware_container_runtime",
-      signal,
+    const source = await withArtifactRegularFile(
+      path,
       scope,
-      async ([handle]) => {
-        if (handle === undefined)
-          throw podmanProfileUnavailable(
-            "Missing admitted database descriptor",
-          );
+      signal,
+      async (handle) => {
         const before = await handle.stat({ bigint: true });
         if (
           (await realpath(path)) !== path ||
@@ -190,13 +182,22 @@ export const observePodmanDatabase = async (
         } finally {
           const closed = await scope.release(outputOwner);
           if (closed.kind === "failed")
-            throw new FirmwareFileCleanupError(
-              scope,
-              snapshot,
-              "firmware_container_runtime",
-              closed.cause,
-              copyFailure,
+            throw new ProviderCleanupError(
               "podman",
+              [snapshot],
+              {
+                reason: "Private database snapshot cleanup remains pending",
+                ...(copyFailure instanceof AnalysisError
+                  ? { primary_error: projectAnalysisError(copyFailure) }
+                  : {}),
+              },
+              {
+                operation: "firmware_container_runtime",
+                cause:
+                  copyFailure === undefined
+                    ? closed.cause
+                    : new AggregateError([copyFailure, closed.cause]),
+              },
             );
         }
         await noSidecars(path, signal);
@@ -220,7 +221,6 @@ export const observePodmanDatabase = async (
           sha256: hash.digest("hex"),
         } satisfies PodmanDescriptorIdentity;
       },
-      "podman",
     );
     await chmod(snapshot, 0o400);
     signal.throwIfAborted();
@@ -325,13 +325,14 @@ export const observePodmanDatabase = async (
         "Existing DBConfig roots differ from the complete selected SQLite profile",
       );
     signal.throwIfAborted();
-    observed = {
+    const databaseObservation = {
       source,
       configuration: config,
       semantics:
         "observed quiescent SQLite schema1 DBConfig; installed source attestation remains unknown" as const,
     };
-    return observed;
+    observed = databaseObservation;
+    return databaseObservation;
   } catch (cause: unknown) {
     if (cause instanceof ProviderAdapterError && !cause.cleanupIncomplete) {
       primary = podmanProfileUnavailable(

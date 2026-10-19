@@ -1,3 +1,4 @@
+import { ArtifactReaderFailure } from "../artifacts/ArtifactReader.js";
 import { randomUUID } from "node:crypto";
 import { access, realpath, stat } from "node:fs/promises";
 import { constants } from "node:fs";
@@ -8,12 +9,12 @@ import {
   AnalysisTimeoutError,
   AnalysisOutputError,
 } from "../domain/analysisErrorCore.js";
-import { ProviderAdapterError } from "../domain/providerAdapterError.js";
-import { ProviderCleanupError } from "../domain/providerCleanupError.js";
 import {
   AnalysisError,
   type AnalysisCapturedOutput,
 } from "../domain/analysisErrorBase.js";
+import { ProviderAdapterError } from "../domain/providerAdapterError.js";
+import { ProviderCleanupError } from "../domain/providerCleanupError.js";
 import { projectAnalysisError } from "../domain/analysisErrorProjection.js";
 import {
   spawnOwnedProviderProcess,
@@ -24,9 +25,8 @@ import {
 import { cleanupOwnedProcessGroup } from "../process/ProcessOwnership.js";
 import { FIRMWARE_LIMITS } from "./FirmwareRelease.js";
 import {
-  hashFirmwareFile,
+  FirmwareFileAccess,
   inventoryFirmwareOutput,
-  readFirmwareReport,
 } from "./FirmwareFiles.js";
 
 /** Injectable owned launcher for production protocol and lifecycle tests. */
@@ -49,6 +49,8 @@ export const resolveFirmwareCommand = async (
   environment: Readonly<Record<string, string | undefined>>,
   engine: "binwalk" | "unblob",
   operation: string,
+  files: FirmwareFileAccess,
+  signal?: AbortSignal,
 ) => {
   const variable =
     engine === "binwalk" ? "REA_BINWALK_COMMAND" : "REA_UNBLOB_COMMAND";
@@ -75,8 +77,9 @@ export const resolveFirmwareCommand = async (
     await access(command, constants.R_OK | constants.X_OK);
     if (!(await stat(command)).isFile())
       throw new TypeError("Configured path is not a regular file");
-    sha256 = await hashFirmwareFile(command);
+    sha256 = await files.hash(command, signal);
   } catch (cause: unknown) {
+    if (cause instanceof ArtifactReaderFailure) throw cause;
     throw firmwareToolUnavailable(
       engine,
       operation,
@@ -118,7 +121,7 @@ export const runFirmwareCommand = async (context: {
   launcher?: FirmwareLauncher;
   outputBudget?: { root: string; bytes: number; entries: number };
   acceptReportedExtractionFailure?: boolean;
-  /** Host OCI clients use CPU/core supervision; producer AS/file limits apply inside the namespace. */
+  /** Host OCI clients keep limits in the selected container, not the host client process. */
   limitProfile?: "producer" | "container-transport";
   retainCleanup(supervisor: ProviderProcessSupervisor): void;
 }) => {
@@ -185,7 +188,7 @@ export const runFirmwareCommand = async (context: {
       },
     },
   );
-  const capture = (): AnalysisCapturedOutput => {
+  const capturedOutput = (): AnalysisCapturedOutput => {
     const snapshot = supervisor.snapshot();
     return {
       stdout: snapshot.stdout.text,
@@ -220,7 +223,7 @@ export const runFirmwareCommand = async (context: {
         operation,
         `Tool diagnostics exceeded the ${FIRMWARE_LIMITS.diagnosticBytes}-byte capture budget`,
         {
-          capturedOutput: capture(),
+          capturedOutput: capturedOutput(),
         },
       );
     }
@@ -230,7 +233,8 @@ export const runFirmwareCommand = async (context: {
     const deadline = performance.now() + FIRMWARE_LIMITS.timeoutMs;
     while (!(await supervisor.waitForOutputClose(100))) {
       checkDiagnostics();
-      if (signal.aborted) throw new AnalysisCancelledError(operation);
+      if (signal.aborted)
+        throw new AnalysisCancelledError(operation, { cause: signal.reason });
       if (performance.now() >= deadline)
         throw new AnalysisTimeoutError(operation, FIRMWARE_LIMITS.timeoutMs);
       if (context.outputBudget !== undefined)
@@ -243,17 +247,16 @@ export const runFirmwareCommand = async (context: {
         );
     }
     checkDiagnostics();
-    if (signal.aborted) throw new AnalysisCancelledError(operation);
+    if (signal.aborted)
+      throw new AnalysisCancelledError(operation, { cause: signal.reason });
   } catch (cause: unknown) {
     failure = cause;
   }
   const stopped = await supervisor.stop();
   const snapshot = supervisor.snapshot();
-  const captured = capture();
-  if (failure instanceof AnalysisError) failure.retainCapturedOutput(captured);
   if (stopped.status === "incomplete") {
     context.retainCleanup(supervisor);
-    throw new ProviderCleanupError(engine, [runId, context.cwd], {
+    const error = new ProviderCleanupError(engine, [runId, context.cwd], {
       reason: stopped.reason,
       leader_pid: spawned.ownership.leaderPid,
       process_group_id: spawned.ownership.processGroupId,
@@ -263,13 +266,20 @@ export const runFirmwareCommand = async (context: {
       stderr: snapshot.stderr.text,
       stdout_bytes: snapshot.stdout.bytes,
       stderr_bytes: snapshot.stderr.bytes,
-      previous_error: failure instanceof Error ? failure.message : null,
-      primary_error:
-        failure instanceof AnalysisError ? projectAnalysisError(failure) : null,
-      captured_output: { ...captured, arguments: [...context.args] },
-    }).retainCapturedOutput(captured);
+      ...(failure instanceof AnalysisError
+        ? { primary_error: projectAnalysisError(failure) }
+        : {
+            previous_error: failure instanceof Error ? failure.message : null,
+          }),
+    });
+    error.retainCapturedOutput(capturedOutput());
+    throw error;
   }
-  if (failure !== undefined) throw failure;
+  if (failure !== undefined) {
+    if (failure instanceof AnalysisError)
+      failure.retainCapturedOutput(capturedOutput());
+    throw failure;
+  }
   if (
     snapshot.exitCode !== 0 &&
     !(
@@ -288,7 +298,7 @@ export const runFirmwareCommand = async (context: {
         stdout_bytes: snapshot.stdout.bytes,
         stderr_bytes: snapshot.stderr.bytes,
       },
-    }).retainCapturedOutput(captured);
+    }).retainCapturedOutput(capturedOutput());
   return {
     stdout: snapshot.stdout,
     stderr: snapshot.stderr,
@@ -297,7 +307,7 @@ export const runFirmwareCommand = async (context: {
     command: context.command,
     args: [...context.args],
     resource_limiter: context.limiter,
-    captured_output: captured,
+    captured_output: capturedOutput(),
   };
 };
 
@@ -307,10 +317,17 @@ export const readFirmwareCommandReport = async (context: {
   engine: string;
   operation: string;
   execution: Awaited<ReturnType<typeof runFirmwareCommand>>;
+  files: FirmwareFileAccess;
+  signal?: AbortSignal;
 }): Promise<unknown> => {
   try {
-    return await readFirmwareReport(context.path, context.operation);
+    return await context.files.report(
+      context.path,
+      context.operation,
+      context.signal,
+    );
   } catch (cause: unknown) {
+    if (cause instanceof ArtifactReaderFailure) throw cause;
     if (context.execution.exit_code === 1)
       throw new ProviderAdapterError(context.engine, context.operation, {
         cause,
