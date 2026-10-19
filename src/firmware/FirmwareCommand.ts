@@ -126,7 +126,8 @@ export const runFirmwareCommand = async (context: {
   retainCleanup(supervisor: ProviderProcessSupervisor): void;
 }) => {
   const { engine, operation, signal } = context;
-  signal.throwIfAborted();
+  if (signal.aborted)
+    throw new AnalysisCancelledError(operation, { cause: signal.reason });
   if (
     context.limitProfile === "container-transport" &&
     context.launcher === undefined
@@ -206,12 +207,8 @@ export const runFirmwareCommand = async (context: {
       ...(snapshot.stderr.sha256 === undefined
         ? {}
         : { stderr_sha256: snapshot.stderr.sha256 }),
-      ...(snapshot.stdout.utf8Valid === undefined
-        ? {}
-        : { stdout_utf8_valid: snapshot.stdout.utf8Valid }),
-      ...(snapshot.stderr.utf8Valid === undefined
-        ? {}
-        : { stderr_utf8_valid: snapshot.stderr.utf8Valid }),
+      stdout_utf8_valid: snapshot.stdout.invalidUtf8 !== true,
+      stderr_utf8_valid: snapshot.stderr.invalidUtf8 !== true,
       command: context.command,
       arguments: [...context.args],
       resource_limiter: context.limiter,

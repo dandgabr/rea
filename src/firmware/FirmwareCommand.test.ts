@@ -1,15 +1,45 @@
 import { chmod, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-import { expect, it as test } from "vitest";
+import { expect, it as test, vi } from "vitest";
 
 import { createTestTempDirectory } from "../../tests/fixtures/temporaryDirectory.js";
-import { AnalysisCapabilityUnavailableError } from "../domain/analysisErrorCore.js";
+import {
+  AnalysisCancelledError,
+  AnalysisCapabilityUnavailableError,
+} from "../domain/analysisErrorCore.js";
 import { projectAnalysisError } from "../domain/analysisErrorProjection.js";
 import { FirmwareFileAccess } from "./FirmwareFiles.js";
-import { resolveFirmwareCommand } from "./FirmwareCommand.js";
+import {
+  resolveFirmwareCommand,
+  runFirmwareCommand,
+} from "./FirmwareCommand.js";
 
 const it = test.skipIf(process.platform !== "linux");
+
+test("keeps pre-launch firmware cancellation in the tagged error algebra", async () => {
+  const controller = new AbortController();
+  const reason = new Error("caller stopped");
+  controller.abort(reason);
+  const launcher = vi.fn();
+
+  const failure: unknown = await runFirmwareCommand({
+    engine: "binwalk",
+    operation: "inspect_firmware_regions",
+    command: "/bin/true",
+    limiter: "/usr/bin/prlimit",
+    args: [],
+    cwd: "/tmp",
+    environment: {},
+    signal: controller.signal,
+    launcher,
+    retainCleanup: () => {},
+  }).catch((cause: unknown) => cause);
+
+  expect(failure).toBeInstanceOf(AnalysisCancelledError);
+  expect(failure).toMatchObject({ cause: reason });
+  expect(launcher).not.toHaveBeenCalled();
+});
 
 test("names the host and tool requirement of an unconfigured engine", async () => {
   const refusal: unknown = await resolveFirmwareCommand(

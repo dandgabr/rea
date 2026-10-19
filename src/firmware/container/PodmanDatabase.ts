@@ -279,7 +279,7 @@ export const observePodmanDatabase = async (
     });
     let config: z.output<typeof configurationSchema>;
     try {
-      if (result.stdout.utf8Valid !== true)
+      if (result.stdout.invalidUtf8 === true)
         throw Error("Snapshot parser output is not valid UTF-8");
       const parsed = z
         .strictObject({

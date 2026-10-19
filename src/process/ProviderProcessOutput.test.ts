@@ -317,6 +317,7 @@ it("scopes output checkpoints to raw bytes on one supervisor and epoch", () => {
       text: "\ufffda",
       bytes: 2,
       observedBytes: 2,
+      sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
       invalidUtf8: true,
     });
     expect(other.snapshotOutputSince(checkpoint).complete).toBe(false);
