@@ -40,21 +40,41 @@ import { ProviderAdapterError } from "./providerAdapterError.js";
 import { ProviderSelectionError } from "./providerSelectionError.js";
 import { UnknownRegistryError } from "./unknownRegistryError.js";
 import { providerRetryAction } from "./providerOperationHealth.js";
-import type { AnalysisError, AnalysisErrorTag } from "./analysisErrorBase.js";
+import {
+  resolvedAnalysisError,
+  type AnalysisError,
+  type AnalysisErrorTag,
+} from "./analysisErrorBase.js";
 
 /** Project expected failures into exhaustive, secret-safe caller fields. */
 export const projectAnalysisError = (
   error: AnalysisError,
 ): AnalysisErrorProjection => {
+  const composed = error;
+  error = resolvedAnalysisError(error);
+  let diagnosticSource = error;
+  while (
+    diagnosticSource.diagnostics === undefined &&
+    diagnosticSource.cleanupPrimary !== undefined
+  )
+    diagnosticSource = diagnosticSource.cleanupPrimary;
+  const diagnostics = diagnosticSource.diagnostics;
+  const capturedOutput = composed.capturedOutput ?? error.capturedOutput;
+  const partialObservation =
+    composed.partialObservation ?? error.partialObservation;
   assertKnownAnalysisErrorTag(error._tag);
   const underlyingCode = underlyingErrorCode(error);
   const code = error.cleanupIncomplete ? "cleanup_incomplete" : underlyingCode;
   const primaryDetails = errorDetails(error);
   const details = {
     ...primaryDetails,
-    ...(error.diagnostics === undefined
+    ...(composed === error || composed.cleanupReport === undefined
       ? {}
-      : { diagnostics: error.diagnostics }),
+      : { cleanup_report: jsonValueSchema.parse(composed.cleanupReport) }),
+    ...(diagnostics === undefined ? {} : { diagnostics }),
+    ...(composed === error || composed.diagnostics === undefined
+      ? {}
+      : { cleanup_history: composed.diagnostics }),
     ...(error.cleanupIncomplete
       ? {
           cleanup: "incomplete",
@@ -66,15 +86,19 @@ export const projectAnalysisError = (
             primaryDetails?.execution_failure ?? underlyingCode,
         }
       : {}),
-    ...(error.capturedOutput === undefined
-      ? {}
-      : { captured_output: { ...error.capturedOutput } }),
-    ...(error.partialObservation === undefined
+    ...(capturedOutput === undefined
       ? {}
       : {
-          partial_observation: isImmutableJsonSnapshot(error.partialObservation)
-            ? error.partialObservation
-            : jsonValueSchema.parse(error.partialObservation),
+          captured_output: {
+            ...capturedOutput,
+          },
+        }),
+    ...(partialObservation === undefined
+      ? {}
+      : {
+          partial_observation: isImmutableJsonSnapshot(partialObservation)
+            ? partialObservation
+            : jsonValueSchema.parse(partialObservation),
         }),
   };
   return {
@@ -87,7 +111,7 @@ export const projectAnalysisError = (
         error.retryable) ||
       (code === "resource_constraint" &&
         error instanceof AnalysisResourceConstraintError &&
-        error.resource === "capacity"),
+        (error.retryable ?? error.resource === "capacity")),
     remediation: {
       action: analysisErrorRemediationAction(error),
     },

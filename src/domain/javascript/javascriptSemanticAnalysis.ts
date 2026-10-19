@@ -1,3 +1,9 @@
+import {
+  createSemanticOpaqueGlobalObserver,
+  indexSemanticOpaqueEffects,
+  semanticOpaqueBindingEffects,
+  semanticBindingCanBeRebound,
+} from "./javascriptSemanticOpaqueEffects.js";
 import * as t from "@babel/types";
 
 import {
@@ -69,7 +75,10 @@ import {
   resolveSemanticModuleCallables,
 } from "./javascriptSemanticReturns.js";
 import { collectJavaScriptDerivedSemanticsSteps } from "./javascriptSemanticDerivedAnalysis.js";
-import { evaluateSemanticProvenance } from "./javascriptSemanticValues.js";
+import {
+  evaluateSemanticProvenance,
+  clearSemanticValueCaches,
+} from "./javascriptSemanticValues.js";
 import {
   collectJavaScriptIdentityWritesSteps,
   electronExportPath,
@@ -77,7 +86,10 @@ import {
   ELECTRON_MODULE,
 } from "./javascriptElectronMemberWrites.js";
 import { range } from "./javascriptStaticAnalysisHelpers.js";
-import { semanticCoverage } from "./javascriptSemanticCoverage.js";
+import {
+  semanticCoverage,
+  RETURNED_REFERENCE_WIDENING_LIMITATION,
+} from "./javascriptSemanticCoverage.js";
 import { semanticResourceLimitReason } from "./javascriptSemanticResourceLimits.js";
 import {
   parseJavaScriptSource,
@@ -161,7 +173,13 @@ function* indexSemanticAmbientWritesSteps(
   state: JavaScriptSemanticAnalysisState,
 ): Generator<void, void> {
   if (indexedAmbientWriteStates.has(state)) return;
-  yield* indexJavaScriptAmbientWritesSteps(state.program, state);
+  yield* indexJavaScriptAmbientWritesSteps(
+    state.program,
+    state,
+    createSemanticOpaqueGlobalObserver(state),
+  );
+  if (state.opaqueEffects.globalSites.length > 0)
+    clearSemanticValueCaches(state);
   indexedAmbientWriteStates.add(state);
 }
 
@@ -171,7 +189,12 @@ function* indexSemanticMemberMutationFactsSteps(
 ): Generator<void, void> {
   if (indexedMemberMutationStates.has(state)) return;
   yield* indexSemanticAmbientWritesSteps(state);
-  yield* collectSemanticMemberMutationsSteps(state.program, state);
+  yield* collectSemanticMemberMutationsSteps(
+    state.program,
+    state,
+    (site, reference, path) =>
+      referenceEffectsMayHaveChanged(state, site, reference, path),
+  );
   indexedMemberMutationStates.add(state);
 }
 
@@ -218,19 +241,49 @@ const visitSemanticReferenceEffectsAtSite = (
     });
   };
   if (binding !== undefined) {
+    if (semanticBindingCanBeRebound(binding))
+      for (const node of semanticOpaqueBindingEffects(binding, state))
+        if (!retain("binding-write", node)) return metadata;
+    for (const node of semanticOpaqueBindingEffects(
+      binding,
+      state,
+      "reference",
+    ))
+      if (!retain("escape", node, [])) return metadata;
     for (const node of state.bindingWrites.get(binding.bindingId) ?? [])
       if (!retain("binding-write", node)) return metadata;
-    if (indexedMemberMutationStates.has(state)) {
-      for (const effect of binding.memberWrites)
-        if (!retain("member-write", effect.node, effect.path)) return metadata;
-      for (const effect of binding.escapedPaths)
-        if (!retain("escape", effect.node, effect.path)) return metadata;
-    }
+    // The mutation producer also queries its growing facts during convergence.
+    // Completion stays explicit in metadata; callers cannot infer readiness.
+    for (const effect of binding.memberWrites)
+      if (!retain("member-write", effect.node, effect.path)) return metadata;
+    for (const effect of binding.escapedPaths)
+      if (!retain("escape", effect.node, effect.path)) return metadata;
   } else if (lookup.kind === "ambient" || lookup.kind === "uncertain-ambient") {
     for (const node of state.ambientBindingWrites.get(root.name) ?? [])
       if (!retain("ambient-write", node)) return metadata;
   }
   return metadata;
+};
+
+/** Query current producer facts; public consumers additionally require completion. */
+const referenceEffectsMayHaveChanged = (
+  state: JavaScriptSemanticAnalysisState,
+  site: t.Node,
+  referenceNode: t.Node,
+  propertyPath?: JavaScriptSemanticPropertyPath,
+): boolean => {
+  let changed = false;
+  const metadata = visitSemanticReferenceEffectsAtSite(
+    state,
+    site,
+    referenceNode,
+    (effect) => {
+      changed = effect.timing !== "after";
+      return !changed;
+    },
+    propertyPath,
+  );
+  return metadata.resolution !== "resolved" || changed;
 };
 
 /** Preserve the complete diagnostic contract for consumers needing every effect. */
@@ -345,6 +398,7 @@ export function* analyzeParsedJavaScriptSemanticsSteps(
     file.program,
     state,
     callables,
+    references,
     parserPartial,
   );
   return {
@@ -363,8 +417,12 @@ export function* analyzeParsedJavaScriptSemanticsSteps(
           ...state.getterResourceLimits,
         ]),
       ].sort(),
+      [...state.returnedReferenceWidenings].map(range),
     ),
     limitations: [
+      ...(state.returnedReferenceWidenings.size > 0
+        ? [RETURNED_REFERENCE_WIDENING_LIMITATION]
+        : []),
       ...[...state.getterResourceLimits]
         .sort()
         .map(semanticResourceLimitReason),
@@ -459,18 +517,12 @@ export function* indexJavaScriptBindingsWithReceiversSteps(
     },
     referenceMayHaveChangedAt(site, referenceNode, propertyPath) {
       if (!indexedMemberMutationStates.has(state)) return true;
-      let changed = false;
-      const metadata = visitSemanticReferenceEffectsAtSite(
+      return referenceEffectsMayHaveChanged(
         state,
         site,
         referenceNode,
-        (effect) => {
-          changed = effect.timing !== "after";
-          return !changed;
-        },
         propertyPath,
       );
-      return metadata.resolution !== "resolved" || changed;
     },
     *referencesSteps() {
       references ??= yield* collectSemanticReferencesSteps(program, state);
@@ -900,9 +952,18 @@ const createState = (
   };
   return {
     program,
+    opaqueEffects: {
+      mayReferenceGlobalEval: false,
+      sites: new WeakSet(),
+      sloppySites: new WeakSet(),
+      byScope: new Map(),
+      children: new Map(),
+      globalSites: [],
+    },
     staticImportResolutionMode,
     valueResourceLimits: new Set(),
     getterResourceLimits: new Set(),
+    returnedReferenceWidenings: new Set(),
     parentsByNode: new WeakMap(),
     scopes: [root],
     scopesById: new Map([[root.scopeId, root]]),
@@ -921,9 +982,18 @@ const createState = (
     requiredModuleEffects: new Map(),
     ambientBindingWrites: new Map(),
     ambientWrites: new SemanticPropertyPathCoverage(),
+    ambientEscapes: new SemanticPropertyPathCoverage(),
     ambientWriteEffects: [],
   };
 };
+
+const globalEvalRoots = new Set([
+  "eval",
+  "globalThis",
+  "global",
+  "window",
+  "self",
+]);
 
 function* collectDefinitionsSteps(
   program: t.Program,
@@ -937,6 +1007,10 @@ function* collectDefinitionsSteps(
     readonly node: t.Node;
     readonly scope: JavaScriptSemanticScopeState;
     readonly conditionallySkipped: boolean;
+  }[] = [];
+  const opaqueCandidates: {
+    node: t.CallExpression;
+    scopeId: string;
   }[] = [];
   let needsPrototypeFacts = false;
   const functionBodies: {
@@ -1015,6 +1089,17 @@ function* collectDefinitionsSteps(
         state,
       });
       bindInnerDeclaration(node, parent, scope, state);
+      // Every supported global eval origin starts with one of these decoded
+      // identifiers, including computed properties and destructured aliases.
+      if (t.isIdentifier(node) && globalEvalRoots.has(node.name))
+        state.opaqueEffects.mayReferenceGlobalEval = true;
+      if (
+        t.isCallExpression(node) &&
+        t.isIdentifier(unwrapJavaScriptExpression(node.callee).node, {
+          name: "eval",
+        })
+      )
+        opaqueCandidates.push({ node, scopeId: scope.scopeId });
       if (
         t.isVariableDeclarator(node) &&
         node.init != null &&
@@ -1063,6 +1148,8 @@ function* collectDefinitionsSteps(
         if (t.isIdentifier(identifier))
           copyParameterToBody({ identifier, body, scope, state });
   }
+  indexSemanticOpaqueEffects(opaqueCandidates, state);
+  if (state.opaqueEffects.byScope.size > 0) clearSemanticValueCaches(state);
 }
 
 type PrototypeOwner = "Object" | "Array" | "String";

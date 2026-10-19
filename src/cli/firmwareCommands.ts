@@ -127,7 +127,6 @@ export const registerFirmwareCommands = (
             ? selectedInput.provider_id
             : "unblob",
           operation,
-          undefined,
           signal,
         );
       }),

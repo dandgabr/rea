@@ -1,27 +1,20 @@
+import { AnalysisCleanupLease } from "../artifacts/AnalysisCleanupLease.js";
+import { AnalysisError } from "../domain/analysisErrorBase.js";
+import { analysisErrorWithCleanupFailure } from "../domain/analysisErrorCleanup.js";
+import { firmwareFailure } from "./FirmwareFailures.js";
 import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
-import type { ArtifactResourceScope } from "../artifacts/ArtifactResourceScope.js";
 import { join } from "node:path";
 import type { z } from "zod";
 import { SafeOutputTree } from "../artifacts/SafeOutputTree.js";
 import { SafeOutputTreeCreationFailure } from "../artifacts/SafeOutputTreeCreationFailure.js";
-import { AnalysisOutputError } from "../domain/analysisErrorCore.js";
+import {
+  AnalysisOutputError,
+  AnalysisCancelledError,
+} from "../domain/analysisErrorCore.js";
 import { ProviderCleanupError } from "../domain/providerCleanupError.js";
 import { jsonValueSchema } from "../domain/jsonValue.js";
-import {
-  firmwareResultSchemas,
-  type FirmwarePartialObservation,
-} from "../domain/firmware/firmwareAnalysis.js";
-import { analysisErrorWithCleanupFailure } from "../domain/analysisErrorCleanup.js";
-import { AnalysisError } from "../domain/analysisErrorBase.js";
-import { ProviderAdapterError } from "../domain/providerAdapterError.js";
-import { createFirmwareExtractionObservation } from "./FirmwareExtractionObservation.js";
-import {
-  hashFirmwareFile,
-  withFirmwareFile,
-  type FirmwareEntry,
-  type UnpublishedFirmwareEntry,
-} from "./FirmwareFiles.js";
+import { firmwareResultSchemas } from "../domain/firmware/firmwareAnalysis.js";
+import type { FirmwareFileAccess, FirmwareEntry } from "./FirmwareFiles.js";
 import type { normalizeUnblobReport } from "./FirmwareReports.js";
 import type { extractionGap } from "../domain/firmware/firmwareAnalysis.js";
 
@@ -94,21 +87,23 @@ const gapSortKey = (gap: ExtractionGap): string =>
 
 /** Publish verified regular files, preserving links as metadata and rolling back failed writes. */
 export const publishFirmwareExtraction = async (context: {
+  files: FirmwareFileAccess;
+  workspacePath: string;
+  deadline: AbortSignal;
   outputDirectory: string;
   entries: readonly FirmwareEntry[];
-  additionalUnpublished?: readonly UnpublishedFirmwareEntry[];
   normalized: ReturnType<typeof normalizeUnblobReport>;
   selection: { offset: number; length: number; sha256: string };
   /** Caller-selected extraction depth, for boundary-aware continuations. */
   maxDepth: number;
   engine: z.infer<typeof firmwareResultSchemas.extract_firmware>["engine"];
   signal: AbortSignal;
-  scope?: ArtifactResourceScope;
-  observation?: FirmwarePartialObservation;
-  retainCleanup: (tree: SafeOutputTree) => void;
+  retainCleanup: (
+    tree: SafeOutputTree,
+    lease: AnalysisCleanupLease,
+    failure: AnalysisError,
+  ) => void;
 }) => {
-  const observation =
-    context.observation ?? createFirmwareExtractionObservation(context);
   let tree: SafeOutputTree | undefined;
   let result:
     | z.infer<typeof firmwareResultSchemas.extract_firmware>
@@ -120,22 +115,14 @@ export const publishFirmwareExtraction = async (context: {
         .map((entry) => `$output/${entry.relativePath}`),
     );
     for (const path of context.normalized.files.keys()) {
-      if (
-        path !== "$input" &&
-        !materialized.has(path) &&
-        !context.normalized.deleted_files.some((entry) => entry.path === path)
-      )
+      if (path !== "$input" && !materialized.has(path))
         throw new AnalysisOutputError(
           "extract_firmware",
           `Reported regular file is absent from materialized output: ${path}`,
         );
     }
     const files = [];
-    const unpublished = (context.additionalUnpublished ?? []).map((entry) => ({
-      relative_path: entry.relativePath,
-      kind: entry.kind,
-      link_target: entry.linkTarget,
-    }));
+    const unpublished = [];
     tree = await SafeOutputTree.create(context.outputDirectory);
     for (const entry of context.entries) {
       if (entry.kind !== "file") {
@@ -148,12 +135,7 @@ export const publishFirmwareExtraction = async (context: {
       }
       const logicalPath = `$output/${entry.relativePath}`;
       const reported = context.normalized.files.get(logicalPath);
-      const sha256 = await hashFirmwareFile(
-        entry.path,
-        context.signal,
-        context.scope,
-        "extract_firmware",
-      );
+      const sha256 = await context.files.hash(entry.path, context.signal);
       if (
         (reported?.sha256 !== null &&
           reported?.sha256 !== undefined &&
@@ -165,20 +147,7 @@ export const publishFirmwareExtraction = async (context: {
           "extract_firmware",
           `Extracted bytes disagree with provider report: ${entry.relativePath}`,
         );
-      const ownedTree = tree;
-      await withFirmwareFile(
-        entry.path,
-        "extract_firmware",
-        context.signal,
-        context.scope,
-        (handle) =>
-          ownedTree.write(
-            entry.relativePath,
-            handle.createReadStream({ autoClose: false }),
-            { sha256, bytes: entry.size },
-            context.signal,
-          ),
-      );
+      await context.files.publish(entry, sha256, tree, context.signal);
       files.push({
         relative_path: entry.relativePath,
         path: join(tree.outputRoot, entry.relativePath),
@@ -209,34 +178,43 @@ export const publishFirmwareExtraction = async (context: {
         context.normalized,
         context.maxDepth,
       ),
-      tasks: context.normalized.tasks,
-      randomness: context.normalized.randomness,
-      multifiles: context.normalized.multifiles,
-      deleted_files: context.normalized.deleted_files,
       published_bytes: files.reduce((sum, file) => sum + file.size, 0),
     });
-    context.signal.throwIfAborted();
+    if (context.signal.aborted)
+      throw new AnalysisCancelledError("extract_firmware", {
+        cause: context.signal.reason,
+      });
     await tree.commit(context.signal);
     return result;
   } catch (cause: unknown) {
     if (cause instanceof SafeOutputTreeCreationFailure) tree = cause.tree;
+    const ownedTree = tree;
+    const treeLease =
+      ownedTree === undefined
+        ? undefined
+        : new AnalysisCleanupLease(async () => {
+            await ownedTree.rollback();
+          });
+    const primary = firmwareFailure(
+      cause,
+      "unblob",
+      "extract_firmware",
+      context.deadline,
+      treeLease,
+    );
     try {
-      await tree?.rollback();
+      await treeLease?.release();
     } catch (cleanupCause: unknown) {
-      if (tree !== undefined) context.retainCleanup(tree);
       const publishedResult =
         tree?.published === true && result !== undefined
           ? {
               kind: "firmware" as const,
               result: jsonValueSchema.parse(result),
-              ...(observation.provenance === undefined
-                ? {}
-                : { provenance: observation.provenance }),
             }
-          : observation;
+          : undefined;
       const cleanup = new ProviderCleanupError(
         "unblob",
-        [context.outputDirectory],
+        [context.outputDirectory, context.workspacePath],
         {
           reason:
             cleanupCause instanceof Error
@@ -248,27 +226,23 @@ export const publishFirmwareExtraction = async (context: {
         {
           cause: cleanupCause,
           operation: "extract_firmware",
-          partialObservation: publishedResult,
+          ...(publishedResult === undefined
+            ? {}
+            : { partialObservation: publishedResult }),
         },
       );
-      if (cause instanceof AnalysisError && cause.cleanupIncomplete)
-        throw analysisErrorWithCleanupFailure(
-          cause.retainPartialObservation(publishedResult),
-          cleanup,
-          "extract_firmware",
-        );
-      throw cleanup;
+      if (tree !== undefined && treeLease !== undefined)
+        context.retainCleanup(tree, treeLease, cleanup);
+      if (publishedResult !== undefined)
+        primary.retainPartialObservation(publishedResult);
+      throw analysisErrorWithCleanupFailure(
+        primary,
+        cleanup,
+        "extract_firmware",
+      ).bindCleanupDependencies([primary, cleanup]);
     }
     if (tree?.published === true && result !== undefined) return result;
-    if (cause instanceof AnalysisError)
-      throw cause.retainPartialObservation(observation);
-    throw new ProviderAdapterError(context.engine.name, "extract_firmware", {
-      cause,
-      partialObservation: observation,
-      diagnostics: {
-        reason: cause instanceof Error ? cause.message : String(cause),
-      },
-    });
+    throw primary;
   }
 };
 

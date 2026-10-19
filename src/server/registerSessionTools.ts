@@ -1,5 +1,6 @@
 import type { EvidenceMcpServer } from "./EvidenceMcpServer.js";
 import type { ArtifactResourceScope } from "../artifacts/ArtifactResourceScope.js";
+import { workflowUnknownInput } from "../application/investigation/WorkflowUnknown.js";
 
 import {
   getNavigationContext,
@@ -14,7 +15,7 @@ import { ProcessCaptureError } from "../process/capture/ProcessCaptureError.js";
 import { toolContract } from "../contracts/toolContracts.js";
 import { binaryTargetSummary } from "../application/binary/BinaryTargetSummary.js";
 import { UnknownRegistryError } from "../domain/unknownRegistryError.js";
-import type { AnalysisError } from "../domain/analysisErrorBase.js";
+import { AnalysisError } from "../domain/analysisErrorBase.js";
 import type { Evidence } from "../domain/evidence.js";
 import type { ProcessCapture } from "../domain/process/processCaptureParsing.js";
 import { err, ok, type Result } from "../domain/result.js";
@@ -48,12 +49,10 @@ const recordProcessResidualUnknowns = (
   residuals: ProcessCapture["residual_unknowns"],
 ): Result<null, AnalysisError> => {
   for (const residual of residuals) {
-    const unknown = session.recordUnknown({
+    const input = workflowUnknownInput(evidence.evidence_id, {
       question: `Was ${residual.scope} behavior fully observed during capture?`,
       severity: "medium",
       domain: `process-${residual.scope}`,
-      supporting_evidence_ids: [evidence.evidence_id],
-      contradicting_evidence_ids: [],
       required_authority: "controlled-replay",
       required_confidence: "observed",
       required_environment: evidence.environment,
@@ -66,6 +65,8 @@ const recordProcessResidualUnknowns = (
       ],
       relationships: [],
     });
+    if (!input.ok) return input;
+    const unknown = session.recordUnknown(input.value);
     if (
       !unknown.ok &&
       !(
@@ -308,13 +309,17 @@ export const registerSessionTools = (
           await processResources.retryCleanup();
           return ok(null);
         } catch (cause: unknown) {
+          if (cause instanceof AnalysisError) return err(cause);
           return err(
             new ProcessCaptureError(
               "process capture cleanup remains incomplete",
               {
                 cause,
                 reason: "cleanup_incomplete",
-                cleanupResources: ["process_capture_resources"],
+                cleanup: {
+                  reason: "process capture cleanup remains incomplete",
+                  resources: ["process_capture_resources"],
+                },
                 executionFailure:
                   cause instanceof Error
                     ? cause.message || cause.name

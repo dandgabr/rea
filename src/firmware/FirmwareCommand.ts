@@ -1,4 +1,4 @@
-import type { ArtifactResourceScope } from "../artifacts/ArtifactResourceScope.js";
+import { ArtifactReaderFailure } from "../artifacts/ArtifactReader.js";
 import {
   AnalysisError,
   type AnalysisCapturedOutput,
@@ -30,9 +30,8 @@ import {
   type UnblobSystemdProfile,
 } from "./UnblobSystemd.js";
 import {
-  hashFirmwareFile,
+  FirmwareFileAccess,
   inventoryFirmwareOutput,
-  readFirmwareReport,
 } from "./FirmwareFiles.js";
 
 /** Injectable owned launcher for production protocol and lifecycle tests. */
@@ -81,8 +80,8 @@ export const resolveFirmwareCommand = async (
   environment: Readonly<Record<string, string | undefined>>,
   engine: "binwalk" | "unblob",
   operation: string,
+  files: FirmwareFileAccess,
   signal?: AbortSignal,
-  scope?: ArtifactResourceScope,
 ) => {
   signal?.throwIfAborted();
   const variable =
@@ -115,10 +114,14 @@ export const resolveFirmwareCommand = async (
     signal?.throwIfAborted();
     if (!identity.isFile())
       throw new TypeError("Configured path is not a regular file");
-    sha256 = await hashFirmwareFile(command, signal, scope, operation);
+    sha256 = await files.hash(command, signal);
     signal?.throwIfAborted();
   } catch (cause: unknown) {
-    if (cause instanceof AnalysisError && cause.cleanupIncomplete) throw cause;
+    if (
+      cause instanceof ArtifactReaderFailure ||
+      (cause instanceof AnalysisError && cause.cleanupIncomplete)
+    )
+      throw cause;
     signal?.throwIfAborted();
     throw firmwareToolUnavailable(
       engine,
@@ -211,7 +214,8 @@ export const runFirmwareCommand = async (context: {
   retainCleanup(supervisor: ProviderProcessSupervisor): void;
 }): Promise<FirmwareCommandResult> => {
   const { engine, operation, signal } = context;
-  signal.throwIfAborted();
+  if (signal.aborted)
+    throw new AnalysisCancelledError(operation, { cause: signal.reason });
   const runId = `rea-firmware-${randomUUID()}`;
   const launchOptions: OwnedProviderProcessSpawnOptions = {
     command: context.limiter,
@@ -352,7 +356,8 @@ export const runFirmwareCommand = async (context: {
     while (!(await supervisor.waitForOutputClose(100))) {
       if (stdoutFailure !== undefined) throw stdoutFailure;
       checkDiagnostics();
-      if (signal.aborted) throw new AnalysisCancelledError(operation);
+      if (signal.aborted)
+        throw new AnalysisCancelledError(operation, { cause: signal.reason });
       if (performance.now() >= deadline)
         throw new AnalysisTimeoutError(operation, FIRMWARE_LIMITS.timeoutMs);
       if (context.outputBudget !== undefined)
@@ -367,7 +372,8 @@ export const runFirmwareCommand = async (context: {
     await stdoutResultPromise;
     if (stdoutFailure !== undefined) throw stdoutFailure;
     checkDiagnostics();
-    if (signal.aborted) throw new AnalysisCancelledError(operation);
+    if (signal.aborted)
+      throw new AnalysisCancelledError(operation, { cause: signal.reason });
   } catch (cause: unknown) {
     failure = cause;
   }
@@ -450,18 +456,22 @@ export const readFirmwareCommandReport = async (context: {
   engine: string;
   operation: string;
   signal?: AbortSignal;
-  scope?: ArtifactResourceScope;
   execution: Awaited<ReturnType<typeof runFirmwareCommand>>;
+  files: FirmwareFileAccess;
+  signal?: AbortSignal;
 }): Promise<unknown> => {
   try {
-    return await readFirmwareReport(
+    return await context.files.report(
       context.path,
       context.operation,
       context.signal,
-      context.scope,
     );
   } catch (cause: unknown) {
-    if (cause instanceof AnalysisError && cause.cleanupIncomplete) throw cause;
+    if (
+      cause instanceof ArtifactReaderFailure ||
+      (cause instanceof AnalysisError && cause.cleanupIncomplete)
+    )
+      throw cause;
     context.signal?.throwIfAborted();
     if (context.execution.exit_code === 1)
       throw new ProviderAdapterError(context.engine, context.operation, {

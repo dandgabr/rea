@@ -290,14 +290,15 @@ tree semantics, vulnerability scanning, emulation or hardware runtime capture.
 ## Resource and lifecycle policy
 
 - Nonempty regular firmware inputs: at most **128 MiB**, copied and hashed into
-  a private workspace before analysis. No in-place source modification.
-- One outstanding heavy operation per provider instance in total. Concurrent
-  admission fails busy; there is no additional waiter. Binwalk uses one thread;
-  Unblob `options.workers` / CLI `--workers` accepts a positive integer,
-  defaults to 1 and appears as the selected `engine.worker_count`. Resource
-  limits can prevent large worker selections from completing.
-- **120-second** deadline. Binwalk uses `prlimit` address-space, CPU and file
-  limits. Unblob runs in an exact transient systemd unit with 1 GiB aggregate
+  a private workspace before analysis. Growth beyond that allowance during
+  copying receives the same typed input refusal as an already oversized file.
+  Supply a stable copy within the allowance. No in-place source modification.
+- One queued heavy operation per provider instance. Binwalk uses one thread;
+  Unblob's caller-selected `options.workers` is reported in `engine.worker_count`.
+  No automatic parallel extraction engines.
+- **120-second** deadline. Binwalk uses per-process `prlimit` address-space,
+  CPU and file limits; its staging budgets are polled and can transiently
+  overshoot. Unblob runs in an exact transient systemd unit with 1 GiB aggregate
   `MemoryMax`, zero swap, at most 128 tasks, one CPU quota, 120 seconds,
   64 MiB `LimitFSIZE`, private network/devices, and `/tmp` tmpfs limited to
   64 MiB and 512 inodes. The in-unit gate verifies effective cgroup-v2 and

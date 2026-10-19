@@ -14,6 +14,7 @@ import {
 import { FirmwareAnalysisService } from "../../../src/application/firmware/FirmwareAnalysisService.js";
 import { FirmwareProvider } from "../../../src/firmware/FirmwareProvider.js";
 import { projectAnalysisError } from "../../../src/domain/analysisErrorProjection.js";
+import { AnalysisError } from "../../../src/domain/analysisErrorBase.js";
 import { ProviderCleanupError } from "../../../src/domain/providerCleanupError.js";
 import { AnalysisOutputError } from "../../../src/domain/analysisErrorCore.js";
 import { FirmwareFileCleanupError } from "../../../src/firmware/FirmwareFiles.js";
@@ -474,6 +475,7 @@ it.skip("blocked: Unblob setup-failed publication cleanup retry", async () => {
   const fixture = await firmwareFixture();
   const createTree = SafeOutputTree.create.bind(SafeOutputTree);
   let cleanupAttempts = 0;
+  let retained: AnalysisError | undefined;
   const create = vi
     .spyOn(SafeOutputTree, "create")
     .mockImplementationOnce(async (outputRoot, platform) => {
@@ -500,6 +502,7 @@ it.skip("blocked: Unblob setup-failed publication cleanup retry", async () => {
       ok: false,
       error: {
         cleanupIncomplete: true,
+        cleanupResources: expect.arrayContaining([fixture.output]),
         partialObservation: {
           kind: "firmware",
           result: {
@@ -519,12 +522,19 @@ it.skip("blocked: Unblob setup-failed publication cleanup retry", async () => {
         },
       },
     });
+    if (result.ok) throw new Error("Expected retained publication cleanup");
+    retained = result.error;
+    expect(projectAnalysisError(retained).code).toBe("cleanup_incomplete");
+    expect(JSON.stringify(projectAnalysisError(retained))).toContain(
+      "injected post-acquisition setup failure",
+    );
     await expect(access(fixture.output)).resolves.toBeUndefined();
   } finally {
     create.mockRestore();
   }
   await fixture.close();
   expect(cleanupAttempts).toBe(2);
+  expect(retained?.cleanupIncomplete).toBe(false);
   await expect(access(fixture.output)).rejects.toMatchObject({
     code: "ENOENT",
   });
@@ -555,6 +565,7 @@ it.skip("blocked: Unblob output after transient directory close failure", async 
 
 it.skip("blocked: Unblob result when output cleanup stays uncertain", async () => {
   const fixture = await firmwareFixture();
+  let retained: AnalysisError | undefined;
   const closeFailure = injectPublishedDirectoryCloseFailure(true);
   try {
     const result = await fixture.service.execute("extract_firmware", {
@@ -581,7 +592,8 @@ it.skip("blocked: Unblob result when output cleanup stays uncertain", async () =
       },
     });
     if (result.ok) throw new Error("Expected unresolved descriptor cleanup");
-    expect(result.error).toBeInstanceOf(ProviderCleanupError);
+    expect(result.error).toBeInstanceOf(AnalysisError);
+    retained = result.error;
     expect(projectAnalysisError(result.error)).toMatchObject({
       code: "cleanup_incomplete",
       details: {
@@ -599,6 +611,7 @@ it.skip("blocked: Unblob result when output cleanup stays uncertain", async () =
     closeFailure.restore();
   }
   await fixture.close();
+  expect(retained?.cleanupIncomplete).toBe(false);
   expect(await readFile(`${fixture.output}/rootfs/config`, "utf8")).toBe(
     "firmware=true\n",
   );
