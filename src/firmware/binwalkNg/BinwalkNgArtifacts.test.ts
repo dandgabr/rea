@@ -7,6 +7,7 @@ import { createTestTempDirectory } from "../../../tests/fixtures/temporaryDirect
 import { ArtifactResourceScope } from "../../artifacts/ArtifactResourceScope.js";
 import { SafeOutputTree } from "../../artifacts/SafeOutputTree.js";
 import { OwnedFileHandle } from "../../filesystem/OwnedFileHandle.js";
+import { FirmwareFileAccess } from "../FirmwareFiles.js";
 import {
   inspectBinwalkNgPng,
   publishBinwalkNgFiles,
@@ -100,8 +101,9 @@ it("retains failed descriptor owners and closes all comparison handles before re
         },
       }),
     ).rejects.toMatchObject({
-      cleanupIncomplete: true,
-      cleanupResources: [inputPath],
+      name: "ArtifactReaderFailure",
+      cleanup: { resources: [path] },
+      cleanupLease: expect.any(Object),
     });
     expect(observed).toEqual([
       expect.objectContaining({
@@ -145,6 +147,8 @@ it("preserves durably published files when commit reports a later cleanup failur
       ],
       signal: new AbortController().signal,
       operation: "carve_firmware",
+      scope: new ArtifactResourceScope(),
+      files: new FirmwareFileAccess(),
       ownTree: (tree) => {
         owned = tree;
       },
@@ -193,6 +197,8 @@ it.each(["symlink" as const, "special" as const])(
         ],
         signal: new AbortController().signal,
         operation: "extract_firmware",
+        scope: new ArtifactResourceScope(),
+        files: new FirmwareFileAccess(),
         ownTree: (tree) => {
           owned = tree;
         },
@@ -241,8 +247,9 @@ it("delivers established private PNG facts to their observation owner before a d
         (png) => observed.push(png),
       ),
     ).rejects.toMatchObject({
-      cleanupIncomplete: true,
-      cleanupResources: [path],
+      name: "ArtifactReaderFailure",
+      cleanup: { resources: [path] },
+      cleanupLease: expect.any(Object),
     });
     expect(observed).toEqual([
       expect.objectContaining({

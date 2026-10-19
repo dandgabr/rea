@@ -21,6 +21,7 @@ import { writeFile as writeProtocolFixture } from "node:fs/promises";
 import { createHash as hashProtocol } from "node:crypto";
 import { SafeOutputTree } from "../artifacts/SafeOutputTree.js";
 import { consumeBinwalkNgTransfer } from "./binwalkNg/BinwalkNgTransfer.js";
+import { FirmwareFileAccess } from "./FirmwareFiles.js";
 
 const it = test.skipIf(process.platform !== "linux");
 
@@ -310,6 +311,7 @@ test("names the host and tool requirement of an unconfigured engine", async () =
     {},
     "binwalk",
     "inspect_firmware_regions",
+    new FirmwareFileAccess(),
   ).catch((cause: unknown) => cause);
 
   expect(refusal).toMatchObject({
@@ -330,20 +332,26 @@ it("rejects a directory configured as the firmware engine executable", async () 
   const command = join(root, "binwalk");
   const limiter = await executableFixture(root, "prlimit");
   await mkdir(command);
+  const files = new FirmwareFileAccess();
 
-  await expect(
-    resolveFirmwareCommand(
-      {
-        REA_BINWALK_COMMAND: command,
-        REA_FIRMWARE_PRLIMIT_COMMAND: limiter,
-      },
-      "binwalk",
-      "inspect_firmware_regions",
-    ),
-  ).rejects.toMatchObject({
-    _tag: "AnalysisCapabilityUnavailableError",
-    reason: expect.stringContaining(command),
-  });
+  try {
+    await expect(
+      resolveFirmwareCommand(
+        {
+          REA_BINWALK_COMMAND: command,
+          REA_FIRMWARE_PRLIMIT_COMMAND: limiter,
+        },
+        "binwalk",
+        "inspect_firmware_regions",
+        files,
+      ),
+    ).rejects.toMatchObject({
+      _tag: "AnalysisCapabilityUnavailableError",
+      reason: expect.stringContaining(command),
+    });
+  } finally {
+    await files.close();
+  }
 });
 
 it("classifies an unusable firmware engine as an unavailable capability", async () => {
@@ -351,20 +359,26 @@ it("classifies an unusable firmware engine as an unavailable capability", async 
   const command = join(root, "binwalk");
   const limiter = await executableFixture(root, "prlimit");
   await writeFile(command, "not executable", { mode: 0o600 });
+  const files = new FirmwareFileAccess();
 
-  await expect(
-    resolveFirmwareCommand(
-      {
-        REA_BINWALK_COMMAND: command,
-        REA_FIRMWARE_PRLIMIT_COMMAND: limiter,
-      },
-      "binwalk",
-      "inspect_firmware_regions",
-    ),
-  ).rejects.toMatchObject({
-    _tag: "AnalysisCapabilityUnavailableError",
-    reason: expect.stringContaining(command),
-  });
+  try {
+    await expect(
+      resolveFirmwareCommand(
+        {
+          REA_BINWALK_COMMAND: command,
+          REA_FIRMWARE_PRLIMIT_COMMAND: limiter,
+        },
+        "binwalk",
+        "inspect_firmware_regions",
+        files,
+      ),
+    ).rejects.toMatchObject({
+      _tag: "AnalysisCapabilityUnavailableError",
+      reason: expect.stringContaining(command),
+    });
+  } finally {
+    await files.close();
+  }
 });
 
 it("rejects a directory configured as the resource limiter executable", async () => {
@@ -372,20 +386,26 @@ it("rejects a directory configured as the resource limiter executable", async ()
   const command = await executableFixture(root, "binwalk");
   const limiter = join(root, "prlimit");
   await mkdir(limiter);
+  const files = new FirmwareFileAccess();
 
-  await expect(
-    resolveFirmwareCommand(
-      {
-        REA_BINWALK_COMMAND: command,
-        REA_FIRMWARE_PRLIMIT_COMMAND: limiter,
-      },
-      "binwalk",
-      "inspect_firmware_regions",
-    ),
-  ).rejects.toMatchObject({
-    _tag: "AnalysisCapabilityUnavailableError",
-    reason: expect.stringContaining(limiter),
-  });
+  try {
+    await expect(
+      resolveFirmwareCommand(
+        {
+          REA_BINWALK_COMMAND: command,
+          REA_FIRMWARE_PRLIMIT_COMMAND: limiter,
+        },
+        "binwalk",
+        "inspect_firmware_regions",
+        files,
+      ),
+    ).rejects.toMatchObject({
+      _tag: "AnalysisCapabilityUnavailableError",
+      reason: expect.stringContaining(limiter),
+    });
+  } finally {
+    await files.close();
+  }
 });
 
 const executableFixture = async (root: string, name: string) => {

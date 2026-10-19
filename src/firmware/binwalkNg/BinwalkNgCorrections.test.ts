@@ -18,6 +18,18 @@ import { binwalkNgInputSchemas } from "../../domain/firmware/binwalkNgAnalysis.j
 import { spawnOwnedProviderProcess } from "../../process/ProviderProcess.js";
 import { BinwalkNgProvider } from "./BinwalkNgProvider.js";
 import { prepareBinwalkNgSandbox } from "./BinwalkNgSandbox.js";
+import { FirmwareFileAccess } from "../FirmwareFiles.js";
+
+const prepareWithFileOwner = async (
+  input: Omit<Parameters<typeof prepareBinwalkNgSandbox>[0], "files">,
+) => {
+  const files = new FirmwareFileAccess();
+  try {
+    return await prepareBinwalkNgSandbox({ ...input, files });
+  } finally {
+    await files.close();
+  }
+};
 interface TestFile {
   relative_path: string;
   path: string;
@@ -493,7 +505,7 @@ it("rejects cancellation before runtime fingerprinting while a fresh positive re
   const scope = new ArtifactResourceScope();
   try {
     await expect(
-      prepareBinwalkNgSandbox({
+      prepareWithFileOwner({
         ...runtime,
         inputPath: path,
         workRoot,
@@ -506,7 +518,7 @@ it("rejects cancellation before runtime fingerprinting while a fresh positive re
   } finally {
     await scope.close();
   }
-  const positive = await prepareBinwalkNgSandbox({
+  const positive = await prepareWithFileOwner({
     ...runtime,
     inputPath: path,
     workRoot,

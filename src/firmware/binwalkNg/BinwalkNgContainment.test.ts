@@ -9,6 +9,18 @@ import { expect, it } from "vitest";
 import { createTestTempDirectory } from "../../../tests/fixtures/temporaryDirectory.js";
 import { prepareBinwalkNgSandbox } from "./BinwalkNgSandbox.js";
 import { runBinwalkNgCommand } from "./BinwalkNgCommand.js";
+import { FirmwareFileAccess } from "../FirmwareFiles.js";
+
+const prepareWithFileOwner = async (
+  input: Omit<Parameters<typeof prepareBinwalkNgSandbox>[0], "files">,
+) => {
+  const files = new FirmwareFileAccess();
+  try {
+    return await prepareBinwalkNgSandbox({ ...input, files });
+  } finally {
+    await files.close();
+  }
+};
 
 const bubblewrap = process.env.REA_TEST_BWRAP_COMMAND ?? "/usr/bin/bwrap";
 const limiter = process.env.REA_TEST_PRLIMIT_COMMAND ?? "/usr/bin/prlimit";
@@ -80,7 +92,7 @@ it.runIf(
     const address = server.address();
     if (address === null || typeof address === "string")
       throw new Error("Expected a loopback port");
-    const sandbox = await prepareBinwalkNgSandbox({
+    const sandbox = await prepareWithFileOwner({
       command,
       bubblewrap,
       limiter,

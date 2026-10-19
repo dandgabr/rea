@@ -4,6 +4,18 @@ import { join } from "node:path";
 import { expect, it } from "vitest";
 import { createTestTempDirectory } from "../../../tests/fixtures/temporaryDirectory.js";
 import { prepareBinwalkNgSandbox } from "./BinwalkNgSandbox.js";
+import { FirmwareFileAccess } from "../FirmwareFiles.js";
+
+const prepareWithFileOwner = async (
+  input: Omit<Parameters<typeof prepareBinwalkNgSandbox>[0], "files">,
+) => {
+  const files = new FirmwareFileAccess();
+  try {
+    return await prepareBinwalkNgSandbox({ ...input, files });
+  } finally {
+    await files.close();
+  }
+};
 
 const prepare = async (mounts: unknown[] = [], helpers: unknown[] = []) => {
   const root = await createTestTempDirectory("rea-ng-policy-");
@@ -22,7 +34,7 @@ const prepare = async (mounts: unknown[] = [], helpers: unknown[] = []) => {
     work,
     manifest,
     sandbox: () =>
-      prepareBinwalkNgSandbox({
+      prepareWithFileOwner({
         command: "/usr/bin/true",
         bubblewrap: "/usr/bin/true",
         limiter: "/usr/bin/true",
@@ -268,7 +280,7 @@ it("requires explicit absolute bubblewrap, provider and manifest paths", async (
     { manifest: "runtime.json" },
   ]) {
     await expect(
-      prepareBinwalkNgSandbox({
+      prepareWithFileOwner({
         command: "/usr/bin/true",
         bubblewrap: "/usr/bin/true",
         limiter: "/usr/bin/true",

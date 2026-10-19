@@ -2,7 +2,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { createHash } from "node:crypto";
 import { expect, it } from "vitest";
-import { snapshotFirmware } from "../FirmwareFiles.js";
+import { FirmwareFileAccess } from "../FirmwareFiles.js";
 import { createTestTempDirectory } from "../../../tests/fixtures/temporaryDirectory.js";
 
 it("preserves selected basename, root identity and entropy/scan byte ranges in immutable snapshots", async () => {
@@ -10,7 +10,8 @@ it("preserves selected basename, root identity and entropy/scan byte ranges in i
   const path = join(root, "vendor.FW");
   const bytes = Buffer.from("padding!GZIPdata-tail");
   await writeFile(path, bytes);
-  const target = await snapshotFirmware(
+  const files = new FirmwareFileAccess();
+  const target = await files.snapshot(
     {
       operation: "inspect_firmware_entropy",
       input: { path, range: { offset: 8, length: 8 } },
@@ -29,4 +30,5 @@ it("preserves selected basename, root identity and entropy/scan byte ranges in i
     createHash("sha256").update(bytes).digest("hex"),
   );
   expect(await readFile(path)).toEqual(bytes);
+  await files.close();
 });

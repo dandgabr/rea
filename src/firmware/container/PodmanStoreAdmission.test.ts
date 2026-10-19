@@ -489,8 +489,8 @@ it("prepares exact owned transport selectors/environment/auth, validates the act
           join(transport.root_path, "hooks"),
         ),
       ).toThrow(/selector/i);
-    expect(result.captured_output.stdout_sha256).toBe(
-      digest("podman version 5.8.7\n"),
+    expect(result.captured_output.stdout_bytes).toBe(
+      Buffer.byteLength("podman version 5.8.7\n"),
     );
     expect(result.captured_output.stdout_utf8_valid).toBe(true);
     const changedInvocation = injectMissingStorageOption(

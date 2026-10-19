@@ -2,16 +2,15 @@ import { constants } from "node:fs";
 import { open, realpath, type FileHandle } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { ArtifactResourceScope } from "../../artifacts/ArtifactResourceScope.js";
+import { withArtifactRegularFile } from "../../artifacts/ArtifactFileOperation.js";
 import { OwnedFileHandle } from "../../filesystem/OwnedFileHandle.js";
 import { sameRegularFileState } from "../../filesystem/RegularFile.js";
 import { readBoundedFileBytes } from "../../process/BoundedFileBytes.js";
 import { firmwareToolUnavailable } from "../FirmwareCommand.js";
 import { AnalysisCancelledError } from "../../domain/analysisErrorCore.js";
 import { AnalysisError } from "../../domain/analysisErrorBase.js";
-import {
-  FirmwareFileCleanupError,
-  withFirmwareFiles,
-} from "../FirmwareFiles.js";
+import { projectAnalysisError } from "../../domain/analysisErrorProjection.js";
+import { ProviderCleanupError } from "../../domain/providerCleanupError.js";
 import type { PodmanDescriptorIdentity } from "./PodmanStoreProfile.js";
 
 export const podmanProfileUnavailable = (reason: string) =>
@@ -30,47 +29,38 @@ export const observePodmanProfileFile = (
     bytes: Buffer;
   }) => void,
 ) =>
-  withFirmwareFiles(
-    [path],
-    "firmware_container_runtime",
-    signal,
-    scope,
-    async ([handle]) => {
-      if (handle === undefined)
-        throw podmanProfileUnavailable("Missing admitted profile descriptor");
-      const before = await handle.stat({ bigint: true });
-      if ((await realpath(path)) !== path)
-        throw podmanProfileUnavailable(
-          `Profile descriptor path must be canonical without symlink parents: ${path}`,
-        );
-      if (before.size > BigInt(maximumBytes))
-        throw podmanProfileUnavailable(
-          `Selected profile descriptor exceeds its ${maximumBytes}-byte admission budget: ${path}`,
-        );
-      const bytes = await readBoundedFileBytes(handle, maximumBytes, signal);
-      if (
-        bytes === undefined ||
-        !sameRegularFileState(before, await handle.stat({ bigint: true }))
-      )
-        throw podmanProfileUnavailable(
-          `Selected profile descriptor changed during bounded admission: ${path}`,
-        );
-      const identity: PodmanDescriptorIdentity = {
-        path,
-        device: before.dev.toString(),
-        inode: before.ino.toString(),
-        uid: Number(before.uid),
-        gid: Number(before.gid),
-        mode: podmanPermissionMode(before.mode),
-        size: bytes.length,
-        sha256: createHash("sha256").update(bytes).digest("hex"),
-      };
-      const observation = { identity, bytes };
-      retainObservation?.(observation);
-      return observation;
-    },
-    "podman",
-  );
+  withArtifactRegularFile(path, scope, signal, async (handle) => {
+    const before = await handle.stat({ bigint: true });
+    if ((await realpath(path)) !== path)
+      throw podmanProfileUnavailable(
+        `Profile descriptor path must be canonical without symlink parents: ${path}`,
+      );
+    if (before.size > BigInt(maximumBytes))
+      throw podmanProfileUnavailable(
+        `Selected profile descriptor exceeds its ${maximumBytes}-byte admission budget: ${path}`,
+      );
+    const bytes = await readBoundedFileBytes(handle, maximumBytes, signal);
+    if (
+      bytes === undefined ||
+      !sameRegularFileState(before, await handle.stat({ bigint: true }))
+    )
+      throw podmanProfileUnavailable(
+        `Selected profile descriptor changed during bounded admission: ${path}`,
+      );
+    const identity: PodmanDescriptorIdentity = {
+      path,
+      device: before.dev.toString(),
+      inode: before.ino.toString(),
+      uid: Number(before.uid),
+      gid: Number(before.gid),
+      mode: podmanPermissionMode(before.mode),
+      size: bytes.length,
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+    };
+    const observation = { identity, bytes };
+    retainObservation?.(observation);
+    return observation;
+  });
 
 /** A directory FD is admitted without allowing a FIFO, symlink or missing-root initialization. */
 export const observePodmanProfileDirectory = async (
@@ -129,13 +119,22 @@ export const observePodmanProfileDirectory = async (
   } finally {
     const released = await scope.release(owner);
     if (released.kind === "failed")
-      throw new FirmwareFileCleanupError(
-        scope,
-        path,
-        "firmware_container_runtime",
-        released.cause,
-        primary,
+      throw new ProviderCleanupError(
         "podman",
+        [path],
+        {
+          reason: "Selected profile directory cleanup remains pending",
+          ...(primary instanceof AnalysisError
+            ? { primary_error: projectAnalysisError(primary) }
+            : {}),
+        },
+        {
+          operation: "firmware_container_runtime",
+          cause:
+            primary === undefined
+              ? released.cause
+              : new AggregateError([primary, released.cause]),
+        },
       );
   }
 };
@@ -146,54 +145,45 @@ export const identifyPodmanProfileFile = (
   signal: AbortSignal,
   scope: ArtifactResourceScope,
 ) =>
-  withFirmwareFiles(
-    [path],
-    "firmware_container_runtime",
-    signal,
-    scope,
-    async ([handle]) => {
-      if (handle === undefined)
-        throw podmanProfileUnavailable("Missing admitted identity descriptor");
-      const before = await handle.stat({ bigint: true });
-      if (
-        (await realpath(path)) !== path ||
-        before.size > BigInt(Number.MAX_SAFE_INTEGER)
-      )
-        throw podmanProfileUnavailable(
-          `Identity descriptor is not a canonical bounded regular file: ${path}`,
-        );
-      const hash = createHash("sha256");
-      let size = 0;
-      const buffer = Buffer.allocUnsafe(64 * 1024);
-      for (;;) {
-        signal.throwIfAborted();
-        const { bytesRead } = await handle.read(buffer, 0, buffer.length, null);
-        signal.throwIfAborted();
-        if (bytesRead === 0) break;
-        hash.update(buffer.subarray(0, bytesRead));
-        size += bytesRead;
-      }
+  withArtifactRegularFile(path, scope, signal, async (handle) => {
+    const before = await handle.stat({ bigint: true });
+    if (
+      (await realpath(path)) !== path ||
+      before.size > BigInt(Number.MAX_SAFE_INTEGER)
+    )
+      throw podmanProfileUnavailable(
+        `Identity descriptor is not a canonical bounded regular file: ${path}`,
+      );
+    const hash = createHash("sha256");
+    let size = 0;
+    const buffer = Buffer.allocUnsafe(64 * 1024);
+    for (;;) {
       signal.throwIfAborted();
-      if (
-        size !== Number(before.size) ||
-        !sameRegularFileState(before, await handle.stat({ bigint: true }))
-      )
-        throw podmanProfileUnavailable(
-          `Identity descriptor changed during admission: ${path}`,
-        );
-      return {
-        path,
-        device: before.dev.toString(),
-        inode: before.ino.toString(),
-        uid: Number(before.uid),
-        gid: Number(before.gid),
-        mode: podmanPermissionMode(before.mode),
-        size,
-        sha256: hash.digest("hex"),
-      };
-    },
-    "podman",
-  );
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, null);
+      signal.throwIfAborted();
+      if (bytesRead === 0) break;
+      hash.update(buffer.subarray(0, bytesRead));
+      size += bytesRead;
+    }
+    signal.throwIfAborted();
+    if (
+      size !== Number(before.size) ||
+      !sameRegularFileState(before, await handle.stat({ bigint: true }))
+    )
+      throw podmanProfileUnavailable(
+        `Identity descriptor changed during admission: ${path}`,
+      );
+    return {
+      path,
+      device: before.dev.toString(),
+      inode: before.ino.toString(),
+      uid: Number(before.uid),
+      gid: Number(before.gid),
+      mode: podmanPermissionMode(before.mode),
+      size,
+      sha256: hash.digest("hex"),
+    };
+  });
 
 /** Encoding is validated once at the descriptor owner; intentional U+FFFD remains valid. */
 export const decodePodmanProfileText = (bytes: Uint8Array): string => {

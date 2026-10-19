@@ -32,7 +32,7 @@ import {
   firmwareToolUnavailable,
   type FirmwareLauncher,
 } from "../FirmwareCommand.js";
-import { snapshotFirmware } from "../FirmwareFiles.js";
+import { FirmwareFileAccess } from "../FirmwareFiles.js";
 import { BINWALK_NG_RELEASE, FIRMWARE_LIMITS } from "../FirmwareRelease.js";
 import { runBinwalkNgWorkflow } from "./BinwalkNgWorkflow.js";
 import { requireBinwalkNgTmpfs } from "./BinwalkNgSystemdBoundary.js";
@@ -40,6 +40,7 @@ import { requireBinwalkNgTmpfs } from "./BinwalkNgSystemdBoundary.js";
 interface OwnedWorkflow {
   root: PrivateRuntimeRoot;
   scope: ArtifactResourceScope;
+  files: FirmwareFileAccess;
   operation: string;
   supervisor?: ProviderProcessSupervisor;
   tree?: SafeOutputTree;
@@ -135,6 +136,7 @@ export class BinwalkNgProvider {
         if (stopped?.status === "incomplete") throw new Error(stopped.reason);
         delete owner.supervisor;
         await owner.scope.retryCleanup();
+        await owner.files.close();
         await owner.tree?.rollback();
         delete owner.tree;
         await owner.root.close();
@@ -204,6 +206,7 @@ export class BinwalkNgProvider {
       owner = {
         root,
         scope: new ArtifactResourceScope(),
+        files: new FirmwareFileAccess(),
         operation: request.operation,
       };
       this.#owned.add(owner);
@@ -215,21 +218,39 @@ export class BinwalkNgProvider {
         runtime,
         signal,
         scope: owner.scope,
+        files: owner.files,
         retainCleanup: (supervisor: ProviderProcessSupervisor) => {
           owned.supervisor = supervisor;
         },
         ...(this.launcher === undefined ? {} : { launcher: this.launcher }),
       };
-      let target: Awaited<ReturnType<typeof snapshotFirmware>> | undefined;
+      let target:
+        | Awaited<ReturnType<FirmwareFileAccess["snapshot"]>>
+        | undefined;
       const produced =
         request.operation === "inspect_firmware_provider"
           ? await inspectBinwalkNgRuntime(common)
           : await (async () => {
-              target = await snapshotFirmware(
-                request,
+              if (!("path" in request.input))
+                throw firmwareToolUnavailable(
+                  "binwalk-ng",
+                  request.operation,
+                  "Firmware input path is unavailable",
+                );
+              target = await owner.files.snapshot(
+                {
+                  operation: request.operation,
+                  input: {
+                    path: request.input.path,
+                    ...(request.operation === "extract_firmware" &&
+                    "range" in request.input &&
+                    request.input.range !== undefined
+                      ? { range: request.input.range }
+                      : {}),
+                  },
+                },
                 root.path,
                 signal,
-                owner.scope,
               );
               return runBinwalkNgWorkflow({
                 ...common,

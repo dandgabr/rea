@@ -17,6 +17,18 @@ import {
   spawnOwnedProviderProcess,
   type OwnedProviderProcessSpawnOptions,
 } from "../../process/ProviderProcess.js";
+import { FirmwareFileAccess } from "../FirmwareFiles.js";
+
+const prepareWithFileOwner = async (
+  input: Omit<Parameters<typeof prepareBinwalkNgSandbox>[0], "files">,
+) => {
+  const files = new FirmwareFileAccess();
+  try {
+    return await prepareBinwalkNgSandbox({ ...input, files });
+  } finally {
+    await files.close();
+  }
+};
 
 it("accepts absent/growing private reports within budget and rejects actual overflow before parsing", async () => {
   const root = await createTestTempDirectory("rea-ng-growth-");
@@ -49,7 +61,7 @@ it("probes the exact selected policy and preserves owned-run identity after clea
     manifest,
     JSON.stringify({ profile: "binwalk-ng-4.0.0", mounts: [] }),
   );
-  const sandbox = await prepareBinwalkNgSandbox({
+  const sandbox = await prepareWithFileOwner({
     command: "/usr/bin/true",
     bubblewrap: "/usr/bin/true",
     limiter: "/usr/bin/prlimit",
@@ -97,7 +109,7 @@ it("fails named unavailable after a denied sandbox probe without an unconfined r
     manifest,
     JSON.stringify({ profile: "binwalk-ng-4.0.0", mounts: [] }),
   );
-  const sandbox = await prepareBinwalkNgSandbox({
+  const sandbox = await prepareWithFileOwner({
     command: "/usr/bin/true",
     bubblewrap: "/usr/bin/false",
     limiter: "/usr/bin/prlimit",
@@ -156,7 +168,7 @@ it("runs an admitted helper by its exact sandbox path under an aggregate workspa
       ],
     }),
   );
-  const sandbox = await prepareBinwalkNgSandbox({
+  const sandbox = await prepareWithFileOwner({
     command: "/usr/bin/true",
     bubblewrap: "/usr/bin/true",
     limiter: "/usr/bin/prlimit",

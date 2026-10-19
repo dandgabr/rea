@@ -7,6 +7,8 @@ import {
 } from "../application/AnalysisProvider.js";
 import {
   firmwareResultSchemas,
+  isBinwalkNgRequest,
+  type LegacyFirmwareRequest,
   type FirmwareRequest,
   type FirmwarePartialObservation,
 } from "../domain/firmware/firmwareAnalysis.js";
@@ -143,6 +145,14 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
     request: FirmwareRequest,
     options?: ExecutionOptions,
   ): Promise<Outcome> {
+    if (isBinwalkNgRequest(request))
+      return err(
+        firmwareToolUnavailable(
+          "firmware",
+          request.operation,
+          "Select the Binwalk-NG provider for this operation",
+        ),
+      );
     if (this.#closed) return err(new AnalysisCancelledError(request.operation));
     const predecessor = this.#tail;
     let release = () => {};
@@ -296,7 +306,7 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
   }
 
   async #execute(
-    request: FirmwareRequest,
+    request: LegacyFirmwareRequest,
     options?: ExecutionOptions,
   ): Promise<Outcome> {
     let root: PrivateRuntimeRoot | undefined;

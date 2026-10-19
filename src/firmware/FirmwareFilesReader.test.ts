@@ -2,9 +2,8 @@ import { createHash } from "node:crypto";
 import { open, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, it, vi } from "vitest";
-import { ArtifactResourceScope } from "../artifacts/ArtifactResourceScope.js";
 import { OwnedFileHandle } from "../filesystem/OwnedFileHandle.js";
-import { hashFirmwareFile } from "./FirmwareFiles.js";
+import { FirmwareFileAccess } from "./FirmwareFiles.js";
 import { createTestTempDirectory } from "../../tests/fixtures/temporaryDirectory.js";
 
 it.each([false, true])(
@@ -18,7 +17,7 @@ it.each([false, true])(
     const prototype = Object.getPrototypeOf(sample) as typeof sample;
     await sample.close();
     const controller = new AbortController();
-    const scope = new ArtifactResourceScope();
+    const files = new FirmwareFileAccess();
     const read = prototype.read;
     let actualReads = 0;
     const readSpy = vi
@@ -59,36 +58,44 @@ it.each([false, true])(
         return Reflect.apply(close, this, []);
       });
     try {
-      const failure = await hashFirmwareFile(
-        path,
-        controller.signal,
-        scope,
-      ).catch((cause: unknown) => cause);
+      const failure = await files
+        .hash(path, controller.signal)
+        .catch((cause: unknown) => cause);
       expect(controller.signal.aborted).toBe(true);
       expect(streamSpy).not.toHaveBeenCalled();
       expect(actualReads).toBe(1);
       expect(closedFds[0]).toBeGreaterThanOrEqual(0);
       if (failedClose) {
         expect(failure).toMatchObject({
-          cleanupIncomplete: true,
-          cleanupResources: [path],
-          diagnostics: { primary_error: { code: "cancelled" } },
+          name: "ArtifactReaderFailure",
+          reason: "cancelled",
+          cleanup: { resources: [path] },
+          cleanupLease: expect.any(Object),
         });
-        await scope.retryCleanup();
+        await files.retryCleanup();
         expect(closedFds).toHaveLength(2);
         expect(closedFds[1]).toBe(closedFds[0]);
       } else {
-        expect(failure).toBe(controller.signal.reason);
+        expect(failure).toMatchObject({
+          name: "ArtifactReaderFailure",
+          reason: "cancelled",
+          cancellation: { reason: controller.signal.reason },
+        });
         expect(closedFds).toHaveLength(1);
       }
     } finally {
       readSpy.mockRestore();
       streamSpy.mockRestore();
       closeSpy.mockRestore();
-      await scope.close();
+      await files.close();
     }
-    expect(await hashFirmwareFile(path)).toBe(
-      createHash("sha256").update(bytes).digest("hex"),
-    );
+    const verification = new FirmwareFileAccess();
+    try {
+      expect(await verification.hash(path)).toBe(
+        createHash("sha256").update(bytes).digest("hex"),
+      );
+    } finally {
+      await verification.close();
+    }
   },
 );

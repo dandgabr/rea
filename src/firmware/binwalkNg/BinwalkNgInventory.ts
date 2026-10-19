@@ -13,7 +13,7 @@ import {
   probeBinwalkNgSandbox,
   runBinwalkNgCommand,
 } from "./BinwalkNgCommand.js";
-import { hashFirmwareFile } from "../FirmwareFiles.js";
+import type { FirmwareFileAccess } from "../FirmwareFiles.js";
 
 /** Parse the pinned --list presentation without inventing fields hidden by pipe/color output. */
 export const parseBinwalkNgInventory = (text: string) => {
@@ -205,6 +205,7 @@ export const inspectBinwalkNgRuntime = async (context: {
   };
   signal: AbortSignal;
   scope: ArtifactResourceScope;
+  files: FirmwareFileAccess;
   launcher?: FirmwareLauncher;
   retainCleanup(supervisor: ProviderProcessSupervisor): void;
 }) => {
@@ -222,6 +223,7 @@ export const inspectBinwalkNgRuntime = async (context: {
     workRoot,
     signal: context.signal,
     scope: context.scope,
+    files: context.files,
     operation: "inspect_firmware_provider",
   });
   const commandContext = {
@@ -257,12 +259,7 @@ export const inspectBinwalkNgRuntime = async (context: {
       })),
     ])
       if (
-        (await hashFirmwareFile(
-          file.path,
-          context.signal,
-          context.scope,
-          "inspect_firmware_provider",
-        )) !== file.sha256
+        (await context.files.hash(file.path, context.signal)) !== file.sha256
       ) {
         identity = "changed";
         throw new AnalysisOutputError(

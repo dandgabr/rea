@@ -7,9 +7,10 @@ import { jsonValueValidationIssue } from "../../domain/jsonValue.js";
 import { freezeJsonSnapshot } from "../../domain/immutableJson.js";
 import { AnalysisError } from "../../domain/analysisErrorBase.js";
 import { AnalysisCancelledError } from "../../domain/analysisErrorCore.js";
+import { projectAnalysisError } from "../../domain/analysisErrorProjection.js";
+import { ProviderCleanupError } from "../../domain/providerCleanupError.js";
 import type { ArtifactResourceScope } from "../../artifacts/ArtifactResourceScope.js";
 import { OwnedFileHandle } from "../../filesystem/OwnedFileHandle.js";
-import { FirmwareFileCleanupError } from "../FirmwareFiles.js";
 import { parseLinuxProcessStartTime } from "../../process/ProcessOwnershipObservation.js";
 import type { PodmanContainerIdentity } from "./OwnedPodmanContainer.js";
 import {
@@ -481,13 +482,22 @@ export const observePodmanNamespaceEntry = async (
   } finally {
     const released = await scope.release(owner);
     if (released.kind === "failed")
-      throw new FirmwareFileCleanupError(
-        scope,
-        path,
-        "firmware_container_runtime",
-        released.cause,
-        primary,
+      throw new ProviderCleanupError(
         "podman",
+        [path],
+        {
+          reason: "Namespace entry descriptor cleanup remains pending",
+          ...(primary instanceof AnalysisError
+            ? { primary_error: projectAnalysisError(primary) }
+            : {}),
+        },
+        {
+          operation: "firmware_container_runtime",
+          cause:
+            primary === undefined
+              ? released.cause
+              : new AggregateError([primary, released.cause]),
+        },
       );
   }
 };

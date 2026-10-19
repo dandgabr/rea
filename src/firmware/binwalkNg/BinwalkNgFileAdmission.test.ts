@@ -6,12 +6,7 @@ import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { expect, it, vi } from "vitest";
 import { createTestTempDirectory } from "../../../tests/fixtures/temporaryDirectory.js";
-import {
-  hashFirmwareFile,
-  readFirmwareReport,
-  snapshotFirmware,
-} from "../FirmwareFiles.js";
-import { ArtifactResourceScope } from "../../artifacts/ArtifactResourceScope.js";
+import { FirmwareFileAccess } from "../FirmwareFiles.js";
 import { OwnedFileHandle } from "../../filesystem/OwnedFileHandle.js";
 it.each(["hash", "snapshot", "report", "png", "carving"])(
   "rejects a writer-free FIFO without blocking descriptor admission: %s",
@@ -69,7 +64,7 @@ it("retains every generic descriptor close failure for caller-owned scope retry"
   const path = join(root, "input.json");
   await writeFile(path, '{"ok":true}');
   for (const mode of ["hash", "snapshot", "report"]) {
-    const scope = new ArtifactResourceScope();
+    const files = new FirmwareFileAccess();
     const close = vi
       .spyOn(OwnedFileHandle.prototype, "close")
       .mockRejectedValueOnce(new Error("injected descriptor close"));
@@ -79,54 +74,53 @@ it("retains every generic descriptor close failure for caller-owned scope retry"
       const signal = new AbortController().signal;
       const work =
         mode === "hash"
-          ? hashFirmwareFile(path, signal, scope, "inspect_firmware_regions")
+          ? files.hash(path, signal)
           : mode === "snapshot"
-            ? snapshotFirmware(
+            ? files.snapshot(
                 { operation: "inspect_firmware_regions", input: { path } },
                 stage,
                 signal,
-                scope,
               )
-            : readFirmwareReport(
-                path,
-                "inspect_firmware_regions",
-                signal,
-                scope,
-              );
+            : files.report(path, "inspect_firmware_regions", signal);
       await expect(work).rejects.toMatchObject({
-        cleanupIncomplete: true,
-        cleanupResources: [path],
+        name: "ArtifactReaderFailure",
+        cleanup: { resources: [path] },
+        cleanupLease: expect.any(Object),
       });
       expect(close).toHaveBeenCalledTimes(1);
-      await scope.retryCleanup();
+      await files.retryCleanup();
       expect(close).toHaveBeenCalledTimes(2);
     } finally {
       close.mockRestore();
-      await scope.close();
+      await files.close();
     }
   }
 });
 
 it("retains a descriptor whose authoritative admission and close both fail", async () => {
   const root = await createTestTempDirectory("rea-ng-admission-close-");
-  const scope = new ArtifactResourceScope();
+  const files = new FirmwareFileAccess();
   const close = vi
     .spyOn(OwnedFileHandle.prototype, "close")
     .mockRejectedValueOnce(new Error("admission close failure"))
     .mockRejectedValueOnce(new Error("retained close failure"));
   try {
-    await expect(
-      hashFirmwareFile(root, undefined, scope, "inspect_firmware_regions"),
-    ).rejects.toMatchObject({
-      cleanupIncomplete: true,
-      cleanupResources: [root],
+    await expect(files.hash(root)).rejects.toMatchObject({
+      name: "ArtifactReaderFailure",
+      cleanup: { resources: [root] },
+      cleanupLease: expect.any(Object),
+    });
+    expect(close).toHaveBeenCalledTimes(1);
+    await expect(files.retryCleanup()).rejects.toMatchObject({
+      name: "ArtifactReaderFailure",
+      cleanup: { resources: [root] },
     });
     expect(close).toHaveBeenCalledTimes(2);
-    await scope.retryCleanup();
+    await files.retryCleanup();
     expect(close).toHaveBeenCalledTimes(3);
   } finally {
     close.mockRestore();
-    await scope.close();
+    await files.close();
   }
 });
 it("legacy firmware owns and retries a generic fingerprint descriptor after cleanup failure", async () => {
@@ -164,26 +158,23 @@ it("keeps report validation as the primary failure when its descriptor close als
   const root = await createTestTempDirectory("rea-ng-report-close-");
   const path = join(root, "report.json");
   await writeFile(path, "{broken");
-  const scope = new ArtifactResourceScope();
+  const files = new FirmwareFileAccess();
   const close = vi
     .spyOn(OwnedFileHandle.prototype, "close")
     .mockRejectedValueOnce(new Error("report close failure"));
   try {
     await expect(
-      readFirmwareReport(path, "inspect_firmware_regions", undefined, scope),
+      files.report(path, "inspect_firmware_regions"),
     ).rejects.toMatchObject({
-      cleanupIncomplete: true,
-      diagnostics: {
-        primary_error: {
-          code: "unreadable_output",
-          details: { reason: expect.stringContaining("valid complete JSON") },
-        },
-      },
+      name: "ArtifactReaderFailure",
+      reason: "io",
+      cleanup: { resources: [path] },
+      fileCleanupFailure: expect.objectContaining({ path }),
     });
-    await scope.retryCleanup();
+    await files.retryCleanup();
     expect(close).toHaveBeenCalledTimes(2);
   } finally {
     close.mockRestore();
-    await scope.close();
+    await files.close();
   }
 });

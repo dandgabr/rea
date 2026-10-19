@@ -22,9 +22,6 @@ vi.mock("./BinwalkNgCommand.js", () => ({
     exitCode: 0,
   }),
 }));
-vi.mock("../FirmwareFiles.js", () => ({
-  hashFirmwareFile: async () => (state.drift ? "b".repeat(64) : "a".repeat(64)),
-}));
 import { inspectBinwalkNgRuntime } from "./BinwalkNgInventory.js";
 it("retains independently observed inventory and native raw output on selected runtime drift", async () => {
   state.drift = true;
@@ -49,6 +46,9 @@ it("retains independently observed inventory and native raw output on selected r
       },
       signal: new AbortController().signal,
       scope: new ArtifactResourceScope(),
+      files: {
+        hash: async () => (state.drift ? "b".repeat(64) : "a".repeat(64)),
+      } as never,
       retainCleanup: () => {},
     });
     throw Error("Expected identity drift");
@@ -89,6 +89,9 @@ it("retains successful native version/list observations when inventory totals ar
       },
       signal: new AbortController().signal,
       scope: new ArtifactResourceScope(),
+      files: {
+        hash: async () => (state.drift ? "b".repeat(64) : "a".repeat(64)),
+      } as never,
       retainCleanup: () => {},
     });
     throw Error("Expected malformed totals");

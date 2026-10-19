@@ -9,7 +9,6 @@ import {
   AnalysisInputError,
   AnalysisOutputError,
 } from "../domain/analysisErrorCore.js";
-import type { FirmwareRequest } from "../domain/firmware/firmwareAnalysis.js";
 import { absoluteCallerPath } from "../filesystem/callerPath.js";
 import { readBoundedFileBytes } from "../process/BoundedFileBytes.js";
 import { FIRMWARE_LIMITS } from "./FirmwareRelease.js";
@@ -79,11 +78,33 @@ export class FirmwareFileAccess {
   }
 
   /** Copy and identify the exact bytes consumed by firmware providers. */
-  snapshot(request: FirmwareRequest, root: string, signal: AbortSignal) {
+  snapshot(
+    request: {
+      operation: string;
+      input: {
+        path: string;
+        range?: { offset: number; length: number } | undefined;
+        [key: string]: unknown;
+      };
+    },
+    root: string,
+    signal: AbortSignal,
+  ) {
     return this.#resources.run(() => this.#snapshot(request, root, signal));
   }
 
-  async #snapshot(request: FirmwareRequest, root: string, signal: AbortSignal) {
+  async #snapshot(
+    request: {
+      operation: string;
+      input: {
+        path: string;
+        range?: { offset: number; length: number } | undefined;
+        [key: string]: unknown;
+      };
+    },
+    root: string,
+    signal: AbortSignal,
+  ) {
     const sourcePath = absoluteCallerPath(request.input.path);
     const source = await realpath(sourcePath);
     const fullPath = join(root, "firmware.bin");
@@ -122,10 +143,7 @@ export class FirmwareFileAccess {
     });
     const { size, sha256 } = copied;
     await chmod(fullPath, 0o400);
-    const selected =
-      request.operation === "extract_firmware"
-        ? request.input.range
-        : undefined;
+    const selected = request.input.range;
     const offset = selected?.offset ?? 0;
     const length = selected?.length ?? size;
     if (length === 0 || offset > size || length > size - offset)

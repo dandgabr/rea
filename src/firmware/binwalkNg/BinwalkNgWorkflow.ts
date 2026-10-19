@@ -10,11 +10,10 @@ import type { BinwalkNgFileRequest } from "../../domain/firmware/binwalkNgAnalys
 import { jsonValueSchema, type JsonValue } from "../../domain/jsonValue.js";
 import type { ProviderProcessSupervisor } from "../../process/ProviderProcess.js";
 import {
-  hashFirmwareFile,
   inventoryFirmwareOutput,
-  snapshotFirmware,
   type FirmwareEntry,
 } from "../FirmwareFiles.js";
+import type { FirmwareFileAccess } from "../FirmwareFiles.js";
 import {
   readFirmwareCommandReport,
   type FirmwareLauncher,
@@ -47,7 +46,7 @@ import { BinwalkNgAggregateBudget } from "./BinwalkNgAggregateBudget.js";
 export interface BinwalkNgWorkflowContext {
   readonly request: BinwalkNgFileRequest;
   readonly root: string;
-  readonly target: Awaited<ReturnType<typeof snapshotFirmware>>;
+  readonly target: Awaited<ReturnType<FirmwareFileAccess["snapshot"]>>;
   readonly runtime: {
     command: string;
     bubblewrap: string;
@@ -57,6 +56,7 @@ export interface BinwalkNgWorkflowContext {
   };
   readonly signal: AbortSignal;
   readonly scope: ArtifactResourceScope;
+  readonly files: FirmwareFileAccess;
   readonly launcher?: FirmwareLauncher;
   retainCleanup(supervisor: ProviderProcessSupervisor): void;
   ownTree(tree: SafeOutputTree): void;
@@ -221,6 +221,7 @@ export const runBinwalkNgWorkflow = async (
       signal,
       operation: request.operation,
       scope: context.scope,
+      files: context.files,
       expectedIdentities,
       observePublished,
       ownTree: context.ownTree,
@@ -265,6 +266,7 @@ export const runBinwalkNgWorkflow = async (
         workRoot,
         signal,
         scope: context.scope,
+        files: context.files,
         operation: request.operation,
       });
       const reportPath = join(transferPassRoot, "reports", `${pass}.json`);
@@ -315,7 +317,7 @@ export const runBinwalkNgWorkflow = async (
         validateBinwalkNgHelperBindings(helperInventory, sandbox.helpers);
         helperVersionExecutions =
           await verifyBinwalkNgHelperVersions(baseCommandContext);
-        await recheckRuntime(sandbox, signal, request.operation, context.scope);
+        await recheckRuntime(sandbox, signal, request.operation, context.files);
       }
       const commandContext = {
         ...baseCommandContext,
@@ -403,7 +405,7 @@ export const runBinwalkNgWorkflow = async (
         operation: request.operation,
         execution,
         signal,
-        scope: context.scope,
+        files: context.files,
       });
       runs.push(
         jsonValueSchema.parse({
@@ -450,7 +452,7 @@ export const runBinwalkNgWorkflow = async (
           },
         );
         pngObservation = png;
-        await recheckRuntime(sandbox, signal, request.operation, context.scope);
+        await recheckRuntime(sandbox, signal, request.operation, context.files);
         if (request.input.output_directory !== undefined) {
           await publication(
             [
@@ -534,7 +536,7 @@ export const runBinwalkNgWorkflow = async (
         diagnostics.push(
           `Native report omitted admitted file ${reportedPath}; examination remains unknown`,
         );
-      await recheckRuntime(sandbox, signal, request.operation, context.scope);
+      await recheckRuntime(sandbox, signal, request.operation, context.files);
       if (!producingArtifacts)
         return {
           result: {
@@ -641,11 +643,10 @@ export const runBinwalkNgWorkflow = async (
           String(attempted.length + queue.length),
         );
         await mkdir(childRoot, { recursive: true, mode: 0o700 });
-        const child = await snapshotFirmware(
+        const child = await context.files.snapshot(
           { operation: request.operation, input: { path: entry.path } },
           childRoot,
           signal,
-          context.scope,
         );
         queue.push({
           inputPath: child.inputPath,
@@ -798,7 +799,7 @@ const recheckRuntime = async (
   sandbox: Awaited<ReturnType<typeof prepareBinwalkNgSandbox>>,
   signal: AbortSignal,
   operation: string,
-  scope: ArtifactResourceScope,
+  files: FirmwareFileAccess,
 ) => {
   const identities = [
     sandbox.command,
@@ -812,10 +813,7 @@ const recheckRuntime = async (
     })),
   ];
   for (const identity of identities)
-    if (
-      (await hashFirmwareFile(identity.path, signal, scope, operation)) !==
-      identity.sha256
-    )
+    if ((await files.hash(identity.path, signal)) !== identity.sha256)
       throw new AnalysisOutputError(
         operation,
         `Selected runtime identity changed; producing attribution is unknown: ${identity.path}`,

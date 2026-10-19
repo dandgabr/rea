@@ -5,7 +5,7 @@ import { access, lstat, mkdir, realpath } from "node:fs/promises";
 import { basename, isAbsolute, join, posix, relative, sep } from "node:path";
 import { z } from "zod";
 import { firmwareToolUnavailable } from "../FirmwareCommand.js";
-import { hashFirmwareFile, readFirmwareReport } from "../FirmwareFiles.js";
+import type { FirmwareFileAccess } from "../FirmwareFiles.js";
 
 const unavailable = (reason: string) =>
   firmwareToolUnavailable("binwalk-ng", "binwalk_ng_confinement", reason);
@@ -78,10 +78,11 @@ const allowedDestination = (destination: string, kind: string) => {
 export const identifyBinwalkNgRuntimeFile = async (
   configured: string,
   executable: boolean,
-  context?: {
+  context: {
     signal?: AbortSignal;
     scope?: ArtifactResourceScope;
     operation?: string;
+    files: FirmwareFileAccess;
   },
 ) => {
   context?.signal?.throwIfAborted();
@@ -97,12 +98,7 @@ export const identifyBinwalkNgRuntimeFile = async (
     return {
       configured_path: configured,
       path,
-      sha256: await hashFirmwareFile(
-        path,
-        context?.signal,
-        context?.scope,
-        context?.operation,
-      ),
+      sha256: await context.files.hash(path, context.signal),
     };
   } catch (cause: unknown) {
     if (
@@ -127,6 +123,7 @@ export const prepareBinwalkNgSandbox = async (input: {
   readonly workRoot: string;
   readonly signal?: AbortSignal;
   readonly scope?: ArtifactResourceScope;
+  readonly files: FirmwareFileAccess;
   readonly operation?: string;
 }) => {
   if (process.platform !== "linux")
@@ -161,11 +158,10 @@ export const prepareBinwalkNgSandbox = async (input: {
     input,
   );
   const parsed = manifestSchema.safeParse(
-    await readFirmwareReport(
+    await input.files.report(
       manifestFile.path,
       input.operation ?? "binwalk_ng_confinement",
       input.signal,
-      input.scope,
     ),
   );
   if (!parsed.success)

@@ -1,5 +1,5 @@
 import { AnalysisOutputError } from "../../domain/analysisErrorCore.js";
-import { withFirmwareFiles } from "../FirmwareFiles.js";
+import { withArtifactRegularFile } from "../../artifacts/ArtifactFileOperation.js";
 import { open, writeFile, type FileHandle } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, it, vi } from "vitest";
@@ -50,17 +50,9 @@ it("retains invalid PNG validation and its actual descriptor owner when close fa
         (p) => observed.push(p),
       ),
     ).rejects.toMatchObject({
-      cleanupIncomplete: true,
-      operation: "inspect_firmware_entropy",
-      cleanupResources: [path],
-      diagnostics: {
-        primary_error: {
-          code: "unreadable_output",
-          details: {
-            reason: expect.stringContaining("2048x1024 source profile"),
-          },
-        },
-      },
+      name: "ArtifactReaderFailure",
+      cleanup: { resources: [path] },
+      fileCleanupFailure: expect.objectContaining({ path }),
     });
     expect(observed).toEqual([]);
     expect(close).toHaveBeenCalledTimes(1);
@@ -107,14 +99,9 @@ it("distinguishes cancellation during PNG reading from its failed descriptor cle
         (p) => observed.push(p),
       ),
     ).rejects.toMatchObject({
-      cleanupIncomplete: true,
-      cleanupResources: [path],
-      diagnostics: {
-        primary_error: {
-          code: "cancelled",
-          details: { operation: "inspect_firmware_entropy" },
-        },
-      },
+      name: "ArtifactReaderFailure",
+      cleanup: { resources: [path] },
+      fileCleanupFailure: expect.objectContaining({ path }),
     });
     expect(controller.signal.aborted).toBe(true);
     expect(observed).toEqual([]);
@@ -157,11 +144,9 @@ it("retains second-file acquisition failure while retrying the first acquired ca
         },
       }),
     ).rejects.toMatchObject({
-      cleanupIncomplete: true,
-      cleanupResources: [inputPath],
-      diagnostics: {
-        primary_error: { reason: expect.stringContaining("ENOENT") },
-      },
+      name: "ArtifactReaderFailure",
+      cleanup: { resources: [inputPath] },
+      fileCleanupFailure: expect.any(Object),
     });
     expect(observed).toEqual([]);
     expect(close).toHaveBeenCalledTimes(1);
@@ -199,16 +184,9 @@ it("bounded rejected-header recovery fuzz: seed 0x4e473209, 16 inputs retain dia
           "inspect_firmware_entropy",
         ),
       ).rejects.toMatchObject({
-        cleanupIncomplete: true,
-        cleanupResources: [path],
-        diagnostics: {
-          primary_error: {
-            code: "unreadable_output",
-            details: {
-              reason: expect.stringContaining("2048x1024 source profile"),
-            },
-          },
-        },
+        name: "ArtifactReaderFailure",
+        cleanup: { resources: [path] },
+        fileCleanupFailure: expect.objectContaining({ path }),
       });
       await scope.close();
       expect(close).toHaveBeenCalledTimes(2);
@@ -231,55 +209,50 @@ it("shares captured primary facts and every failed descriptor owner across a mul
     .mockRejectedValueOnce(new Error("first close"))
     .mockRejectedValueOnce(new Error("second close"));
   try {
-    const work = withFirmwareFiles(
-      paths,
-      "carve_firmware",
-      controller.signal,
+    const work = withArtifactRegularFile(
+      paths[0]!,
       scope,
-      async ([handle]) => {
-        if (handle === undefined) throw Error("Missing descriptor");
-        const bytes = Buffer.alloc(14);
-        await handle.read(bytes, 0, 14, 0);
-        primary = new AnalysisOutputError(
-          "carve_firmware",
-          "validation after acquired observation",
-          {
-            capturedOutput: {
-              stdout: "native partial stdout",
-              stderr: "native diagnostic",
-              truncated: false,
-            },
-            partialObservation: {
-              kind: "firmware",
-              result: { read_bytes: bytes.toString("utf8") },
-            },
+      controller.signal,
+      (left) =>
+        withArtifactRegularFile(
+          paths[1]!,
+          scope,
+          controller.signal,
+          async () => {
+            const bytes = Buffer.alloc(14);
+            await left.read(bytes, 0, 14, 0);
+            primary = new AnalysisOutputError(
+              "carve_firmware",
+              "validation after acquired observation",
+              {
+                capturedOutput: {
+                  stdout: "native partial stdout",
+                  stderr: "native diagnostic",
+                  truncated: false,
+                },
+                partialObservation: {
+                  kind: "firmware",
+                  result: { read_bytes: bytes.toString("utf8") },
+                },
+              },
+            );
+            controller.abort();
+            throw primary;
           },
-        );
-        controller.abort();
-        throw primary;
-      },
-      "binwalk-ng",
+        ),
     );
     const failure: unknown = await work.catch((cause: unknown) => cause);
     expect(failure).toMatchObject({
-      providerId: "binwalk-ng",
-      cleanupIncomplete: true,
-      cleanupResources: paths,
-      capturedOutput: {
-        stdout: "native partial stdout",
-        stderr: "native diagnostic",
-      },
       partialObservation: {
         kind: "firmware",
         result: { read_bytes: "observed bytes" },
       },
-      diagnostics: {
-        primary_error: {
-          code: "unreadable_output",
-          details: { reason: "validation after acquired observation" },
-        },
-      },
-      cause: { cause: primary },
+      cleanupLease: expect.any(Object),
+    });
+    expect(primary?.capturedOutput).toEqual({
+      stdout: "native partial stdout",
+      stderr: "native diagnostic",
+      truncated: false,
     });
     expect(close).toHaveBeenCalledTimes(2);
     await scope.retryCleanup();
