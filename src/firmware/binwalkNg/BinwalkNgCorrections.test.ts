@@ -1,3 +1,4 @@
+import { PrivateRuntimeRoot } from "../../process/PrivateRuntimeRoot.js";
 import { OwnedFileHandle } from "../../filesystem/OwnedFileHandle.js";
 import { createHash } from "node:crypto";
 import { readlinkSync } from "node:fs";
@@ -797,3 +798,60 @@ it("keeps the PNG unpublished when commit fails before establishing durable publ
     commit.mockRestore();
   }
 });
+
+it.each(["closed", "retained"] as const)(
+  "observes completion cancellation during final workspace cleanup: %s",
+  async (mode) => {
+    const { path, environment } = await setup();
+    const controller = new AbortController();
+    const reason = Error("cancel during final workspace close");
+    const close = PrivateRuntimeRoot.prototype.close;
+    let allowClose = mode === "closed";
+    const spy = vi
+      .spyOn(PrivateRuntimeRoot.prototype, "close")
+      .mockImplementation(async function (this: PrivateRuntimeRoot) {
+        controller.abort(reason);
+        if (!allowClose) throw Error("retained final workspace");
+        await Reflect.apply(close, this, []);
+      });
+    let launches = 0;
+    const launch = protocolLauncher("png");
+    const provider = new BinwalkNgProvider(environment, async (options) => {
+      launches++;
+      return launch(options);
+    });
+    try {
+      const outcome = await provider.execute(
+        {
+          operation: "inspect_firmware_entropy",
+          input: binwalkNgInputSchemas.inspect_firmware_entropy.parse({
+            path,
+            provider_id: "binwalk-ng",
+          }),
+        },
+        { signal: controller.signal },
+      );
+      expect(controller.signal.aborted).toBe(true);
+      expect(outcome.ok).toBe(false);
+      if (outcome.ok) throw Error("Expected completion cancellation");
+      expect(outcome.error).toMatchObject({
+        cleanupIncomplete: mode === "retained",
+        partialObservation: {
+          kind: "firmware",
+          result: { provider_id: "binwalk-ng" },
+        },
+      });
+      expect(
+        mode === "closed" ? outcome.error : outcome.error.cleanupPrimary,
+      ).toMatchObject({ _tag: "AnalysisCancelledError", cause: reason });
+      allowClose = true;
+      await provider.close();
+      expect(outcome.error.cleanupIncomplete).toBe(false);
+      expect(launches).toBe(2);
+    } finally {
+      allowClose = true;
+      await provider.close();
+      spy.mockRestore();
+    }
+  },
+);

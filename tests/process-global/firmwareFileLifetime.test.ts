@@ -158,7 +158,8 @@ it.each(["snapshot", "range"] as const)(
     const failure = Object.assign(new Error("physical firmware read failed"), {
       code: "EIO",
     });
-    fault.selected = stage === "snapshot" ? path : "firmware.bin";
+    fault.selected =
+      stage === "snapshot" ? path : join(work, "input", "input.bin");
     fault.onRead = async () => {
       fault.onRead = undefined;
       controller.abort("cancellation after physical read failure");

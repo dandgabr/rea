@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { expect, it, vi } from "vitest";
@@ -318,6 +319,9 @@ it("scopes output checkpoints to raw bytes on one supervisor and epoch", () => {
       bytes: 2,
       observedBytes: 2,
       invalidUtf8: true,
+      sha256: createHash("sha256")
+        .update(Buffer.from([0xff, 0x61]))
+        .digest("hex"),
     });
     expect(other.snapshotOutputSince(checkpoint).complete).toBe(false);
     owner.resetOutput();

@@ -3,6 +3,7 @@ import {
   chmod,
   mkdir,
   mkdtemp,
+  open,
   readFile,
   readlink,
   rename,
@@ -40,6 +41,8 @@ import {
 } from "./PodmanTransport.js";
 import type { FirmwareLauncher } from "../FirmwareCommand.js";
 import * as firmwareCommand from "../FirmwareCommand.js";
+import { OwnedFileHandle } from "../../filesystem/OwnedFileHandle.js";
+import { AnalysisError } from "../../domain/analysisErrorBase.js";
 
 const roots: string[] = [];
 it("fails closed for lifecycle argv mutations with seeded zero-launch checks (seed0x43494431,512cases)", async () => {
@@ -248,6 +251,255 @@ const podmanStoreFixture = async () => {
   return { root, signal, scope, profilePath, profile, storage, metadataPaths };
 };
 const fixture = podmanStoreFixture;
+
+it.each([
+  "cancel",
+  "cancel-close-failure",
+  "primary-with-late-cancel",
+] as const)(
+  "preserves parser evidence and the final workspace owner under %s",
+  async (mode) => {
+    const f = await fixture();
+    const controller = new AbortController();
+    const reason = Error("cancel during final workspace close");
+    let allowClose = mode === "cancel";
+    let workspace = "";
+    let closes = 0;
+    let launches = 0;
+    const create = PrivateRuntimeRoot.create;
+    const createSpy = vi
+      .spyOn(PrivateRuntimeRoot, "create")
+      .mockImplementation(async (options) => {
+        const root = await create({ ...options, parent: f.root });
+        if (options?.prefix === "rea-podman-db-admission-") {
+          workspace = root.path;
+          const close = root.close.bind(root);
+          root.close = async () => {
+            closes++;
+            controller.abort(reason);
+            if (!allowClose) throw Error("final workspace close refused");
+            await close();
+          };
+        }
+        return root;
+      });
+    let stdout = "";
+    const launcher: FirmwareLauncher = async (options) => {
+      launches++;
+      const child = Object.assign(new EventEmitter(), {
+        stdout: new PassThrough(),
+        stderr: new PassThrough(),
+        exitCode: null,
+        signalCode: null,
+        kill: () => false,
+      });
+      stdout =
+        mode === "primary-with-late-cancel"
+          ? "malformed parser output"
+          : JSON.stringify({
+              snapshot_sha256: options.arguments.at(-2),
+              tables: [
+                { type: "table", sql: "CREATE TABLE DBConfig (ID INTEGER)" },
+              ],
+              configuration: [
+                {
+                  ID: { integer: "1" },
+                  SchemaVersion: { integer: "1" },
+                  OS: "linux",
+                  StaticDir: f.profile.static_dir,
+                  TmpDir: f.profile.tmp_dir,
+                  GraphRoot: f.profile.graph_root,
+                  RunRoot: f.profile.run_root,
+                  GraphDriver: "overlay",
+                  VolumeDir: f.profile.volume_path,
+                },
+              ],
+            });
+      setImmediate(() => {
+        child.stdout.end(stdout);
+        child.emit("exit", 0, null);
+        child.emit("close", 0, null);
+      });
+      return {
+        process: child,
+        ownership: {
+          runId: options.runId,
+          leaderPid: 987654,
+          processGroupId: 987654,
+        },
+        cleanup: async () => ({ cleaned: true, signaled: false }),
+      };
+    };
+    try {
+      const failure = await observePodmanDatabase(
+        f.profile,
+        controller.signal,
+        f.scope,
+        launcher,
+      ).catch((cause: unknown) => cause);
+      expect(failure).toBeInstanceOf(AnalysisError);
+      if (!(failure instanceof AnalysisError))
+        throw Error("Expected analysis error");
+      expect(controller.signal.aborted).toBe(true);
+      expect(failure.capturedOutput).toMatchObject({
+        stdout,
+        stdout_sha256: digest(stdout),
+      });
+      expect(projectAnalysisError(failure).code).toBe(
+        mode === "cancel" ? "cancelled" : "cleanup_incomplete",
+      );
+      if (mode !== "cancel") {
+        expect(failure.cleanupResources).toEqual([workspace]);
+        expect(failure.diagnostics).toMatchObject({
+          primary_error: {
+            code:
+              mode === "cancel-close-failure"
+                ? "cancelled"
+                : "capability_unavailable",
+          },
+        });
+        if (mode === "primary-with-late-cancel")
+          expect(failure.cleanupPrimary?.cause).toBeInstanceOf(SyntaxError);
+        await stat(workspace);
+        allowClose = true;
+        await f.scope.retryCleanup();
+        expect(failure.cleanupIncomplete).toBe(false);
+        expect(failure.cleanupResources).toEqual([]);
+        expect(projectAnalysisError(failure).code).toBe(
+          mode === "cancel-close-failure"
+            ? "cancelled"
+            : "capability_unavailable",
+        );
+      }
+      expect(closes).toBe(mode === "cancel" ? 1 : 2);
+      expect(launches).toBe(1);
+      await expect(stat(workspace)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      allowClose = true;
+      await f.scope.close();
+      createSpy.mockRestore();
+    }
+  },
+);
+
+it.each(["profile", "executable", "configuration", "directory"] as const)(
+  "retains exact %s descriptor cleanup through public admission and retry",
+  async (stage) => {
+    for (const mode of [
+      "close",
+      "close-cancel",
+      "primary-with-late-cancel",
+    ] as const) {
+      const f = await fixture();
+      const path =
+        stage === "profile"
+          ? f.profilePath
+          : stage === "executable"
+            ? f.profile.podman.resolved_command
+            : stage === "configuration"
+              ? f.storage
+              : f.profile.directory_identities[0]!.path;
+      const controller = new AbortController();
+      const reason = Error("caller cancelled during close");
+      const primary = new AnalysisOutputError(
+        "firmware_container_runtime",
+        "descriptor read failed first",
+        {
+          partialObservation: { kind: "firmware", result: { stage } },
+          capturedOutput: {
+            stdout: "prior evidence",
+            stderr: "",
+            truncated: false,
+          },
+        },
+      );
+      const sample = await open(path, "r");
+      const prototype = Object.getPrototypeOf(sample) as typeof sample;
+      await sample.close();
+      const originalStat = prototype.stat;
+      const statSpy = vi
+        .spyOn(prototype, "stat")
+        .mockImplementation(async function (
+          this: typeof sample,
+          ...args: Parameters<typeof originalStat>
+        ) {
+          if (
+            mode === "primary-with-late-cancel" &&
+            (await readlink(`/proc/self/fd/${this.fd}`)) === path
+          )
+            throw primary;
+          return Reflect.apply(originalStat, this, args);
+        });
+      const close = OwnedFileHandle.prototype.close;
+      let allowClose = false;
+      let closes = 0;
+      const closeSpy = vi
+        .spyOn(OwnedFileHandle.prototype, "close")
+        .mockImplementation(async function (this: OwnedFileHandle) {
+          if (
+            this.handle.fd >= 0 &&
+            (await readlink(`/proc/self/fd/${this.handle.fd}`)) === path
+          ) {
+            closes++;
+            if (!allowClose) {
+              if (mode !== "close") controller.abort(reason);
+              throw Error("descriptor close refused");
+            }
+          }
+          await Reflect.apply(close, this, []);
+        });
+      const commandSpy = vi.spyOn(firmwareCommand, "runFirmwareCommand");
+      try {
+        const failure = await admitPodmanStore(
+          f.profilePath,
+          f.profile.podman.command,
+          controller.signal,
+          f.scope,
+        ).catch((cause: unknown) => cause);
+        expect(failure).toBeInstanceOf(AnalysisError);
+        if (!(failure instanceof AnalysisError))
+          throw Error("Expected analysis error");
+        expect(projectAnalysisError(failure)).toMatchObject({
+          code: "cleanup_incomplete",
+          details: { resources: [path] },
+        });
+        expect(commandSpy).not.toHaveBeenCalled();
+        expect(closes).toBe(1);
+        expect(f.scope.cleanupResources).toEqual([path]);
+        if (mode !== "close") {
+          expect(failure.diagnostics).toMatchObject({
+            primary_error: {
+              code: mode === "close-cancel" ? "cancelled" : "unreadable_output",
+            },
+          });
+          if (mode === "primary-with-late-cancel") {
+            expect(failure.cleanupPrimary).toBe(primary);
+            expect(failure.partialObservation).toEqual(
+              primary.partialObservation,
+            );
+            expect(failure.capturedOutput).toEqual(primary.capturedOutput);
+          } else expect(failure.cleanupPrimary?.cause).toBe(reason);
+        }
+        allowClose = true;
+        await f.scope.retryCleanup();
+        expect(failure.cleanupIncomplete).toBe(false);
+        expect(failure.cleanupResources).toEqual([]);
+        expect(closes).toBe(2);
+        expect(commandSpy).not.toHaveBeenCalled();
+        if (mode !== "close")
+          expect(projectAnalysisError(failure).code).toBe(
+            mode === "close-cancel" ? "cancelled" : "unreadable_output",
+          );
+      } finally {
+        allowClose = true;
+        await f.scope.close();
+        statSpy.mockRestore();
+        closeSpy.mockRestore();
+        commandSpy.mockRestore();
+      }
+    }
+  },
+);
 
 it("admits current regular metadata after legitimate in-place DB and atomic index updates without changing stable selectors", async () => {
   const f = await fixture();
@@ -757,6 +1009,13 @@ it("cancels a real bounded snapshot parser and retains the exact snapshot owner 
     allowCleanup = true;
     await f.scope.close();
     await expect(stat(privateRoot!)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(failure).toMatchObject({
+      cleanupIncomplete: false,
+      cleanupResources: [],
+    });
+    if (!(failure instanceof AnalysisError))
+      throw Error("Expected analysis error");
+    expect(projectAnalysisError(failure).code).toBe("cancelled");
     expect(calls).toBe(1);
   } finally {
     allowCleanup = true;

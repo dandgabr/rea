@@ -1,4 +1,9 @@
 import {
+  AnalysisCleanupLease,
+  AnalysisCleanupLeaseGroup,
+} from "../../artifacts/AnalysisCleanupLease.js";
+import { firmwareFailure, firmwareCancellation } from "../FirmwareFailures.js";
+import {
   isBinwalkNgRequest,
   type FirmwareRequest,
 } from "../../domain/firmware/firmwareAnalysis.js";
@@ -17,11 +22,7 @@ import { ArtifactResourceScope } from "../../artifacts/ArtifactResourceScope.js"
 import type { SafeOutputTree } from "../../artifacts/SafeOutputTree.js";
 import { AnalysisError } from "../../domain/analysisErrorBase.js";
 import { analysisErrorWithCleanupFailure } from "../../domain/analysisErrorCleanup.js";
-import {
-  AnalysisCapabilityUnavailableError,
-  AnalysisCancelledError,
-  AnalysisTimeoutError,
-} from "../../domain/analysisErrorCore.js";
+import { AnalysisCapabilityUnavailableError } from "../../domain/analysisErrorCore.js";
 import { ProviderAdapterError } from "../../domain/providerAdapterError.js";
 import { ProviderCleanupError } from "../../domain/providerCleanupError.js";
 import { jsonValueSchema } from "../../domain/jsonValue.js";
@@ -42,6 +43,7 @@ interface OwnedWorkflow {
   scope: ArtifactResourceScope;
   files: FirmwareFileAccess;
   operation: string;
+  cleanupLease: AnalysisCleanupLease;
   supervisor?: ProviderProcessSupervisor;
   tree?: SafeOutputTree;
 }
@@ -112,10 +114,12 @@ export class BinwalkNgProvider {
     return this.#resources.run(
       async () => {
         if (signal.aborted)
-          return err(new AnalysisCancelledError(request.operation));
+          return err(
+            firmwareCancellation(request.operation, signal.reason, deadline),
+          );
         const cleanup = await this.#cleanup();
         if (cleanup !== undefined) return err(cleanup);
-        return this.#execute(request, options, signal, deadline);
+        return this.#execute(request, signal, deadline);
       },
       signal,
       request.operation,
@@ -128,22 +132,21 @@ export class BinwalkNgProvider {
     if (cleanup !== undefined) throw cleanup;
   }
 
-  async #cleanup(): Promise<ProviderCleanupError | undefined> {
-    const failures: ProviderCleanupError[] = [];
+  async #cleanup(): Promise<AnalysisError | undefined> {
+    const failures: AnalysisError[] = [];
     for (const owner of this.#owned) {
       try {
-        const stopped = await owner.supervisor?.stop();
-        if (stopped?.status === "incomplete") throw new Error(stopped.reason);
-        delete owner.supervisor;
-        await owner.scope.retryCleanup();
-        await owner.files.close();
-        await owner.tree?.rollback();
-        delete owner.tree;
-        await owner.root.close();
+        await owner.cleanupLease.release();
         this.#owned.delete(owner);
       } catch (cause: unknown) {
-        failures.push(
-          new ProviderCleanupError(
+        const interpreted = firmwareFailure(
+          cause,
+          "binwalk-ng",
+          owner.operation,
+        );
+        if (interpreted.cleanupIncomplete) failures.push(interpreted);
+        else {
+          const cleanup = new ProviderCleanupError(
             "binwalk-ng",
             [
               owner.root.path,
@@ -151,35 +154,40 @@ export class BinwalkNgProvider {
             ],
             { reason: cause instanceof Error ? cause.message : String(cause) },
             { operation: owner.operation, cause },
-          ),
-        );
+          );
+          new AnalysisCleanupLeaseGroup(cleanup, [owner.cleanupLease]);
+          failures.push(cleanup);
+        }
       }
     }
-    if (failures.length === 0) return undefined;
+    if (failures.length < 2) return failures[0];
     return new ProviderCleanupError(
       "binwalk-ng",
       failures.flatMap((failure) => [...failure.cleanupResources]),
       {
         reason: "Owned firmware resources remain pending cleanup",
         failures: failures.map((failure) => ({
-          operation: failure.operation,
+          operation:
+            failure instanceof ProviderAdapterError
+              ? failure.operation
+              : "close_firmware",
           diagnostics: failure.diagnostics ?? null,
         })),
       },
       { operation: "close_firmware", cause: new AggregateError(failures) },
-    );
+    ).bindCleanupDependencies(failures);
   }
 
   async #execute(
     request: BinwalkNgRequest,
-    options: ExecutionOptions | undefined,
     signal: AbortSignal,
     deadline: AbortSignal,
   ): Promise<Outcome> {
     let owner: OwnedWorkflow | undefined;
     let outcome: Outcome;
     try {
-      signal.throwIfAborted();
+      if (signal.aborted)
+        throw firmwareCancellation(request.operation, signal.reason, deadline);
       const required = (name: string) => {
         const value = this.environment[name];
         if (value === undefined || value.length === 0)
@@ -203,12 +211,23 @@ export class BinwalkNgProvider {
       const root = await PrivateRuntimeRoot.create({
         prefix: "rea-binwalk-ng-",
       });
-      owner = {
+      const workflow: OwnedWorkflow = {
         root,
         scope: new ArtifactResourceScope(),
         files: new FirmwareFileAccess(),
         operation: request.operation,
+        cleanupLease: new AnalysisCleanupLease(async () => {
+          const stopped = await workflow.supervisor?.stop();
+          if (stopped?.status === "incomplete") throw Error(stopped.reason);
+          delete workflow.supervisor;
+          await workflow.scope.retryCleanup();
+          await workflow.files.close();
+          await workflow.tree?.rollback();
+          delete workflow.tree;
+          await workflow.root.close();
+        }, [root.path]),
       };
+      owner = workflow;
       this.#owned.add(owner);
       if (this.launcher === undefined)
         await requireBinwalkNgTmpfs(root.path, request.operation);
@@ -300,54 +319,62 @@ export class BinwalkNgProvider {
       const featureAbsent =
         request.operation === "inspect_firmware_entropy" &&
         cause instanceof ProviderAdapterError &&
+        !cause.cleanupIncomplete &&
         stderr !== undefined &&
         stderr.includes(
           'binwalk was built without the "entropy-plot" feature, entropy analysis isn\'t available',
         );
       const error =
-        cause instanceof ProviderCleanupError
-          ? cause
-          : featureAbsent && cause instanceof ProviderAdapterError
-            ? new AnalysisCapabilityUnavailableError(
+        featureAbsent && cause instanceof ProviderAdapterError
+          ? new AnalysisCapabilityUnavailableError(
+              "binwalk-ng",
+              request.operation,
+              "The selected native build reports that entropy-plot is unavailable",
+              {
+                cause,
+                diagnostics: { ...cause.diagnostics, stderr },
+                capturedOutput: cause.capturedOutput,
+              },
+            )
+          : signal.aborted && cause === signal.reason
+            ? firmwareCancellation(request.operation, signal.reason, deadline)
+            : firmwareFailure(
+                cause,
                 "binwalk-ng",
                 request.operation,
-                "The selected native build reports that entropy-plot is unavailable",
-                {
-                  cause,
-                  diagnostics: {
-                    ...cause.diagnostics,
-                    stderr,
-                  },
-                },
-              )
-            : options?.signal?.aborted === true
-              ? new AnalysisCancelledError(request.operation)
-              : deadline.aborted
-                ? new AnalysisTimeoutError(
-                    request.operation,
-                    FIRMWARE_LIMITS.timeoutMs,
-                  )
-                : cause instanceof AnalysisError
-                  ? cause
-                  : new ProviderAdapterError("binwalk-ng", request.operation, {
-                      cause,
-                      diagnostics: {
-                        reason:
-                          cause instanceof Error
-                            ? cause.message
-                            : String(cause),
-                      },
-                    });
+                deadline,
+                owner?.cleanupLease,
+              );
       if (
         cause instanceof AnalysisError &&
         cause.partialObservation !== undefined
       )
         error.retainPartialObservation(cause.partialObservation);
+      if (error.cleanupIncomplete && owner?.supervisor !== undefined)
+        new AnalysisCleanupLeaseGroup(error, [owner.cleanupLease]);
       outcome = err(error);
     }
-    // Unconfirmed process/descriptor owners must survive with their mounted workspace.
+    // Failed descriptor/process finalization retains its exact owner until an explicit retry.
     if (!outcome.ok && outcome.error.cleanupIncomplete) return outcome;
     const cleanup = await this.#cleanup();
+    if (outcome.ok && signal.aborted) {
+      const completed = outcome.value;
+      outcome = err(
+        firmwareCancellation(
+          request.operation,
+          signal.reason,
+          deadline,
+        ).retainPartialObservation({
+          kind: "firmware",
+          result: completed.result,
+          provenance: jsonValueSchema.parse({
+            raw_result: completed.rawResult,
+            subject: completed.subject,
+            provider: completed.provider,
+          }),
+        }),
+      );
+    }
     if (cleanup !== undefined) {
       if (outcome.ok)
         cleanup.retainPartialObservation({
@@ -367,7 +394,7 @@ export class BinwalkNgProvider {
             outcome.error,
             cleanup,
             request.operation,
-          ),
+          ).bindCleanupDependencies([outcome.error, cleanup]),
         );
       return err(cleanup);
     }

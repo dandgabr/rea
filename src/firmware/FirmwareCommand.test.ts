@@ -1,3 +1,4 @@
+import { OwnedFileHandle } from "../filesystem/OwnedFileHandle.js";
 import { chmod, mkdir, writeFile, readFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -22,6 +23,75 @@ import { createHash as hashProtocol } from "node:crypto";
 import { SafeOutputTree } from "../artifacts/SafeOutputTree.js";
 import { consumeBinwalkNgTransfer } from "./binwalkNg/BinwalkNgTransfer.js";
 import { FirmwareFileAccess } from "./FirmwareFiles.js";
+
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
+import { AnalysisCancelledError } from "../domain/analysisErrorCore.js";
+
+test.each(["success", "command-failure", "cleanup-failure"] as const)(
+  "observes cancellation during final stop without erasing %s",
+  async (outcome) => {
+    const controller = new AbortController();
+    const reason = new Error("cancel during final stop");
+    const child = Object.assign(new EventEmitter(), {
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+      exitCode: null,
+      signalCode: null,
+      kill: () => false,
+    });
+    const retained: unknown[] = [];
+    const failure: unknown = await runFirmwareCommand({
+      engine: "podman",
+      operation: "firmware_container_runtime",
+      command: "/unused",
+      limiter: "/unused",
+      args: [],
+      cwd: "/tmp",
+      environment: {},
+      signal: controller.signal,
+      limitProfile: "container-transport",
+      retainCleanup: (owner) => retained.push(owner),
+      launcher: async () => {
+        setImmediate(() => {
+          child.stdout.end("producer bytes");
+          child.emit("exit", outcome === "command-failure" ? 1 : 0, null);
+          child.emit("close", outcome === "command-failure" ? 1 : 0, null);
+        });
+        return {
+          process: child,
+          ownership: { runId: "test", leaderPid: 123, processGroupId: 123 },
+          cleanup: async () => {
+            controller.abort(reason);
+            return outcome === "cleanup-failure"
+              ? { cleaned: false, reason: "retained direct client" }
+              : { cleaned: true, signaled: false };
+          },
+        };
+      },
+    }).catch((cause: unknown) => cause);
+    expect(controller.signal.aborted).toBe(true);
+    if (outcome === "success") {
+      expect(failure).toBeInstanceOf(AnalysisCancelledError);
+      expect(failure).toMatchObject({ cause: reason });
+    } else if (outcome === "command-failure") {
+      expect(failure).toMatchObject({
+        _tag: "ProviderAdapterError",
+        cleanupIncomplete: false,
+        diagnostics: { exit_code: 1 },
+      });
+    } else {
+      expect(failure).toMatchObject({
+        cleanupIncomplete: true,
+        diagnostics: { primary_error: { code: "cancelled" } },
+      });
+      expect(retained).toHaveLength(1);
+    }
+    expect(failure).toMatchObject({
+      capturedOutput: { stdout: "producer bytes", stdout_bytes: 14 },
+    });
+  },
+);
 
 const it = test.skipIf(process.platform !== "linux");
 
@@ -584,3 +654,139 @@ it("hashes only exact UTF-8 command output and omits digests for malformed bytes
     else expect(captured).not.toHaveProperty("stdout_sha256");
   }
 }, 20000);
+
+test("settles protocol consumption when producer stdout closes before end", async () => {
+  const child = Object.assign(new EventEmitter(), {
+    stdout: new PassThrough(),
+    stderr: new PassThrough(),
+    exitCode: null,
+    signalCode: null,
+    kill: () => false,
+  });
+  let consumed: import("node:stream").Readable | undefined;
+  const pending = runFirmwareCommand({
+    engine: "fixture",
+    operation: "carve_firmware",
+    command: "/unused",
+    limiter: "/unused",
+    args: [],
+    cwd: "/tmp",
+    environment: {},
+    signal: new AbortController().signal,
+    limitProfile: "container-transport",
+    retainCleanup: () => {
+      throw Error("Unexpected retained process");
+    },
+    launcher: async (options) => {
+      setImmediate(() => {
+        child.stdout.write("partial frame");
+        child.stdout.destroy();
+        child.stderr.end("producer diagnostic");
+        child.emit("exit", 0, null);
+        child.emit("close", 0, null);
+      });
+      return {
+        process: child,
+        ownership: {
+          runId: options.runId,
+          leaderPid: 123,
+          processGroupId: 123,
+        },
+        cleanup: async () => ({ cleaned: true, signaled: false }),
+      };
+    },
+    protocolStdout: async (stdout) => {
+      consumed = stdout;
+      for await (const _chunk of stdout) {
+        /* Drain until physical completion or failure. */
+      }
+    },
+  }).catch((cause: unknown) => cause);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let failure: unknown;
+  try {
+    failure = await Promise.race([
+      pending,
+      new Promise((resolve) => {
+        timer = setTimeout(() => resolve("protocol still pending"), 500);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    consumed?.destroy();
+    await pending;
+  }
+  expect(failure).toMatchObject({
+    _tag: "ProviderAdapterError",
+    capturedOutput: {
+      stderr: "producer diagnostic",
+      stdout_capture: "protocol",
+    },
+  });
+});
+
+test("preserves an exact file cleanup lease thrown by the protocol consumer", async () => {
+  const root = await createTestTempDirectory("rea-protocol-file-owner-");
+  const path = join(root, "report.bin");
+  await writeFile(path, "report bytes");
+  const files = new FirmwareFileAccess();
+  const close = vi
+    .spyOn(OwnedFileHandle.prototype, "close")
+    .mockRejectedValueOnce(Error("consumer descriptor close refused"));
+  const child = Object.assign(new EventEmitter(), {
+    stdout: new PassThrough(),
+    stderr: new PassThrough(),
+    exitCode: null,
+    signalCode: null,
+    kill: () => false,
+  });
+  try {
+    const failure = await runFirmwareCommand({
+      engine: "fixture",
+      operation: "carve_firmware",
+      command: "/unused",
+      limiter: "/unused",
+      args: [],
+      cwd: root,
+      environment: {},
+      signal: new AbortController().signal,
+      limitProfile: "container-transport",
+      retainCleanup: () => {
+        throw Error("Unexpected retained process");
+      },
+      launcher: async (options) => {
+        setImmediate(() => {
+          child.stdout.end();
+          child.stderr.end();
+          child.emit("exit", 0, null);
+          child.emit("close", 0, null);
+        });
+        return {
+          process: child,
+          ownership: {
+            runId: options.runId,
+            leaderPid: 123,
+            processGroupId: 123,
+          },
+          cleanup: async () => ({ cleaned: true, signaled: false }),
+        };
+      },
+      protocolStdout: async () => {
+        await files.hash(path);
+      },
+    }).catch((cause: unknown) => cause);
+    expect(failure).toMatchObject({
+      cleanupIncomplete: true,
+      cleanupResources: [path],
+      operation: "carve_firmware",
+    });
+    await files.retryCleanup();
+    expect(failure).toMatchObject({
+      cleanupIncomplete: false,
+      cleanupResources: [],
+    });
+  } finally {
+    await files.close();
+    close.mockRestore();
+  }
+});

@@ -202,7 +202,7 @@ it("charges recursive snapshot files and directories to the aggregate entry ceil
     artifactFiles: 2,
     reportBytes: 20,
     reportFiles: 3,
-    entries: 3,
+    entries: 4,
     childSnapshotBytes: 4,
     childSnapshotFiles: 2,
   });

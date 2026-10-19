@@ -172,9 +172,9 @@ export const runBinwalkNgWorkflow = async (
     reportFiles: maxPasses,
     // Per pass, allow the existing 32 nested native directories plus its
     // report/artifact roots; all are tracked across separate pass trees.
-    // Include up to three host snapshot entries (shared children root, child
-    // directory and file) per admitted recursive child.
-    entries: maxFiles * 4 + maxPasses * 36 + 8,
+    // Include up to four host snapshot entries (shared children root, child
+    // directory, input directory and file) per admitted recursive child.
+    entries: maxFiles * 5 + maxPasses * 36 + 8,
     childSnapshotBytes: maxBytes,
     childSnapshotFiles: maxFiles,
   });

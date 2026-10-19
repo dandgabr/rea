@@ -1,3 +1,8 @@
+import {
+  assertArtifactReadActive,
+  withArtifactFileHandle,
+} from "../../artifacts/ArtifactFileOperation.js";
+import { firmwareFailure } from "../FirmwareFailures.js";
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { glob, lstat, open, readlink } from "node:fs/promises";
@@ -5,12 +10,7 @@ import { join } from "node:path";
 import { z } from "zod";
 import { jsonValueValidationIssue } from "../../domain/jsonValue.js";
 import { freezeJsonSnapshot } from "../../domain/immutableJson.js";
-import { AnalysisError } from "../../domain/analysisErrorBase.js";
-import { AnalysisCancelledError } from "../../domain/analysisErrorCore.js";
-import { projectAnalysisError } from "../../domain/analysisErrorProjection.js";
-import { ProviderCleanupError } from "../../domain/providerCleanupError.js";
 import type { ArtifactResourceScope } from "../../artifacts/ArtifactResourceScope.js";
-import { OwnedFileHandle } from "../../filesystem/OwnedFileHandle.js";
 import { parseLinuxProcessStartTime } from "../../process/ProcessOwnershipObservation.js";
 import type { PodmanContainerIdentity } from "./OwnedPodmanContainer.js";
 import {
@@ -450,56 +450,23 @@ export const observePodmanNamespaceEntry = async (
   scope: ArtifactResourceScope,
   directory = true,
 ) => {
-  signal.throwIfAborted();
+  assertArtifactReadActive(signal);
   const path = `/proc/${pid}/root${destination}`;
   const handle = await open(
     path,
     // Linux x86_64 asm-generic/fcntl.h: O_PATH=(1<<21); metadata only, no directory read authority.
     (1 << 21) | (directory ? constants.O_DIRECTORY : 0) | constants.O_NOFOLLOW,
   );
-  const owner = {
-    kind: "file-handle" as const,
-    resource: path,
-    handle: new OwnedFileHandle(handle),
-  };
-  let primary: unknown;
-  try {
-    signal.throwIfAborted();
+  return withArtifactFileHandle(path, handle, scope, signal, async (handle) => {
     const stat = await handle.stat({ bigint: true });
     requireFact(
       directory ? stat.isDirectory() : stat.isFile(),
       "Namespace bind source/target is not the expected regular file or directory",
     );
     return { device: stat.dev.toString(), inode: stat.ino.toString() };
-  } catch (cause: unknown) {
-    primary =
-      cause instanceof AnalysisError
-        ? cause
-        : signal.aborted
-          ? new AnalysisCancelledError("firmware_container_runtime", { cause })
-          : cause;
-    throw primary;
-  } finally {
-    const released = await scope.release(owner);
-    if (released.kind === "failed")
-      throw new ProviderCleanupError(
-        "podman",
-        [path],
-        {
-          reason: "Namespace entry descriptor cleanup remains pending",
-          ...(primary instanceof AnalysisError
-            ? { primary_error: projectAnalysisError(primary) }
-            : {}),
-        },
-        {
-          operation: "firmware_container_runtime",
-          cause:
-            primary === undefined
-              ? released.cause
-              : new AggregateError([primary, released.cause]),
-        },
-      );
-  }
+  }).catch((cause: unknown) => {
+    throw firmwareFailure(cause, "podman", "firmware_container_runtime");
+  });
 };
 
 /** Pure interpretation of observed OCI against typed intent and independently observed host defaults. */

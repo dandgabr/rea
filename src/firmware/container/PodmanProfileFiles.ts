@@ -1,20 +1,31 @@
 import { constants } from "node:fs";
-import { open, realpath, type FileHandle } from "node:fs/promises";
+import { open, realpath } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { ArtifactResourceScope } from "../../artifacts/ArtifactResourceScope.js";
-import { withArtifactRegularFile } from "../../artifacts/ArtifactFileOperation.js";
-import { OwnedFileHandle } from "../../filesystem/OwnedFileHandle.js";
+import {
+  assertArtifactReadActive,
+  withArtifactFileHandle,
+  withArtifactRegularFile,
+} from "../../artifacts/ArtifactFileOperation.js";
 import { sameRegularFileState } from "../../filesystem/RegularFile.js";
 import { readBoundedFileBytes } from "../../process/BoundedFileBytes.js";
-import { firmwareToolUnavailable } from "../FirmwareCommand.js";
-import { AnalysisCancelledError } from "../../domain/analysisErrorCore.js";
-import { AnalysisError } from "../../domain/analysisErrorBase.js";
-import { projectAnalysisError } from "../../domain/analysisErrorProjection.js";
-import { ProviderCleanupError } from "../../domain/providerCleanupError.js";
+import { AnalysisCapabilityUnavailableError } from "../../domain/analysisErrorCore.js";
+import type { AnalysisErrorOptions } from "../../domain/analysisErrorBase.js";
 import type { PodmanDescriptorIdentity } from "./PodmanStoreProfile.js";
 
-export const podmanProfileUnavailable = (reason: string) =>
-  firmwareToolUnavailable("podman", "firmware_container_runtime", reason);
+export const podmanProfileUnavailable = (
+  reason: string,
+  options?: AnalysisErrorOptions,
+) =>
+  new AnalysisCapabilityUnavailableError(
+    "podman",
+    "firmware_container_runtime",
+    reason,
+    {
+      ...options,
+      userMessage: reason,
+    },
+  );
 export const podmanPermissionMode = (mode: number | bigint) =>
   `0o${(Number(mode) & 0o7777).toString(8).padStart(3, "0")}`;
 
@@ -68,22 +79,15 @@ export const observePodmanProfileDirectory = async (
   signal: AbortSignal,
   scope: ArtifactResourceScope,
 ) => {
-  signal.throwIfAborted();
-  const handle: FileHandle = await open(
+  assertArtifactReadActive(signal);
+  const handle = await open(
     path,
     constants.O_RDONLY |
       constants.O_DIRECTORY |
       constants.O_NOFOLLOW |
       constants.O_NONBLOCK,
   );
-  const owner = {
-    kind: "file-handle" as const,
-    resource: path,
-    handle: new OwnedFileHandle(handle),
-  };
-  let primary: unknown;
-  try {
-    signal.throwIfAborted();
+  return withArtifactFileHandle(path, handle, scope, signal, async (handle) => {
     const before = await handle.stat({ bigint: true });
     if (!before.isDirectory() || (await realpath(path)) !== path)
       throw podmanProfileUnavailable(
@@ -108,35 +112,7 @@ export const observePodmanProfileDirectory = async (
       gid: Number(before.gid),
       mode: podmanPermissionMode(before.mode),
     };
-  } catch (cause: unknown) {
-    primary =
-      cause instanceof AnalysisError
-        ? cause
-        : signal.aborted
-          ? new AnalysisCancelledError("firmware_container_runtime", { cause })
-          : cause;
-    throw primary;
-  } finally {
-    const released = await scope.release(owner);
-    if (released.kind === "failed")
-      throw new ProviderCleanupError(
-        "podman",
-        [path],
-        {
-          reason: "Selected profile directory cleanup remains pending",
-          ...(primary instanceof AnalysisError
-            ? { primary_error: projectAnalysisError(primary) }
-            : {}),
-        },
-        {
-          operation: "firmware_container_runtime",
-          cause:
-            primary === undefined
-              ? released.cause
-              : new AggregateError([primary, released.cause]),
-        },
-      );
-  }
+  });
 };
 
 /** Hash current runtime metadata or an executable without allocating its whole representation. */

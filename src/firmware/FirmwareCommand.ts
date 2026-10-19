@@ -1,6 +1,8 @@
 import { ArtifactReaderFailure } from "../artifacts/ArtifactReader.js";
+import { firmwareFailure } from "./FirmwareFailures.js";
 import { randomUUID } from "node:crypto";
-import { Readable } from "node:stream";
+import { Readable, Transform } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { access, lstat, realpath, stat } from "node:fs/promises";
 import { constants } from "node:fs";
 import { isAbsolute } from "node:path";
@@ -215,19 +217,33 @@ export const runFirmwareCommand = async (context: {
       },
     },
   );
+  let protocolObservedBytes = 0;
   const capture = () => {
     const snapshot = supervisor.snapshot();
     return {
       stdout: snapshot.stdout.text,
       stderr: snapshot.stderr.text,
       truncated: snapshot.diagnosticTruncated ?? false,
-      stdout_bytes: snapshot.stdout.bytes,
+      ...(context.protocolStdout === undefined
+        ? {
+            stdout_bytes: snapshot.stdout.bytes,
+            stdout_utf8_valid: snapshot.stdout.invalidUtf8 !== true,
+            ...(snapshot.stdout.invalidUtf8 === true
+              ? {}
+              : { stdout_sha256: snapshot.stdout.sha256 }),
+          }
+        : {}),
       stderr_bytes: snapshot.stderr.bytes,
-      stdout_observed_bytes: snapshot.stdout.observedBytes,
+      stdout_observed_bytes:
+        context.protocolStdout === undefined
+          ? snapshot.stdout.observedBytes
+          : protocolObservedBytes,
       stderr_observed_bytes: snapshot.stderr.observedBytes,
       exit_code: snapshot.exitCode ?? null,
       signal: snapshot.signal ?? null,
-      stdout_utf8_valid: snapshot.stdout.invalidUtf8 !== true,
+      ...(snapshot.stderr.invalidUtf8 === true
+        ? {}
+        : { stderr_sha256: snapshot.stderr.sha256 }),
       stderr_utf8_valid: snapshot.stderr.invalidUtf8 !== true,
       stdout_capture:
         context.protocolStdout === undefined
@@ -239,30 +255,53 @@ export const runFirmwareCommand = async (context: {
     };
   };
   const checkDiagnostics = () => {
-    if (diagnosticTruncated) {
-      const snapshot = supervisor.snapshot();
+    const snapshot = supervisor.snapshot();
+    if (diagnosticTruncated || snapshot.outputIncomplete === true)
       throw new AnalysisOutputError(
         operation,
-        `Tool diagnostics exceeded the ${FIRMWARE_LIMITS.diagnosticBytes}-byte capture budget`,
-        {
-          capturedOutput: {
-            stdout: snapshot.stdout.text,
-            stderr: snapshot.stderr.text,
-            truncated: true,
-          },
-        },
+        snapshot.outputIncomplete === true
+          ? "Tool output closed before complete observation"
+          : `Tool diagnostics exceeded the ${FIRMWARE_LIMITS.diagnosticBytes}-byte capture budget`,
+        { capturedOutput: { ...capture(), truncated: true } },
       );
-    }
+  };
+  const protocolError = (cause: unknown): AnalysisError => {
+    if (cause instanceof ArtifactReaderFailure)
+      return firmwareFailure(cause, engine, operation);
+    if (cause instanceof AnalysisError) return cause;
+    const observed = supervisor.snapshot();
+    return new ProviderAdapterError(engine, operation, {
+      cause,
+      diagnostics: {
+        reason: cause instanceof Error ? cause.message : String(cause),
+        exit_code: observed.exitCode ?? null,
+        signal: observed.signal ?? null,
+        stderr: observed.stderr.text,
+        stderr_bytes: observed.stderr.bytes,
+      },
+    });
   };
   let failure: unknown;
   let protocolFailure: unknown;
-  const protocolOutput =
+  const protocolMeter =
     context.protocolStdout === undefined
+      ? undefined
+      : new Transform({
+          transform(chunk: Buffer, _encoding, callback) {
+            protocolObservedBytes += chunk.byteLength;
+            callback(null, chunk);
+          },
+        });
+  const protocolOutput =
+    context.protocolStdout === undefined || protocolMeter === undefined
       ? undefined
       : spawned.process.stdout === null
         ? Promise.reject(new Error("Provider omitted protocol stdout"))
-        : context
-            .protocolStdout(spawned.process.stdout)
+        : Promise.all([
+            pipeline(spawned.process.stdout, protocolMeter),
+            context.protocolStdout(protocolMeter),
+          ])
+            .then(() => undefined)
             .catch((cause: unknown) => {
               protocolFailure = cause;
               throw cause;
@@ -288,22 +327,7 @@ export const runFirmwareCommand = async (context: {
     }
     const deadline = performance.now() + FIRMWARE_LIMITS.timeoutMs;
     while (!(await supervisor.waitForOutputClose(100))) {
-      if (protocolFailure !== undefined) {
-        const observed = supervisor.snapshot();
-        throw new ProviderAdapterError(engine, operation, {
-          cause: protocolFailure,
-          diagnostics: {
-            reason:
-              protocolFailure instanceof Error
-                ? protocolFailure.message
-                : String(protocolFailure),
-            exit_code: observed.exitCode ?? null,
-            signal: observed.signal ?? null,
-            stderr: observed.stderr.text,
-            stderr_bytes: observed.stderr.bytes,
-          },
-        });
-      }
+      if (protocolFailure !== undefined) throw protocolError(protocolFailure);
       checkDiagnostics();
       await assertFirmwareOutputBounds(
         context.boundedOutputFiles ?? [],
@@ -331,33 +355,18 @@ export const runFirmwareCommand = async (context: {
     if (signal.aborted)
       throw new AnalysisCancelledError(operation, { cause: signal.reason });
   } catch (cause: unknown) {
-    failure = cause;
+    failure = cause === protocolFailure ? protocolError(cause) : cause;
   }
   const stopped = await supervisor.stop();
+  if (protocolMeter !== undefined) {
+    spawned.process.stdout?.unpipe(protocolMeter);
+    protocolMeter.destroy();
+  }
   const snapshot = supervisor.snapshot();
   const capturedOutput = capture();
-  if (failure instanceof AnalysisError)
-    failure.retainCapturedOutput(capturedOutput);
-  if (stopped.status === "incomplete") {
-    context.retainCleanup(supervisor);
-    throw new ProviderCleanupError(engine, [runId, context.cwd], {
-      reason: stopped.reason,
-      leader_pid: spawned.ownership.leaderPid,
-      process_group_id: spawned.ownership.processGroupId,
-      exit_code: snapshot.exitCode ?? null,
-      signal: snapshot.signal ?? null,
-      stdout: snapshot.stdout.text,
-      stderr: snapshot.stderr.text,
-      stdout_bytes: snapshot.stdout.bytes,
-      stderr_bytes: snapshot.stderr.bytes,
-      previous_error: failure instanceof Error ? failure.message : null,
-      ...(failure instanceof AnalysisError
-        ? { primary_error: projectAnalysisError(failure) }
-        : {}),
-    });
-  }
-  if (failure !== undefined) throw failure;
   if (
+    failure === undefined &&
+    snapshot.exitCode !== undefined &&
     snapshot.exitCode !== 0 &&
     !(context.acceptedExitCodes ?? []).includes(snapshot.exitCode ?? -1) &&
     !(
@@ -365,7 +374,7 @@ export const runFirmwareCommand = async (context: {
       snapshot.exitCode === 1
     )
   )
-    throw new ProviderAdapterError(engine, operation, {
+    failure = new ProviderAdapterError(engine, operation, {
       diagnostics: {
         reason:
           "Tool failed; inspect exit status and stderr for format, dependency, sandbox or resource-limit failures",
@@ -377,6 +386,41 @@ export const runFirmwareCommand = async (context: {
         stderr_bytes: snapshot.stderr.bytes,
       },
     });
+  if (failure === undefined && signal.aborted)
+    failure = new AnalysisCancelledError(operation, { cause: signal.reason });
+  if (failure instanceof AnalysisError)
+    failure.retainCapturedOutput(capturedOutput);
+  if (stopped.status === "incomplete") {
+    context.retainCleanup(supervisor);
+    throw new ProviderCleanupError(
+      engine,
+      [runId, context.cwd],
+      {
+        reason: stopped.reason,
+        captured_output: capturedOutput,
+        leader_pid: spawned.ownership.leaderPid,
+        process_group_id: spawned.ownership.processGroupId,
+        exit_code: snapshot.exitCode ?? null,
+        signal: snapshot.signal ?? null,
+        stdout: snapshot.stdout.text,
+        stderr: snapshot.stderr.text,
+        stdout_bytes: snapshot.stdout.bytes,
+        stderr_bytes: snapshot.stderr.bytes,
+        previous_error: failure instanceof Error ? failure.message : null,
+        ...(failure instanceof AnalysisError
+          ? { primary_error: projectAnalysisError(failure) }
+          : {}),
+      },
+      {
+        operation,
+        cause: failure,
+        ...(failure instanceof AnalysisError
+          ? { cleanupPrimary: failure }
+          : {}),
+      },
+    ).retainCapturedOutput(capturedOutput);
+  }
+  if (failure !== undefined) throw failure;
   return {
     stdout: snapshot.stdout,
     stderr: snapshot.stderr,

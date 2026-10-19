@@ -92,7 +92,7 @@ it("reports entropy-plot unavailable when the selected runtime reports the featu
   }
 });
 
-it("classifies captured stderr when structured diagnostics are absent or empty", async () => {
+it("preserves captured evidence when classifying stderr without structured diagnostics", async () => {
   const root = await createTestTempDirectory("rea-ng-captured-stderr-");
   const path = join(root, "input.bin"),
     manifest = join(root, "runtime.json");
@@ -151,8 +151,12 @@ it("classifies captured stderr when structured diagnostics are absent or empty",
         },
       });
       if (outcome.ok) throw new Error("Expected entropy capability failure");
-      expect(outcome.error.capturedOutput).toBeUndefined();
-      expect(JSON.stringify(outcome.error)).not.toContain("/private/runtime");
+      expect(outcome.error.capturedOutput).toEqual({
+        stdout: "",
+        stderr: marker,
+        truncated: false,
+        command: "/private/runtime/binwalk-ng",
+      });
       expect(outcome.error.message).not.toContain("/private/runtime");
     } finally {
       await provider.close();

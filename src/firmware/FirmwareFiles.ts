@@ -1,7 +1,14 @@
 import { createHash } from "node:crypto";
 import { createWriteStream } from "node:fs";
-import { chmod, lstat, opendir, readlink, realpath } from "node:fs/promises";
-import { isAbsolute, join, relative, sep } from "node:path";
+import {
+  chmod,
+  lstat,
+  mkdir,
+  opendir,
+  readlink,
+  realpath,
+} from "node:fs/promises";
+import { basename, isAbsolute, join, relative, sep } from "node:path";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import {
@@ -23,6 +30,17 @@ import {
 import { ArtifactReaderFailure } from "../artifacts/ArtifactReader.js";
 import { readArtifactFileChunks } from "../artifacts/readArtifactFileChunks.js";
 import { NonRegularFileReadError } from "../filesystem/RegularFile.js";
+
+/** The selected source identity and optional byte range consumed by a snapshot. */
+export interface FirmwareSnapshotRequest {
+  readonly operation: string;
+  readonly input: {
+    readonly path: string;
+    readonly range?:
+      | { readonly offset: number; readonly length: number }
+      | undefined;
+  };
+}
 
 /** One regular file or unpublished filesystem entry in a private extraction. */
 export interface FirmwareEntry {
@@ -78,15 +96,8 @@ export class FirmwareFileAccess {
   }
 
   /** Copy and identify the exact bytes consumed by firmware providers. */
-  snapshot(
-    request: {
-      operation: string;
-      input: {
-        path: string;
-        range?: { offset: number; length: number } | undefined;
-        [key: string]: unknown;
-      };
-    },
+  snapshot<Request extends FirmwareSnapshotRequest>(
+    request: Request,
     root: string,
     signal: AbortSignal,
   ) {
@@ -94,20 +105,17 @@ export class FirmwareFileAccess {
   }
 
   async #snapshot(
-    request: {
-      operation: string;
-      input: {
-        path: string;
-        range?: { offset: number; length: number } | undefined;
-        [key: string]: unknown;
-      };
-    },
+    request: FirmwareSnapshotRequest,
     root: string,
     signal: AbortSignal,
   ) {
     const sourcePath = absoluteCallerPath(request.input.path);
     const source = await realpath(sourcePath);
-    const fullPath = join(root, "firmware.bin");
+    // Separate owned namespaces keep the selected name, even when the source
+    // itself lives in root or has a name used by the snapshot layout.
+    const fullRoot = join(root, "input");
+    await mkdir(fullRoot, { mode: 0o700 });
+    const fullPath = join(fullRoot, basename(sourcePath));
     const copied = await withArtifactRegularFile(
       source,
       this.#resources,
@@ -156,7 +164,9 @@ export class FirmwareFileAccess {
       ]);
     let inputPath = fullPath;
     if (selected !== undefined) {
-      inputPath = join(root, "selected.bin");
+      const selectionRoot = join(root, "selection");
+      await mkdir(selectionRoot, { mode: 0o700 });
+      inputPath = join(selectionRoot, basename(sourcePath));
       await withArtifactRegularFile(
         fullPath,
         this.#resources,

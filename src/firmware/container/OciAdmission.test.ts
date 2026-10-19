@@ -492,3 +492,47 @@ it.skipIf(process.platform !== "linux")(
     }
   },
 );
+
+it.skipIf(process.platform !== "linux")(
+  "retains the namespace descriptor lease and resolves its public failure after retry",
+  async () => {
+    const scope = new ArtifactResourceScope();
+    const root = await mkdtemp(join(tmpdir(), "rea-oci-namespace-close-"));
+    descriptorFixtures.set(root, scope);
+    const resource = `/proc/${process.pid}/root${root}`;
+    const close = OwnedFileHandle.prototype.close;
+    let allowClose = false;
+    let closes = 0;
+    const spy = vi
+      .spyOn(OwnedFileHandle.prototype, "close")
+      .mockImplementation(async function (this: OwnedFileHandle) {
+        closes++;
+        if (!allowClose) throw Error("namespace descriptor close refused");
+        await Reflect.apply(close, this, []);
+      });
+    try {
+      const failure = await observePodmanNamespaceEntry(
+        process.pid,
+        root,
+        new AbortController().signal,
+        scope,
+      ).catch((cause: unknown) => cause);
+      expect(failure).toMatchObject({
+        cleanupIncomplete: true,
+        cleanupResources: [resource],
+      });
+      expect(scope.cleanupResources).toEqual([resource]);
+      allowClose = true;
+      await scope.retryCleanup();
+      expect(closes).toBe(2);
+      expect(failure).toMatchObject({
+        cleanupIncomplete: false,
+        cleanupResources: [],
+      });
+    } finally {
+      allowClose = true;
+      await scope.close();
+      spy.mockRestore();
+    }
+  },
+);

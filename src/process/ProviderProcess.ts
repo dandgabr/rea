@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import type { EventEmitter } from "node:events";
 import type { Readable, Writable } from "node:stream";
@@ -113,6 +114,7 @@ export interface ProviderProcessSnapshot {
     readonly bytes: number;
     /** All bytes drained from this stream since construction or resetOutput. */
     readonly observedBytes: number;
+    readonly sha256?: string;
   };
   readonly stderr: {
     readonly text: string;
@@ -121,6 +123,7 @@ export interface ProviderProcessSnapshot {
     /** Bytes retained in text, limited by maxDiagnosticBytes when configured. */
     readonly bytes: number;
     readonly observedBytes: number;
+    readonly sha256?: string;
   };
   readonly exitCode: number | null | undefined;
   readonly signal: NodeJS.Signals | null | undefined;
@@ -752,6 +755,9 @@ export class ProviderProcessSupervisor {
 class ProcessOutputCapture {
   readonly #chunks: Buffer[] = [];
   #bytes = 0;
+  #snapshot:
+    | Omit<ProviderProcessSnapshot["stdout"], "observedBytes">
+    | undefined;
 
   get bytes(): number {
     return this.#bytes;
@@ -760,18 +766,21 @@ class ProcessOutputCapture {
   reset(): void {
     this.#chunks.length = 0;
     this.#bytes = 0;
+    this.#snapshot = undefined;
   }
 
   append(chunk: Buffer): void {
     this.#bytes += chunk.byteLength;
     this.#chunks.push(Buffer.from(chunk));
+    this.#snapshot = undefined;
   }
 
   snapshot(observedBytes: number): ProviderProcessSnapshot["stdout"] {
-    return this.#snapshotBuffer(
+    this.#snapshot ??= this.#snapshotBuffer(
       Buffer.concat(this.#chunks, this.#bytes),
-      observedBytes,
+      0,
     );
+    return { ...this.#snapshot, observedBytes };
   }
 
   snapshotRange(
@@ -813,6 +822,7 @@ class ProcessOutputCapture {
       bytes: buffer.byteLength,
       observedBytes,
       ...(invalidUtf8 ? { invalidUtf8: true } : {}),
+      sha256: createHash("sha256").update(buffer).digest("hex"),
     };
   }
 }

@@ -110,9 +110,9 @@ export class BinwalkNgAggregateBudget {
       throw new Error(
         "Binwalk-NG recursive snapshots exceed aggregate file budget",
       );
-    // The child tree root is shared; each snapshot adds one child directory
-    // and one file. Include those host-side entries in the same ledger.
-    const addedEntries = this.#childSnapshotFiles === 0 ? 3 : 2;
+    // The child tree root is shared; each snapshot adds a child directory, its input
+    // directory and one file. Include those host-side entries in the same ledger.
+    const addedEntries = this.#childSnapshotFiles === 0 ? 4 : 3;
     if (this.#entries + addedEntries > this.#limits.entries)
       throw new Error(
         "Binwalk-NG recursive snapshots exceed aggregate entry budget",

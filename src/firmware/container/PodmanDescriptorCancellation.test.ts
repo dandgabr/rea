@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { open, readFile, writeFile } from "node:fs/promises";
+import { open, readFile, readlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, it, vi } from "vitest";
 import { ArtifactResourceScope } from "../../artifacts/ArtifactResourceScope.js";
@@ -8,6 +8,115 @@ import { createTestTempDirectory } from "../../../tests/fixtures/temporaryDirect
 import { observePodmanDatabase } from "./PodmanDatabase.js";
 import { identifyPodmanProfileFile } from "./PodmanProfileFiles.js";
 import type { PodmanExistingStoreProfile } from "./PodmanStoreProfile.js";
+import { AnalysisError } from "../../domain/analysisErrorBase.js";
+import { AnalysisOutputError } from "../../domain/analysisErrorCore.js";
+import { projectAnalysisError } from "../../domain/analysisErrorProjection.js";
+
+it.each(["close", "close-cancel", "primary-with-late-cancel"] as const)(
+  "exposes the retained source FD under %s and resolves the same public error on retry",
+  async (mode) => {
+    const root = await createTestTempDirectory("rea-podman-source-close-");
+    const path = join(root, "source.bin");
+    await writeFile(path, "source bytes");
+    const scope = new ArtifactResourceScope();
+    const controller = new AbortController();
+    const reason = new Error("cancel during source close");
+    const primary = new AnalysisOutputError(
+      "firmware_container_runtime",
+      "source read failed before final cancellation",
+      {
+        capturedOutput: {
+          stdout: "prior capture",
+          stderr: "",
+          truncated: false,
+        },
+        partialObservation: {
+          kind: "firmware",
+          result: { stage: "source read" },
+        },
+      },
+    );
+    const sample = await open(path, "r");
+    const prototype = Object.getPrototypeOf(sample) as typeof sample;
+    await sample.close();
+    const originalRead = prototype.read;
+    const readSpy = vi
+      .spyOn(prototype, "read")
+      .mockImplementation(async function (
+        this: typeof sample,
+        ...args: Parameters<typeof originalRead>
+      ) {
+        if (mode === "primary-with-late-cancel") throw primary;
+        return Reflect.apply(originalRead, this, args);
+      });
+    const close = OwnedFileHandle.prototype.close;
+    let allowClose = false;
+    let sourceCloses = 0;
+    const closeSpy = vi
+      .spyOn(OwnedFileHandle.prototype, "close")
+      .mockImplementation(async function (this: OwnedFileHandle) {
+        if (
+          this.handle.fd >= 0 &&
+          (await readlink(`/proc/self/fd/${this.handle.fd}`)) === path
+        ) {
+          sourceCloses++;
+          if (!allowClose) {
+            if (mode !== "close") controller.abort(reason);
+            throw Error("source FD close refused");
+          }
+        }
+        await Reflect.apply(close, this, []);
+      });
+    let launches = 0;
+    try {
+      const failure = await observePodmanDatabase(
+        { database: { path } } as PodmanExistingStoreProfile,
+        controller.signal,
+        scope,
+        async () => {
+          launches++;
+          throw Error("no launch after source close failure");
+        },
+      ).catch((cause: unknown) => cause);
+      expect(failure).toBeInstanceOf(AnalysisError);
+      if (!(failure instanceof AnalysisError))
+        throw Error("Expected analysis error");
+      expect(projectAnalysisError(failure)).toMatchObject({
+        code: "cleanup_incomplete",
+        details: { resources: [path] },
+      });
+      expect(scope.cleanupResources).toEqual([path]);
+      expect(sourceCloses).toBe(1);
+      expect(launches).toBe(0);
+      if (mode !== "close")
+        expect(failure.diagnostics).toMatchObject({
+          primary_error: {
+            code: mode === "close-cancel" ? "cancelled" : "unreadable_output",
+          },
+        });
+      if (mode === "primary-with-late-cancel")
+        expect(failure).toMatchObject({
+          capturedOutput: primary.capturedOutput,
+          partialObservation: primary.partialObservation,
+        });
+      allowClose = true;
+      await scope.retryCleanup();
+      expect(sourceCloses).toBe(2);
+      expect(failure.cleanupIncomplete).toBe(false);
+      expect(failure.cleanupResources).toEqual([]);
+      if (mode !== "close")
+        expect(projectAnalysisError(failure).code).toBe(
+          mode === "close-cancel" ? "cancelled" : "unreadable_output",
+        );
+      expect(launches).toBe(0);
+    } finally {
+      allowClose = true;
+      await scope.close();
+      readSpy.mockRestore();
+      closeSpy.mockRestore();
+    }
+  },
+);
 
 it.each(["identity", "database"] as const)(
   "cancels %s after real bytes without a competing FD close",

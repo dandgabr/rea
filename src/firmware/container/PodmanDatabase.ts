@@ -11,14 +11,27 @@ import {
 import { launchPodmanDirectClient } from "./PodmanClientCleanup.js";
 import { z } from "zod";
 import type { ArtifactResourceScope } from "../../artifacts/ArtifactResourceScope.js";
-import { withArtifactRegularFile } from "../../artifacts/ArtifactFileOperation.js";
-import { AnalysisError } from "../../domain/analysisErrorBase.js";
+import {
+  assertArtifactReadActive,
+  ArtifactFileCleanupFailure,
+  withArtifactFileHandle,
+  withArtifactRegularFile,
+} from "../../artifacts/ArtifactFileOperation.js";
+import { ArtifactReaderFailure } from "../../artifacts/ArtifactReader.js";
+import {
+  AnalysisCleanupLeaseGroup,
+  type AnalysisCleanupLease,
+} from "../../artifacts/AnalysisCleanupLease.js";
+import { analysisErrorWithCleanupFailure } from "../../domain/analysisErrorCleanup.js";
+import { firmwareFailure } from "../FirmwareFailures.js";
+import {
+  AnalysisError,
+  type AnalysisCapturedOutput,
+} from "../../domain/analysisErrorBase.js";
 import { AnalysisCancelledError } from "../../domain/analysisErrorCore.js";
 import { ProviderAdapterError } from "../../domain/providerAdapterError.js";
 import { ProviderCleanupError } from "../../domain/providerCleanupError.js";
-import { projectAnalysisError } from "../../domain/analysisErrorProjection.js";
 import { sameRegularFileState } from "../../filesystem/RegularFile.js";
-import { OwnedFileHandle } from "../../filesystem/OwnedFileHandle.js";
 import { PrivateRuntimeRoot } from "../../process/PrivateRuntimeRoot.js";
 import {
   identifyPodmanProfileFile,
@@ -48,7 +61,7 @@ const configurationSchema = z.strictObject({
 });
 const noSidecars = async (path: string, signal: AbortSignal) => {
   for (const suffix of ["-journal", "-wal", "-shm"]) {
-    signal.throwIfAborted();
+    assertArtifactReadActive(signal);
     const present = await lstat(`${path}${suffix}`).catch((cause: unknown) => {
       if (cause instanceof Error && "code" in cause && cause.code === "ENOENT")
         return undefined;
@@ -72,7 +85,7 @@ export const observePodmanDatabase = async (
     prefix: "rea-podman-db-admission-",
   });
   const pending = new Set<ProviderProcessSupervisor>();
-  let snapshotOutput: OwnedFileHandle | undefined;
+  let snapshotOutput: AnalysisCleanupLease | undefined;
   let observed:
     | {
         source: PodmanDescriptorIdentity;
@@ -80,7 +93,8 @@ export const observePodmanDatabase = async (
         semantics: string;
       }
     | undefined;
-  let primary: unknown;
+  let primary: AnalysisError | undefined;
+  let capturedOutput: AnalysisCapturedOutput | undefined;
   const owner = {
     kind: "private-runtime-root" as const,
     resource: root.path,
@@ -94,13 +108,13 @@ export const observePodmanDatabase = async (
         if (pending.size > 0)
           throw Error("Snapshot parser cleanup remains pending");
         // A failed output close keeps the exact private snapshot workspace owned.
-        await snapshotOutput?.close();
+        await snapshotOutput?.release();
         await root.close();
       },
     },
   };
   try {
-    signal.throwIfAborted();
+    assertArtifactReadActive(signal);
     const path = selected.database.path;
     const snapshot = join(root.path, "db.sql");
     const source = await withArtifactRegularFile(
@@ -129,76 +143,53 @@ export const observePodmanDatabase = async (
             constants.O_NONBLOCK,
           0o600,
         );
-        snapshotOutput = new OwnedFileHandle(output);
-        const outputOwner = {
-          kind: "file-handle" as const,
-          resource: snapshot,
-          handle: snapshotOutput,
-        };
-        let copyFailure: unknown;
         try {
-          const buffer = Buffer.allocUnsafe(64 * 1024);
-          for (;;) {
-            signal.throwIfAborted();
-            const { bytesRead } = await handle.read(
-              buffer,
-              0,
-              buffer.length,
-              null,
-            );
-            signal.throwIfAborted();
-            if (bytesRead === 0) break;
-            if (bytesRead > PODMAN_DATABASE_SNAPSHOT_BYTES - size)
-              throw podmanProfileUnavailable(
-                "Database grew beyond the bounded private snapshot resource budget",
-              );
-            let written = 0;
-            while (written < bytesRead) {
-              signal.throwIfAborted();
-              const { bytesWritten } = await output.write(
-                buffer,
-                written,
-                bytesRead - written,
-                null,
-              );
-              signal.throwIfAborted();
-              if (bytesWritten === 0)
-                throw Error("Private database snapshot write made no progress");
-              written += bytesWritten;
-            }
-            hash.update(buffer.subarray(0, bytesRead));
-            size += bytesRead;
-          }
+          await withArtifactFileHandle(
+            snapshot,
+            output,
+            scope,
+            signal,
+            async () => {
+              const buffer = Buffer.allocUnsafe(64 * 1024);
+              for (;;) {
+                assertArtifactReadActive(signal);
+                const { bytesRead } = await handle.read(
+                  buffer,
+                  0,
+                  buffer.length,
+                  null,
+                );
+                assertArtifactReadActive(signal);
+                if (bytesRead === 0) break;
+                if (bytesRead > PODMAN_DATABASE_SNAPSHOT_BYTES - size)
+                  throw podmanProfileUnavailable(
+                    "Database grew beyond the bounded private snapshot resource budget",
+                  );
+                let written = 0;
+                while (written < bytesRead) {
+                  assertArtifactReadActive(signal);
+                  const { bytesWritten } = await output.write(
+                    buffer,
+                    written,
+                    bytesRead - written,
+                    null,
+                  );
+                  assertArtifactReadActive(signal);
+                  if (bytesWritten === 0)
+                    throw Error(
+                      "Private database snapshot write made no progress",
+                    );
+                  written += bytesWritten;
+                }
+                hash.update(buffer.subarray(0, bytesRead));
+                size += bytesRead;
+              }
+            },
+          );
         } catch (cause: unknown) {
-          copyFailure =
-            cause instanceof AnalysisError
-              ? cause
-              : signal.aborted
-                ? new AnalysisCancelledError("firmware_container_runtime", {
-                    cause,
-                  })
-                : cause;
-          throw copyFailure;
-        } finally {
-          const closed = await scope.release(outputOwner);
-          if (closed.kind === "failed")
-            throw new ProviderCleanupError(
-              "podman",
-              [snapshot],
-              {
-                reason: "Private database snapshot cleanup remains pending",
-                ...(copyFailure instanceof AnalysisError
-                  ? { primary_error: projectAnalysisError(copyFailure) }
-                  : {}),
-              },
-              {
-                operation: "firmware_container_runtime",
-                cause:
-                  copyFailure === undefined
-                    ? closed.cause
-                    : new AggregateError([copyFailure, closed.cause]),
-              },
-            );
+          if (cause instanceof ArtifactFileCleanupFailure)
+            snapshotOutput = cause.cleanupLease;
+          throw cause;
         }
         await noSidecars(path, signal);
         const current = await lstat(path, { bigint: true });
@@ -223,7 +214,7 @@ export const observePodmanDatabase = async (
       },
     );
     await chmod(snapshot, 0o400);
-    signal.throwIfAborted();
+    assertArtifactReadActive(signal);
     const helper = await observePodmanProfileFile(
       fileURLToPath(
         new URL(
@@ -277,6 +268,7 @@ export const observePodmanDatabase = async (
       limitProfile: "container-transport",
       retainCleanup: (owner) => pending.add(owner),
     });
+    capturedOutput = result.captured_output;
     let config: z.output<typeof configurationSchema>;
     try {
       if (result.stdout.invalidUtf8 === true)
@@ -309,9 +301,14 @@ export const observePodmanDatabase = async (
       )
         throw Error("Consumed snapshot identity changed");
     } catch (cause: unknown) {
-      if (cause instanceof AnalysisError) throw cause;
+      if (
+        cause instanceof AnalysisError ||
+        cause instanceof ArtifactReaderFailure
+      )
+        throw cause;
       throw podmanProfileUnavailable(
         `Initialized DBConfig interpretation is unavailable: ${cause instanceof Error ? cause.message : String(cause)}`,
+        { cause },
       ).retainCapturedOutput(result.captured_output);
     }
     if (
@@ -324,7 +321,7 @@ export const observePodmanDatabase = async (
       throw podmanProfileUnavailable(
         "Existing DBConfig roots differ from the complete selected SQLite profile",
       );
-    signal.throwIfAborted();
+    assertArtifactReadActive(signal);
     observed = {
       source,
       configuration: config,
@@ -333,49 +330,81 @@ export const observePodmanDatabase = async (
     };
     return observed;
   } catch (cause: unknown) {
-    if (cause instanceof ProviderAdapterError && !cause.cleanupIncomplete) {
+    if (cause instanceof ArtifactReaderFailure) {
+      primary = firmwareFailure(cause, "podman", "firmware_container_runtime");
+    } else if (
+      cause instanceof ProviderAdapterError &&
+      !cause.cleanupIncomplete
+    ) {
       primary = podmanProfileUnavailable(
         `Initialized database helper failed; database compatibility remains unknown: ${cause.message}`,
+        {
+          cause,
+          diagnostics: cause.diagnostics,
+          capturedOutput: cause.capturedOutput,
+          partialObservation: cause.partialObservation,
+        },
       );
-      if (cause.capturedOutput !== undefined)
-        (primary as AnalysisError).retainCapturedOutput(cause.capturedOutput);
     } else
       primary =
         cause instanceof AnalysisError
           ? cause
-          : signal.aborted
+          : signal.aborted && cause === signal.reason
             ? new AnalysisCancelledError("firmware_container_runtime", {
                 cause,
               })
             : podmanProfileUnavailable(
                 `Initialized database compatibility is unavailable: ${cause instanceof Error ? cause.message : String(cause)}`,
+                { cause },
               );
     throw primary;
   } finally {
+    // This workspace owns the parser's entire retained cleanup set. Descriptor
+    // failures keep their independent leases and must not be resolved here.
+    const retainedParserFailure =
+      primary instanceof ProviderCleanupError && pending.size > 0
+        ? primary
+        : undefined;
     const released = await scope.release(owner);
+    if (retainedParserFailure !== undefined) {
+      if (released.kind === "failed")
+        new AnalysisCleanupLeaseGroup(retainedParserFailure, [released.lease]);
+      else retainedParserFailure.resolveCleanup();
+    }
+    // Completion cancellation is observed after final cleanup. A prior failure
+    // remains primary even when the caller cancels while its owner is closing.
+    const completionFailure =
+      primary ??
+      (signal.aborted
+        ? new AnalysisCancelledError("firmware_container_runtime", {
+            cause: signal.reason,
+          })
+        : undefined);
+    if (capturedOutput !== undefined)
+      completionFailure?.retainCapturedOutput(capturedOutput);
     if (released.kind === "failed") {
-      const failure = new ProviderCleanupError(
+      const cleanup = new ProviderCleanupError(
         "podman",
         [root.path],
         {
           reason:
             "Private read-only database admission cleanup remains pending",
           observed_database: observed ?? null,
-          ...(primary instanceof AnalysisError
-            ? { primary_error: projectAnalysisError(primary) }
-            : {}),
         },
-        {
-          operation: "firmware_container_runtime",
-          cause: new AggregateError([primary, released.cause]),
-        },
+        { operation: "firmware_container_runtime", cause: released.cause },
       );
-      if (
-        primary instanceof AnalysisError &&
-        primary.capturedOutput !== undefined
-      )
-        failure.retainCapturedOutput(primary.capturedOutput);
-      throw failure;
+      new AnalysisCleanupLeaseGroup(cleanup, [released.lease]);
+      if (capturedOutput !== undefined)
+        cleanup.retainCapturedOutput(capturedOutput);
+      throw completionFailure === undefined
+        ? cleanup
+        : analysisErrorWithCleanupFailure(
+            completionFailure,
+            cleanup,
+            "firmware_container_runtime",
+          ).bindCleanupDependencies([completionFailure, cleanup]);
     }
+    if (primary === undefined && completionFailure !== undefined)
+      throw completionFailure;
   }
 };
