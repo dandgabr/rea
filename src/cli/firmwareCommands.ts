@@ -44,7 +44,6 @@ export const registerFirmwareCommands = (
               ? "binwalk"
               : "unblob",
           operation,
-          undefined,
           signal,
         );
       }),

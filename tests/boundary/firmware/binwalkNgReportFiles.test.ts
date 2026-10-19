@@ -1,7 +1,7 @@
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, it } from "vitest";
-import { readFirmwareReport } from "../../../src/firmware/FirmwareFiles.js";
+import { FirmwareFileAccess } from "../../../src/firmware/FirmwareFiles.js";
 import { FIRMWARE_LIMITS } from "../../../src/firmware/FirmwareRelease.js";
 import { parseBinwalkNgAnalyses } from "../../../src/firmware/binwalkNg/BinwalkNgReports.js";
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
@@ -9,6 +9,7 @@ import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
 it("admits an exact 8 MiB native report and rejects one byte beyond before parser allocation", async () => {
   const root = await createTestTempDirectory("rea-binwalk-ng-report-");
   const path = join(root, "native.json");
+  const files = new FirmwareFileAccess();
   const report = [
     {
       Analysis: {
@@ -38,16 +39,17 @@ it("admits an exact 8 MiB native report and rejects one byte beyond before parse
   expect(Buffer.byteLength(admitted)).toBe(8 * 1024 * 1024);
   await writeFile(path, admitted);
   const parsed = parseBinwalkNgAnalyses(
-    await readFirmwareReport(path, "inspect_firmware_regions"),
+    await files.report(path, "inspect_firmware_regions"),
     new Map([["/private/input", { size: 1, depth: 0, rootOffset: 0 }]]),
   );
   expect(parsed[0]?.regions[0]?.description.length).toBe(padding);
   expect(parsed[0]?.coverage).toBe("signature_scan");
   await writeFile(path, admitted + " ");
   await expect(
-    readFirmwareReport(path, "inspect_firmware_regions"),
+    files.report(path, "inspect_firmware_regions"),
   ).rejects.toMatchObject({
     _tag: "AnalysisOutputError",
     reason: "Report exceeded 8388608 bytes",
   });
+  await files.close();
 });
