@@ -215,8 +215,8 @@ export interface AnalysisClientContext {
   readonly runId: string;
 }
 
-/** One lifecycle owner for descriptor cleanup and abortable inspection work. */
-export interface FileCloseResourceOwner {
+/** One lifecycle owner for retained resources and abortable inspection work. */
+export interface RetainedResourceScope {
   retain(
     owner: {
       close(): Promise<void>;
@@ -246,7 +246,7 @@ export interface AnalysisProviderInspectionOptions {
 }
 
 export interface AnalysisProfileResolutionOptions extends AnalysisProviderInspectionOptions {
-  readonly fileCloseResources?: FileCloseResourceOwner;
+  readonly resourceScope?: RetainedResourceScope;
 }
 
 interface CapabilityEffects {
@@ -279,6 +279,8 @@ export type CapabilityDescriptor = CapabilityAvailability & {
    * exclusions apply to every policy.
    */
   readonly cachePolicy?: "snapshot" | "live";
+  /** Exact source profile for an operation implemented by a versioned local reader. */
+  readonly analysisProfile?: AnalysisProfileCommitment;
   readonly provider: ProviderIdentity;
   readonly operation: Exclude<AnalysisOperation, "health">;
   readonly effects: CapabilityEffects;
