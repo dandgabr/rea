@@ -19,8 +19,11 @@ import {
   inspectWebNetworkCaptureInputSchema,
   captureSensitiveValues,
   webNetworkCaptureSchema,
+  type InspectWebNetworkCaptureInput,
+  type WebNetworkCapture,
 } from "../domain/webNetworkCapture.js";
 import { completeProviderEvidence } from "./ProviderOperationExecution.js";
+import { analysisErrorWithCleanupFailure } from "../domain/analysisErrorCleanup.js";
 
 const OPERATION = "inspect_web_network_capture";
 
@@ -39,7 +42,11 @@ export class WebNetworkCaptureService {
     options?: ExecutionOptions,
   ): Promise<Result<Evidence, AnalysisError>> {
     if (options?.signal?.aborted)
-      return err(new AnalysisCancelledError(OPERATION));
+      return err(
+        new AnalysisCancelledError(OPERATION, {
+          cause: options.signal.reason,
+        }),
+      );
     const failure = (error: AnalysisError): Result<never, AnalysisError> =>
       err(redactExplicitFailure(error, captureSensitiveValues(rawInput)));
     const parsed = inspectWebNetworkCaptureInputSchema.safeParse(rawInput);
@@ -73,8 +80,62 @@ export class WebNetworkCaptureService {
           },
         ]),
       );
+    if (input.protobuf !== undefined && input.record_ordinals === undefined)
+      return failure(
+        new AnalysisInputError(OPERATION, undefined, [
+          {
+            path: ["record_ordinals"],
+            reason: "invalid_format",
+            message:
+              "Protobuf options require explicit producer record ordinals.",
+          },
+        ]),
+      );
+    if (
+      input.protobuf?.schema !== undefined &&
+      !isAbsolute(input.protobuf.schema.descriptor_set_path)
+    )
+      return failure(
+        new AnalysisInputError(OPERATION, undefined, [
+          {
+            path: ["protobuf", "schema", "descriptor_set_path"],
+            reason: "invalid_format",
+            message: "Expected an absolute descriptor-set path on this host.",
+          },
+        ]),
+      );
     const loaded = await this.port.inspect(input, options);
-    if (!loaded.ok) return failure(loaded.error);
+    if (!loaded.ok) {
+      const partial = webNetworkCaptureSchema.safeParse(
+        loaded.error.partialObservation,
+      );
+      let partialFailure: AnalysisError | undefined;
+      if (partial.success) {
+        const projected = this.#projectCapture(input, partial.data);
+        if (projected.ok) loaded.error.partialObservation = projected.value;
+        else partialFailure = projected.error;
+      } else if (isCapturePartialCandidate(loaded.error.partialObservation)) {
+        partialFailure = new AnalysisOutputError(
+          OPERATION,
+          "Capture adapter retained malformed historical evidence.",
+          { cause: partial.error },
+        );
+      }
+      if (partialFailure !== undefined) {
+        loaded.error.partialObservation = undefined;
+        partialFailure.retainSecondaryFailure(loaded.error);
+        return failure(
+          loaded.error.cleanupIncomplete
+            ? analysisErrorWithCleanupFailure(
+                partialFailure,
+                loaded.error,
+                OPERATION,
+              ).bindCleanupDependencies([partialFailure, loaded.error])
+            : partialFailure,
+        );
+      }
+      return failure(loaded.error);
+    }
     const report = webNetworkCaptureSchema.safeParse(loaded.value);
     if (!report.success)
       return failure(
@@ -83,10 +144,18 @@ export class WebNetworkCaptureService {
           "Capture adapter returned malformed historical evidence.",
         ),
       );
-    const value = report.data;
+    const projected = this.#projectCapture(input, report.data);
+    if (!projected.ok) return failure(projected.error);
+    return completeProviderEvidence(projected.value, options?.signal);
+  }
+
+  #projectCapture(
+    input: InspectWebNetworkCaptureInput,
+    value: WebNetworkCapture,
+  ): Result<Evidence, AnalysisError> {
     const artifactSha256 = value.artifact.sha256;
     if (artifactSha256 === null)
-      return failure(
+      return err(
         new AnalysisOutputError(
           OPERATION,
           "Capture adapter omitted its observed artifact digest before explicit projection.",
@@ -98,7 +167,7 @@ export class WebNetworkCaptureService {
       value.total_records !== value.records.length ||
       value.records.some((record, index) => record.ordinal !== index)
     )
-      return failure(
+      return err(
         new AnalysisOutputError(
           OPERATION,
           "Capture adapter changed the selected artifact, format or original record sequence.",
@@ -113,7 +182,7 @@ export class WebNetworkCaptureService {
     for (const ordinal of selected) {
       const record = safeValue.records[ordinal];
       if (record === undefined)
-        return failure(
+        return err(
           new AnalysisInputError(OPERATION, undefined, [
             {
               path: ["record_ordinals"],
@@ -156,9 +225,33 @@ export class WebNetworkCaptureService {
         ? {}
         : { format: input.format }),
       record_ordinals: selected,
+      ...(input.protobuf === undefined
+        ? {}
+        : {
+            protobuf: {
+              framing: input.protobuf.framing,
+              ...(input.protobuf.body_pointers === undefined
+                ? {}
+                : {
+                    body_pointers: input.protobuf.body_pointers.map(redactText),
+                  }),
+              ...(input.protobuf.schema === undefined
+                ? {}
+                : {
+                    schema: {
+                      descriptor_set_path: redactText(
+                        input.protobuf.schema.descriptor_set_path,
+                      ),
+                      message_type: redactText(
+                        input.protobuf.schema.message_type,
+                      ),
+                    },
+                  }),
+            },
+          }),
       sensitive_value_count: input.sensitive_values.length,
     });
-    return completeProviderEvidence(
+    return ok(
       createEvidence(
         safeSha256 === null
           ? undefined
@@ -201,7 +294,16 @@ export class WebNetworkCaptureService {
             safePath === "" ? [] : [{ kind: "artifact-path", path: safePath }],
         },
       ),
-      options?.signal,
     );
   }
 }
+
+const isCapturePartialCandidate = (value: unknown): boolean => {
+  if (typeof value !== "object" || value === null || Array.isArray(value))
+    return false;
+  const candidate = value as Record<string, unknown>;
+  return (
+    "artifact" in candidate &&
+    ["format", "records", "decoder"].some((field) => field in candidate)
+  );
+};

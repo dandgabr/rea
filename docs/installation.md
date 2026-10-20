@@ -987,6 +987,24 @@ can time out earlier even when Ghidra would complete within its startup deadline
 See [Ghidra first-query deadlines and recovery](mcp-contracts.md#ghidra-first-query-deadlines-and-recovery)
 for client options and the close/reopen recovery flow.
 
+The 330-second default is configurable. Configuration is read when REA starts:
+changing an environment variable in another shell, or closing and reopening a
+binary in the same MCP server, does not change that server's startup allowance.
+For a CLI retry with an example 30-minute allowance:
+
+```sh
+REA_GHIDRA_STARTUP_TIMEOUT_MS=1800000 rea analyze /absolute/path/to/app.exe --provider ghidra --json
+```
+
+For MCP, export useful Evidence before restarting, close the binary and resolve
+any cleanup failure, update the environment in the client's REA server launch
+configuration, then restart REA and reconnect before reopening the target. Allow
+startup plus the query in the client's own tool-call deadline. Every retry uses
+a fresh ephemeral import; smaller result requests do not reduce the prerequisite
+auto-analysis. A larger time allowance does not raise the JVM heap limit or
+guarantee completion. Keep [heap and host CPU controls](#ghidra-heap-and-cpu-controls)
+appropriate for the machine.
+
 One session contains exactly one imported Program; use `provider_id: "ghidra"`, `--provider ghidra`, or
 `REA_ANALYSIS_PROVIDER=ghidra` when both Hopper and Ghidra support the target.
 One persistent decompiler is owned by the Program, and a serial queue keeps
@@ -1089,9 +1107,14 @@ and hyphens; at most 32 names are admitted, each at most 120 characters.
 Names must identify analyzers registered for the selected program. Unknown names
 or options that remain enabled abort the headless import before auto-analysis
 and the bridge, so an unsuccessful override cannot produce a session claiming
-that the analyzer was disabled. For Windows PE resource analysis, the exact name
-is `WindowsResourceReference`. Disabling an analyzer skips the facts it would
-have produced.
+that the analyzer was disabled. The setting applies to every import in the REA
+server. A format-specific analyzer may not be registered for another target, so
+the same override can prevent that target from opening. For mixed-target work,
+omit the override or use a separate REA server configured for the affected
+format. Changing the environment requires restarting the server; reopening a
+target alone keeps the current setting. For Windows PE resource analysis, the
+exact name is `WindowsResourceReference`. Disabling an analyzer skips the facts
+it would have produced.
 
 ### Ghidra heap and CPU controls
 

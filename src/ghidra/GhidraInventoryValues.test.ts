@@ -5,6 +5,30 @@ import {
   parseGhidraInventoryResult,
 } from "./GhidraInventoryValues.js";
 
+it("validates large masked byte queries at the provider boundary without changing caller spelling", () => {
+  const input = {
+    pattern: "aA??".repeat(1024 * 1024),
+    mask: "ff00".repeat(1024 * 1024),
+  };
+  const parsed = parseGhidraInventoryInput("search_bytes", input);
+  expect(parsed.ok).toBe(true);
+  if (!parsed.ok) throw parsed.error;
+  expect(parsed.value.pattern === input.pattern).toBe(true);
+  expect(parsed.value.mask === input.mask).toBe(true);
+  expect(
+    parseGhidraInventoryInput("search_bytes", {
+      ...input,
+      mask: `${input.mask.slice(0, -2)}g0`,
+    }).ok,
+  ).toBe(false);
+  expect(
+    parseGhidraInventoryInput("search_bytes", {
+      ...input,
+      mask: "00ff".repeat(1024 * 1024),
+    }).ok,
+  ).toBe(false);
+});
+
 describe("provider-owned overview boundary", () => {
   const overview = {
     document: "fixture",
@@ -29,7 +53,41 @@ describe("provider-owned overview boundary", () => {
       parseGhidraInventoryResult("read_binary_inventory_summary", overview),
     ).toEqual({
       ok: true,
-      value: { ...overview, segment_count: 0 },
+      value: { value: { ...overview, segment_count: 0 }, rawResult: overview },
+    });
+  });
+
+  it("keeps the independent segment permissions and provenance behind an overview", () => {
+    const reported = {
+      ...overview,
+      segments: [
+        {
+          name: ".text",
+          start: "0x1000",
+          end: "0x100f",
+          readable: true,
+          writable: false,
+          executable: true,
+          permissions: { available: true, source: "ghidra-memory-block" },
+          provenance: "ghidra-memory-block",
+          address_space: "ram",
+          image_base: "0x1000",
+          initialized: true,
+          overlay: false,
+          sections: [],
+        },
+      ],
+    };
+    const parsed = parseGhidraInventoryResult(
+      "read_binary_inventory_summary",
+      reported,
+    );
+    if (!parsed.ok) throw parsed.error;
+    expect(parsed.value.rawResult).toEqual(reported);
+    expect(parsed.value.value).toMatchObject({
+      procedure_count: 0,
+      string_count: 0,
+      segments: [{ name: ".text", start: "0x1000", end: "0x100f" }],
     });
   });
 

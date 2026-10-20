@@ -125,7 +125,9 @@ export const TOOL_EFFECTS: Readonly<Record<string, ToolEffects>> = {
     executesForeignCode: true,
     idempotent: false,
   }),
+  inspect_desktop_application: evidence,
   inspect_go_binary: evidence,
+  inspect_il2cpp_metadata: evidence,
   inspect_rust_binary: evidence,
   inspect_sqlite_database: effects({
     mutatesSession: true,
@@ -703,6 +705,7 @@ export const TOOL_EFFECTS: Readonly<Record<string, ToolEffects>> = {
   compare_artifacts: sessionEvidence,
   compare_wasm_interfaces: sessionEvidence,
   compare_functions: sessionEvidence,
+  match_native_functions: sessionEvidence,
   compare_bundles: effects({ mutatesSession: true }),
   find_changed_behavior: sessionEvidence,
   build_call_path: sessionEvidence,

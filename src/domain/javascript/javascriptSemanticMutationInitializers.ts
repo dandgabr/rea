@@ -2,6 +2,7 @@ import * as t from "@babel/types";
 
 import {
   delayedInstanceFieldValue,
+  semanticComputedMethodKey,
   semanticBranchMayBeSkipped,
   semanticIterationCardinality,
 } from "./javascriptSemanticEvaluationOrder.js";
@@ -377,6 +378,16 @@ const computeDirectInitializerPosition = (
   node: t.Node,
   parents: WeakMap<t.Node, t.Node>,
 ): StatementPosition | null => {
+  if (t.isClassDeclaration(node) && node.id !== null) {
+    const parent = parents.get(node);
+    const statement =
+      (t.isExportNamedDeclaration(parent) ||
+        t.isExportDefaultDeclaration(parent)) &&
+      parent.declaration === node
+        ? parent
+        : node;
+    return statementPosition(statement, parents);
+  }
   if (
     (t.isAssignmentExpression(node) &&
       t.isIdentifier(unwrapJavaScriptExpression(node.left).node)) ||
@@ -471,6 +482,25 @@ const directMutationPosition = (
   return computed;
 };
 
+/** Prove that an unconditional member replacement precedes this read. */
+export const semanticDefiniteEffectPrecedesReference = (
+  effect: t.Node,
+  reference: t.Node,
+  parents: WeakMap<t.Node, t.Node>,
+): boolean => {
+  const before = directMutationPosition(effect, parents);
+  const after = bindingReadPosition(reference, parents);
+  if (before === null || after.position === null || after.repeating)
+    return false;
+  if (positionPrecedes(before, after.position)) return true;
+  return (
+    before.body === after.position.body &&
+    before.index === after.position.index &&
+    before.declaratorIndex === after.position.declaratorIndex &&
+    expressionEvaluationOrder(effect, reference, parents) === "before"
+  );
+};
+
 const computeReferenceInitializerPosition = (
   node: t.Node,
   parents: WeakMap<t.Node, t.Node>,
@@ -481,6 +511,11 @@ const computeReferenceInitializerPosition = (
     const direct = directInitializerPosition(current, parents);
     if (direct !== null) return direct;
     const parent = parents.get(current);
+    if (
+      t.isAssignmentExpression(parent, { operator: "=" }) &&
+      (t.isObjectPattern(parent.left) || t.isArrayPattern(parent.left))
+    )
+      return directMutationPosition(parent, parents);
     if (t.isFunction(parent))
       return t.isBlockStatement(parent.body)
         ? { body: parent.body.body, index: -1, declaratorIndex: -1 }
@@ -597,7 +632,7 @@ const bindingReadPosition = (
     }
     if (
       parent === undefined ||
-      t.isFunction(parent) ||
+      (t.isFunction(parent) && !semanticComputedMethodKey(parent, current)) ||
       delayedInstanceFieldValue(parent, current)
     ) {
       result = { position: null, repeating: false };
@@ -646,6 +681,17 @@ export const semanticBindingAtRead = (
     binding.referenceInitializers.length === 0
   )
     return { status: "ordered", binding, hasDefiniteInitializer: false };
+  const [soleInitializer] = binding.initializers;
+  if (
+    binding.initializers.length === 1 &&
+    binding.referenceInitializers.length === 0 &&
+    binding.declarationKinds.size === 0 &&
+    binding.definitions.length === 1 &&
+    binding.definitions[0]?.kind === "function" &&
+    soleInitializer !== undefined &&
+    t.isFunctionDeclaration(soleInitializer.node)
+  )
+    return { status: "ordered", binding, hasDefiniteInitializer: true };
   const initializer = binding.initializers[0];
   const reference = binding.referenceInitializers[0];
   const origin = initializer ?? reference;
@@ -660,8 +706,15 @@ export const semanticBindingAtRead = (
   // can cover entry even when another write's order remains unknown.
   const hasDefiniteInitializer =
     position !== null &&
-    binding.initializers.some((initializer) => {
-      const source = initializerPosition(initializer, parents);
+    [
+      ...binding.initializers,
+      ...binding.referenceInitializers.filter(({ assignment }) => assignment),
+    ].some((initializer) => {
+      const source = initializerPosition(
+        initializer,
+        parents,
+        binding.referenceInitializers.includes(initializer),
+      );
       return (
         source !== null &&
         positionPrecedes(source, position) &&

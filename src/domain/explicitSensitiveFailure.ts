@@ -40,6 +40,22 @@ export const redactExplicitFailure = (
   values: readonly string[],
 ): AnalysisError => {
   if (values.length === 0) return error;
+  const redacted = redactFailure(error, values);
+  // Observation owners already apply format-aware exclusions. Keep their facts
+  // and identity across every diagnostic replacement, including input/capacity.
+  if (redacted !== error && error.partialObservation !== undefined)
+    redacted.retainPartialObservation(error.partialObservation);
+  return redacted === error
+    ? error
+    : mirrorCleanup(error, redacted, (value) =>
+        redactExplicitText(value, values),
+      );
+};
+
+const redactFailure = (
+  error: AnalysisError,
+  values: readonly string[],
+): AnalysisError => {
   const text = (value: string): string => redactExplicitText(value, values);
   const path = (
     parts: readonly (string | number)[],
@@ -76,6 +92,11 @@ export const redactExplicitFailure = (
   };
   const context = {
     cause: error,
+    ...(error.cleanupPrimary === undefined
+      ? {}
+      : {
+          cleanupPrimary: redactExplicitFailure(error.cleanupPrimary, values),
+        }),
     ...(error.diagnostics === undefined
       ? {}
       : { diagnostics: diagnostics(error.diagnostics) }),
@@ -100,12 +121,11 @@ export const redactExplicitFailure = (
   if (error instanceof AnalysisCancelledError)
     return new AnalysisCancelledError(error.operation, {
       ...context,
-      partialObservation: error.partialObservation,
+      cause: error.cause,
     });
   if (error instanceof AnalysisTimeoutError)
     return new AnalysisTimeoutError(error.operation, error.timeoutMs, {
       ...context,
-      partialObservation: error.partialObservation,
     });
   if (error instanceof AnalysisAccessDeniedError)
     return new AnalysisAccessDeniedError(
@@ -178,9 +198,31 @@ export const redactExplicitFailure = (
       error.providerId,
       error.cleanupResources.map(text),
       diagnostics(error.diagnostics ?? {}),
-      { operation: error.operation, cause: error },
+      {
+        ...context,
+        operation: error.operation,
+      },
     );
   if (error instanceof ProviderAdapterError)
-    return new ProviderAdapterError(error.providerId, error.operation, context);
+    return new ProviderAdapterError(error.providerId, error.operation, {
+      ...context,
+      ...(error.userMessage === undefined
+        ? {}
+        : { userMessage: text(error.userMessage) }),
+      ...(error.remediationAction === undefined
+        ? {}
+        : { remediationAction: text(error.remediationAction) }),
+    });
   return error;
 };
+
+const mirrorCleanup = <Value extends AnalysisError>(
+  source: AnalysisError,
+  redacted: Value,
+  redact: (value: string) => string,
+): Value =>
+  redacted.bindCleanupDependencies([source], {
+    get cleanupResources(): readonly string[] {
+      return source.cleanupResources.map(redact);
+    },
+  });

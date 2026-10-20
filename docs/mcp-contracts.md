@@ -1,8 +1,13 @@
 # MCP runtime contracts
 
+For pairing native functions before comparing selected dossiers, see
+[native function matching](native-function-matching.md). It operates on retained
+inventories, preserves aliases/unknowns and exposes selected fact pages.
+
 Use this reference to call REA tools and interpret their replies on one MCP
 connection. Start with [tool results](#tool-results), [retained Evidence](#retained-application-evidence-inputs),
-and [session discovery](#identity-and-discovery). See [cancellation](#progress-and-cancellation)
+and [session discovery](#identity-and-discovery). See [transports](#transports)
+for the opt-in HTTP listener, [cancellation](#progress-and-cancellation)
 for partial-result recovery and [first-query deadlines](#ghidra-first-query-deadlines-and-recovery)
 when a cold provider exceeds the client's wait.
 
@@ -20,6 +25,14 @@ directly to a compatible comparison tool: `analyze_function` Evidence can be pas
 directly to `compare_functions`, and `inspect_artifact` Evidence to
 `compare_artifacts`. Use `get_evidence_bundle` when the task needs broader
 retained session history or an explicit bundle for transfer.
+
+Ghidra inventories and function replies use `raw_result: null` when their facts
+are already preserved in `normalized_result`, limitations, locations and
+relationship coverage. Distinct overview details, measured load-image
+observations, file-offset selection roles and database types supplemented with
+derived metadata keep their upstream representation. Read function results from
+`normalized_result`; older retained Evidence keeps its original representation
+and identity.
 
 Artifact inventories declare `coverage.scope` (`root` or `container-entries`)
 and `coverage.status` (`complete` or `unknown`) independently of diagnostic
@@ -58,7 +71,13 @@ Call comparison additionally retains the Evidence relationship coverage
 checks. Ghidra and Hopper declare their observed dossier facets and complete
 provider-observed caller/callee sets, including empty sets. Missing decompiler
 output remains unavailable; complete call coverage does not claim every runtime
-target. Hopper's unavailable reference-kind metadata and reported unresolved
+target. When Ghidra's decompiler fails on one function, its dossier is still
+returned: `pseudocode`, `native_api` and `native_value_flow` are unavailable
+with the decompiler's failure as the reason, while the listing-backed facets
+are collected as usual. These failed decompiler observations and workflows
+derived from them retain Evidence but skip snapshot reuse, so a later request
+can observe backend recovery; healthy dossiers keep their existing cache policy.
+`procedure_pseudo_code` still fails for that function. Hopper's unavailable reference-kind metadata and reported unresolved
 calls still prevent equality conclusions for those dimensions. Analysis profiles
 version these declarations so older snapshots are not reused as current results.
 IDA declares the facets its selected adapter cannot provide; an empty
@@ -92,8 +111,9 @@ unresolved relationship reads. Cancellation remains a tool error.
 
 REA prepares complete MCP results within the pinned stdio client's 10 MiB
 receive-buffer budget, including both text and structured representations and
-room for the JSON-RPC envelope. Tool errors carry only their text
-representation and `isError` flag, so only those count against the budget. Response budget settings are captured at startup;
+room for the JSON-RPC envelope. Tool errors omit `structuredContent` from the
+wire; their text, `isError`, provenance marker and negotiated protocol framing
+count toward the wire budget. Response budget settings are captured at startup;
 restart or recreate the server to apply changes. If a result cannot fit, REA returns
 `resource_constraint` with `details.resource: "transport"` before constructing
 a document-sized string. Analysis Evidence remains complete in the current
@@ -103,6 +123,52 @@ that reference for a summary, one section/module, or a stable page, or call
 `export_evidence_bundle` with a destination path. Complete
 bundle exports stream canonical JSON into an atomically published file.
 
+On protocol revision `2026-07-28`, completed replies retain the SDK's
+`resultType: "complete"`, including the replacement for an oversized error.
+This marks completion of the MCP exchange; Evidence coverage, partial facts
+and unknowns retain their separate meaning. Legacy replies keep their existing
+framing.
+
+`list_procedures`, `search_procedures`, `list_strings`, `search_strings` and
+`list_names` accept `detail: "summary"`. Complete inline delivery remains the
+default. Summary retains the original complete Evidence and returns its row
+count, provider identity, analysis-profile digest, original query, parent Evidence
+ID, limitations and explicit unknown discovery coverage. Delivery detail is excluded from provider arguments
+and original Evidence identity.
+
+Read selected rows with `inspect_analysis_view`:
+
+```json
+{
+  "source": {
+    "kind": "retained-evidence",
+    "evidence_id": "ev_<source digest>"
+  },
+  "view": {
+    "kind": "native-inventory",
+    "offset": 0,
+    "limit": 32,
+    "fields": ["value"]
+  }
+}
+```
+
+Each row has `source_index` and `record`; parent Evidence ID plus source index
+identifies same-address alternatives. Order is the original retained order.
+Omit `fields` for complete records; a selected field list always retains
+`record.address`. Selecting `value` also retains available `string` and
+`decoding` qualifications, so native display text and unterminated fragments
+remain distinguishable. Search tools apply their existing filters before retention.
+Follow `coverage.next_offset`; exhaustion describes the retained list, not
+complete discovery of all code or strings. An unbound source keeps
+`artifact: null` and the derived Evidence keeps `subject: null`.
+
+The CLI uses the same projector. For an original complete Evidence JSON file,
+write `{"source":{"kind":"evidence-file","path":"/absolute/source.json"},"view":{"kind":"native-inventory","limit":32}}`
+to `/absolute/view-request.json`, then run
+`rea inspect-analysis-view /absolute/view-request.json --json`. This also reads
+pre-summary source records without changing their identity; no live provider is started.
+
 For oversized native function Evidence, `details.reported_limits.continuation`
 contains a ready-to-call `inspect_analysis_view` request for the retained
 pseudocode's first page. Use its `name` and `arguments` directly, then follow
@@ -111,6 +177,8 @@ limit is the view contract's default, not a guarantee that arbitrary source or
 metadata fits; reduce the limit or export when needed. Continuations are
 offered for completed `analyze_function` results only after session recording is
 acknowledged; the complete result and its retention reference remain intact.
+Oversized native inventories likewise include a ready-to-call first
+`native-inventory` page. Reduce its limit or select fields when a row is large.
 
 A broad follow-up or `get_evidence_bundle` can also exceed the response budget; exporting
 preserves the complete session without sending it through a single MCP frame.
@@ -217,12 +285,19 @@ no group was templated.
 See [derived API surfaces](web-network-captures.md#derived-api-surface).
 
 `inspect_analysis_view` also accepts `environment-manifest` for retained HAR capture
-Evidence, projecting the primary origin's request lines into named tools with path
+Evidence and `capture_browser_scenario` Evidence, projecting the primary origin's request lines into named tools with path
 templates, parameters, observed query names, value-free body shapes and record
 pointers, plus excluded groups and three fixed unknowns. Templates, parameters and
 names are inferences; the Evidence is inferred whenever any tool or excluded group
 is templated, and derived otherwise.
 See [environment manifests](web-network-captures.md#environment-manifest).
+
+`inspect_analysis_view` also accepts `environment-state` for the same parents,
+extracting the initial state the recorded reads observed: entity types with an
+identity field, entities, documents for written non-entity paths, and a render
+plan per read tool that reproduces its recordings from the state or names why it
+cannot. Types and identity are inferences, so the Evidence is always inferred.
+See [environment state](web-network-captures.md#environment-state).
 
 `inspect_analysis_view` projects a caller-selected view of already completed
 `inspect_binary_layout`, `analyze_javascript_application`, or `analyze_function`
@@ -442,6 +517,96 @@ File cleanup can also remain after snapshot publication or after profile
 inspection fails or is cancelled before a provider client exists. If no client
 remains, no provider run or health observation is available; follow the cleanup
 error's reported resources.
+
+## Transports
+
+stdio is the default transport and the only one that client registrations,
+`rea mcp doctor` and the MCP registry entry describe. `rea mcp --http [--host H]
+[--port N]` is an opt-in alternative that serves the same catalog over the
+streamable HTTP transport at `/mcp`; it replaces stdio for that process rather
+than running beside it. Host and port come from the flags, then `MCP_HOST` and
+`MCP_PORT`, then `127.0.0.1` and an ephemeral port. The bound URL is announced
+as one JSON log line on stderr (`"msg":"MCP transport listening"` with `url`)
+at every `REA_LOG_LEVEL`, because an ephemeral port is otherwise unreachable;
+stdout stays unused.
+
+This endpoint uses plain HTTP without TLS or client authentication. Use it only
+within a trusted local or isolated environment; an explicit non-loopback bind
+makes the same tools and active analysis state reachable at that address. It
+does not provide separate users or independent target sessions. Standard client
+registrations continue to use a dedicated stdio process.
+
+The HTTP server is stateful and serves one client at a time on one server
+instance. `initialize` returns an `Mcp-Session-Id`; `notifications/initialized`
+is acknowledged with `202`; responses arrive as JSON or SSE frames; `DELETE
+/mcp` with the session id ends the session with `200`. Ending a session is not
+a server shutdown: the process keeps listening, the instance keeps its providers
+and the shared active target, and the next client opens a fresh session against
+them. A client ending or replacing a session cancels its running tool calls and
+prompt completions, stops request-body reads and fences further message dispatch,
+then waits up to ten seconds for request dispatch, handlers and cleanup to finish before reusing the
+server. A timeout returns `503`; the old calls remain owned, and later requests
+retry the drain rather than starting another session against those resources.
+Requests that finish parsing or SDK dispatch after their session closed are
+refused, and their response streams are cancelled. Tool callbacks whose
+validation finishes after cancellation never start.
+Body forwarding stops when SDK request processing ends, including early header
+and size refusals, rather than remaining active until the session closes.
+HTTP input/route dispatch is limited to eight concurrent requests by default,
+shared by MCP and plain routes. Excess requests receive `503` with a closing
+connection before their bodies are converted, read or cloned. An embedder can
+select `maxConcurrentDispatches`; the SDK's per-body size limit still applies.
+MCP responses with fully read or bodyless requests do not hold admission slots,
+so an idle MCP SSE stream does not prevent later calls. Plain routes retain their
+slots through response delivery and response-source cancellation cleanup. An
+unread upload retains its slot until input finishes or either side closes,
+even with a long response. Sequential keep-alive is supported; a peer pipelining
+behind an unfinished response is disconnected before queued requests dispatch.
+Concurrent MCP requests use separate connections.
+This bounds concurrent input work, not total provider or process memory.
+Provider-backed prompt completions use the same request owner and drain, so a
+cancelled completion cannot keep using providers after handover or shutdown.
+HTTP factories enable `RequestTrackingMcpServer` tracking so completion is tracked
+even when cancellation suppresses the SDK's reply; stdio retains the SDK's
+original callback behavior. Full server shutdown stops the listener and waits
+for MCP work, plain-route handlers and response-source cancellation to settle
+before running provider shutdown hooks or closing providers. Response producers
+must finish provider work before closing their stream and expose asynchronous
+disconnect cleanup through the stream's `cancel()` result. Cancellation does not
+delay delivery of a HEAD reply; a caller retaining a sibling of a teed response
+must consume or cancel that sibling before shutdown can finish. Failed response
+cleanup remains owned, blocks further admission and prevents provider teardown.
+The server continues cleanup
+automatically when they finish, including after a client handover timed out.
+All routes return `503` until the server factory succeeds; startup failure closes
+the listener and joins its pending replies before rejecting the factory.
+The newest client replaces an open session: an `initialize` that arrives
+while a session is open ends that session instead of being refused, because a
+client that exits without `DELETE` must not wedge the listener; the replaced
+client's open streams are closed and its later requests are refused. Only an
+`initialize` that carries the streamable headers (`Content-Type:
+application/json` and an `Accept` naming both `application/json` and
+`text/event-stream`) and passes the Host and Origin checks can replace a
+session; any other sessionless POST goes to the live transport, which refuses
+it without disturbing the session. Requests that carry no valid session id are
+refused with `400` or `404` as the SDK transport defines. A bind is loopback by
+address class, not spelling, and is classified from the address the listener
+actually bound: any `127.0.0.0/8` address, `::1`, or an IPv4-mapped loopback.
+Configured names, including `localhost` and its aliases, do not establish that
+the bound address is local; names are added only after classifying the actual IP.
+On such a bind, requests whose `Host` header is outside the SDK loopback allowlist plus
+the configured name and the bound address are refused with `403`, and a browser
+`Origin` outside that allowlist is refused the same way (a missing `Origin`
+passes); a non-loopback bind relaxes both checks and logs the relaxation. A reply sent before a request body was read (a refused `Host` or `Origin`, an unknown route, the startup `503`) closes the connection after the reply, so an unread upload cannot keep a socket open. Request targets are taken verbatim as origin-form paths (`//host/path` is a path, not another origin); an absolute-form target, a target containing a raw fragment delimiter (`#`), or one whose path URL parsing would rewrite (dot segments such as `/public/../mcp`), is refused with `400`, and a method Fetch does not support with `405`. Percent-encoded `%23` remains valid query data. Only a lone `initialize` can replace an open session; a batch that carries one is left to the transport's refusal. Scoped
+IPv6 literals (`fe80::1%eth0`) are refused before binding, because no URL can
+name them. Listener errors reach the runtime's connection-loss handler only
+after a successful bind; a bind failure prints the listen-failure message alone. Request bodies are bounded by the SDK's
+4 MiB limit, and the response budget keeps its stdio-derived floor. The
+listener ends on SIGINT or SIGTERM only, not on stdin EOF, and exits `130` or
+`143` after cleanup settles. A signal that arrives while startup is still
+running is recorded and acted on as soon as the listener and its providers are
+owned, so startup never ends without cleanup; a second signal during startup
+exits immediately.
 
 ## Progress and cancellation
 
@@ -677,6 +842,13 @@ the current client, so it is not a fresh-start recovery. On the same connection:
    `provider_id: "ghidra"`, then retry the first query with an appropriate client
    deadline. The connection and selected provider do not need to change.
 
+If REA's provider startup allowance also needs raising, preserve Evidence and
+close as above, then update `REA_GHIDRA_STARTUP_TIMEOUT_MS` in REA's launch
+environment and restart the server. Reconnect the MCP client before reopening
+the target. Configuration is read at process startup; close/reopen on the same
+connection cannot apply a changed environment. See the
+[CLI retry example](installation.md#ghidra).
+
 This close/reopen flow was exercised on one real Linux stdio connection after a
 controlled startup timeout, followed by a successful overview and function
 analysis. A separate Windows x64 stdio run with Ghidra 12.1.4, JDK 21 and Node
@@ -775,6 +947,12 @@ advertised schema to reject an incomplete group. Tests validate the schemas
 after SDK conversion and check advertised validation and actual calls.
 Individual model APIs can impose additional nesting limits; complete producer
 captures can exceed ten structural levels.
+
+`search_bytes` advertises its pattern and mask as descriptive strings. Its
+shared canonical validator scans byte pairs, whitespace, wildcards and aligned
+masks without a repeating regular expression or temporary byte arrays. The
+server rejects malformed or unconstrained patterns before provider dispatch;
+the advertised strings alone do not express those rules.
 
 Boolean literal constraints in input schemas are relaxed only in this
 advertisement. For example, a boolean `const` is presented as `type: boolean`;

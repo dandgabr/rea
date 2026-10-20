@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, relative } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
@@ -167,6 +167,72 @@ describe("reverse engineering command services", () => {
   });
 });
 
+it.each([
+  ["file_headers", true, undefined, ["-f"], false],
+  ["section_headers", true, undefined, ["-h"], false],
+  ["symbols", true, undefined, ["-t"], false],
+  ["relocations", true, undefined, ["-r"], false],
+  ["disassemble", true, undefined, ["-d"], false],
+  ["disassemble_all", true, undefined, ["-D"], false],
+  [
+    "disassemble",
+    true,
+    "sample_symbol",
+    ["--disassemble=sample_symbol"],
+    false,
+  ],
+  ["dwarf", true, undefined, ["-W", "-WK"], true],
+  ["dwarf", false, undefined, ["-W", "-WN"], false],
+] as const)(
+  "scopes the debug-link limitation to %s when following links is %s",
+  async (operation, followDebugLinks, symbol, flags, warns) => {
+    const directory = await mkdtemp(join(tmpdir(), "rea-objdump-limitations-"));
+    const path = join(directory, "fixture.bin");
+    await writeFile(path, "inert artifact");
+    const calls: (readonly string[])[] = [];
+    const service = new ReverseEngineeringService({
+      environment: { REA_OBJDUMP_COMMAND: "/tools/objdump" },
+      run: async (_command, args) => {
+        calls.push(args);
+        return { stdout: "captured stdout", stderr: "captured stderr" };
+      },
+    });
+
+    try {
+      const result = await service.inspectWithObjdump({
+        path,
+        operation,
+        follow_debug_links: followDebugLinks,
+        ...(symbol === undefined ? {} : { symbol }),
+      });
+      if (!result.ok) throw result.error;
+      expect(calls).toEqual([[...flags, path]]);
+      expect(result.value.parameters).toMatchObject({
+        path,
+        operation,
+        follow_debug_links: followDebugLinks,
+        ...(symbol === undefined ? {} : { symbol }),
+      });
+      expect(result.value.parameters.command_arguments).toEqual(calls[0]);
+      expect(result.value.raw_result).toMatchObject({
+        stdout: "captured stdout",
+        stderr: "captured stderr",
+        exit_code: 0,
+        output_truncated: false,
+        completion_status: "complete",
+      });
+      expect(
+        result.value.limitations.some((text) =>
+          text.startsWith("DWARF output"),
+        ),
+      ).toBe(warns);
+    } finally {
+      await service.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
+
 it("uses one selected environment snapshot for provider selection and execution", async () => {
   const directory = await mkdtemp(join(tmpdir(), "rea-provider-environment-"));
   const path = join(directory, "fixture.bin");
@@ -274,9 +340,10 @@ it("marks signal-terminated provider commands as unknown completion", async () =
 });
 
 describe("Rizin command service", () => {
-  it("runs Rizin with user scripts suppressed while retaining plugins and preserves nonzero output", async () => {
+  it("defaults Rizin to plain presentation and preserves caller-selected colour on nonzero exits", async () => {
     const directory = await mkdtemp(join(tmpdir(), "rea-rizin-"));
-    const path = join(directory, "fixture.bin");
+    const path = join(directory, "fixture with spaces.bin");
+    const callerPath = relative(process.cwd(), path);
     await writeFile(path, "fixture");
     const calls: { command: string; args: readonly string[] }[] = [];
     const service = new ReverseEngineeringService({
@@ -291,7 +358,7 @@ describe("Rizin command service", () => {
           killed: boolean;
         };
         Object.assign(failure, {
-          stdout: "partial data",
+          stdout: "\u001b[31mpartial data\u001b[0m\n",
           stderr: "command error",
           code: 2,
           signal: null,
@@ -302,17 +369,26 @@ describe("Rizin command service", () => {
     });
 
     try {
-      const result = await service.executeRizinCommand({ path, command: "iI" });
+      const command = "e scr.color=1;pd 1";
+      const result = await service.executeRizinCommand({
+        path: callerPath,
+        command,
+      });
       expect(result.ok).toBe(true);
       if (!result.ok) return;
+      const lookupPath = result.value.subject?.local_path;
+      expect(isAbsolute(lookupPath ?? "")).toBe(true);
+      expect(result.value.subject?.digest.sha256).toBe(
+        createHash("sha256").update("fixture").digest("hex"),
+      );
       expect(calls).toEqual([
         {
           command: "/tools/rizin",
-          args: ["-N", "-q", "-c", "iI", path],
+          args: ["-N", "-q", "-e", "scr.color=0", "-c", command, lookupPath],
         },
       ]);
       expect(result.value.raw_result).toMatchObject({
-        stdout: "partial data",
+        stdout: "\u001b[31mpartial data\u001b[0m\n",
         stderr: "command error",
         exit_code: 2,
         completion_status: "complete",
@@ -320,14 +396,19 @@ describe("Rizin command service", () => {
       expect(result.value.limitations.join(" ")).not.toContain(
         "terminated by signal",
       );
+      expect(result.value.normalized_result).toMatchObject({
+        stdout: "\u001b[31mpartial data\u001b[0m\n",
+      });
       expect(result.value.limitations).toContain(
         "Rizin commands and retained plugins may read files or access network resources outside the selected artifact; those external inputs are not bound to Evidence.",
       );
       expect(result.value.limitations).toHaveLength(4);
       expect(result.value.parameters).toMatchObject({
-        command: "iI",
+        path: callerPath,
+        command,
         provider_executable: "/tools/rizin",
       });
+      expect(result.value.parameters.command_arguments).toEqual(calls[0]?.args);
       expect(result.value.provider.id).toBe("rizin");
     } finally {
       await rm(directory, { recursive: true, force: true });

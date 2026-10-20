@@ -13,6 +13,7 @@ import { hasValidSourceMapContents } from "../../domain/sourceMapContents.js";
 import {
   flattenSourceMapLeaves,
   sourceMapJsonText,
+  sourceMapMappingsSchema,
 } from "../../domain/sourceMapEnvelope.js";
 import type { JavaScriptStaticAnalysis } from "../../domain/javascript/javascriptStaticAnalysisTypes.js";
 import { failedJavaScriptStaticAnalysis } from "../../domain/javascript/javascriptStaticAnalysisHelpers.js";
@@ -512,6 +513,13 @@ const parsePackage = (
     name: optionalString(value.name),
     version: optionalString(value.version),
     main: optionalString(value.main),
+    main_status:
+      value.main === undefined || value.main === ""
+        ? "default"
+        : typeof value.main === "string"
+          ? "declared"
+          : "invalid",
+    main_entrypoint: typeof value.main === "string" ? value.main : "",
     renderer:
       optionalString(value.renderer) ??
       optionalString(value.browser) ??
@@ -538,6 +546,8 @@ const unavailablePackage = (
   name: null,
   version: null,
   main: null,
+  main_status: "unavailable",
+  main_entrypoint: null,
   renderer: null,
   limitation,
 });
@@ -594,6 +604,7 @@ const collectSourceMapOriginals = (
   maps: readonly Readonly<Record<string, unknown>>[],
 ): JavaScriptSourceMapObservation => {
   const sources: JavaScriptSourceMapOriginal[] = [];
+  let limitation: string | null = null;
   let declarationIndex = 0;
   for (const map of maps) {
     const names = map.sources;
@@ -636,7 +647,10 @@ const collectSourceMapOriginals = (
         content_sha256: content === null ? null : sha256(content),
       });
     }
+    if (!sourceMapMappingsSchema.safeParse(map.mappings).success)
+      limitation ??= "Source map has no mappings string.";
   }
+  if (limitation !== null) return invalidSourceMap(file, limitation, sources);
   return {
     path: file.path,
     sha256: file.sha256,
@@ -680,11 +694,12 @@ const unavailableSourceMap = (
 const invalidSourceMap = (
   file: JavaScriptArtifactFile,
   limitation: string,
+  sources: readonly JavaScriptSourceMapOriginal[] = [],
 ): JavaScriptSourceMapObservation => ({
   path: file.path,
   sha256: file.sha256,
   status: "invalid",
-  sources: [],
+  sources,
   limitation,
 });
 

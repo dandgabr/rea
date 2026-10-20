@@ -1,3 +1,4 @@
+import { z } from "zod";
 import { analysisErrorWithCleanupFailure } from "../domain/analysisErrorCleanup.js";
 import { artifactFilePrimaryFailure } from "../artifacts/ArtifactFileOperation.js";
 import { fileURLToPath } from "node:url";
@@ -118,6 +119,14 @@ export type GhidraProviderClientFactory = (
   >;
 
 type GhidraProviderClientInstance = ReturnType<GhidraProviderClientFactory>;
+
+interface GhidraExecutionMetadata {
+  readonly cachePolicy?: "live";
+  readonly rawResult?: JsonValue;
+  readonly limitations?: readonly string[];
+  readonly locations?: readonly EvidenceLocation[];
+  readonly relationshipCoverage?: RelationshipCoverage;
+}
 
 /** Build one AnalysisClient for an admitted Ghidra target and profile. */
 export const createGhidraProviderClient = (input: {
@@ -498,19 +507,14 @@ export const createGhidraProviderClient = (input: {
   const projectExecution = (
     operation: AnalysisOperation,
     normalized: JsonValue,
-    rawResult: JsonValue,
-    observationLimitations: readonly string[] = [],
-    locations: readonly EvidenceLocation[] = [],
-    relationshipCoverage?: RelationshipCoverage,
+    observation: GhidraExecutionMetadata = {},
   ) => {
     return createAnalysisExecution(normalized, committedProfile.provider, {
-      rawResult,
-      locations,
+      ...observation,
       analysisProfile: committedProfile,
-      ...(relationshipCoverage === undefined ? {} : { relationshipCoverage }),
       limitations: [
         ...limitationsFor(operation),
-        ...observationLimitations,
+        ...(observation.limitations ?? []),
         ...sessionLimitations(),
       ],
     });
@@ -530,12 +534,14 @@ export const createGhidraProviderClient = (input: {
       );
     const parsed = parseGhidraInventoryResult(operation, called.value);
     if (!parsed.ok) return parsed;
-    return ok(projectExecution(operation, parsed.value, called.value));
+    const { value, ...observation } = parsed.value;
+    return ok(projectExecution(operation, value, observation));
   };
   const loadImageExecution = async (raw: JsonValue, signal?: AbortSignal) => {
     const operation = "inspect_native_load_image";
     const measured = parseGhidraInventoryResult(operation, raw);
     if (!measured.ok) return measured;
+    const { value: observed, ...observation } = measured.value;
     let derived: NativeAotPeResult | undefined;
     if (target.format === "pe") {
       if (nativeAotOwner === undefined)
@@ -548,7 +554,7 @@ export const createGhidraProviderClient = (input: {
           }),
         );
       const result = await nativeAotOwner.derive(
-        measured.value.image_base,
+        observed.image_base,
         operation,
         signal,
         raw,
@@ -559,7 +565,7 @@ export const createGhidraProviderClient = (input: {
     const attested = await attestGhidraNativeLoadImage({
       target,
       operation,
-      measured: measured.value,
+      measured: observed,
       client,
       mapSessionError: (failure) =>
         projectSessionError(
@@ -576,7 +582,7 @@ export const createGhidraProviderClient = (input: {
           projectExecution(
             operation,
             jsonValueSchema.parse(attested.value),
-            raw,
+            observation,
           ),
         )
       : attested;
@@ -661,22 +667,11 @@ export const createGhidraProviderClient = (input: {
         );
       if (operation === "inspect_native_load_image")
         return loadImageExecution(called.value, options?.signal);
-      let normalized: JsonValue;
-      let observationLimitations: readonly string[] = [];
-      let observationLocations: readonly EvidenceLocation[] = [];
-      let relationshipCoverage: RelationshipCoverage | undefined;
-      if (isGhidraFunctionOperation(operation)) {
-        const result = parseGhidraFunctionResult(operation, called.value);
-        if (!result.ok) return result;
-        normalized = result.value.value;
-        observationLimitations = result.value.limitations;
-        observationLocations = result.value.locations ?? [];
-        relationshipCoverage = result.value.relationshipCoverage;
-      } else {
-        const result = parseGhidraInventoryResult(operation, called.value);
-        if (!result.ok) return result;
-        normalized = result.value;
-      }
+      const result = isGhidraFunctionOperation(operation)
+        ? parseGhidraFunctionResult(operation, called.value)
+        : parseGhidraInventoryResult(operation, called.value);
+      if (!result.ok) return result;
+      let { value: normalized, ...observation } = result.value;
       if (
         operation === "inspect_native_data_type" &&
         normalized !== null &&
@@ -711,23 +706,17 @@ export const createGhidraProviderClient = (input: {
             if (!derived.ok) return derived;
           }
           const metadata = nativeAotOwner?.readTypeDetail(address);
-          if (metadata !== undefined)
+          if (metadata !== undefined) {
+            // Preserve the database reply independently of the derived overlay.
+            observation = { ...observation, rawResult: called.value };
             normalized = jsonValueSchema.parse({
               ...normalized,
               metadata_recovery: metadata,
             });
+          }
         }
       }
-      return ok(
-        projectExecution(
-          operation,
-          normalized,
-          called.value,
-          observationLimitations,
-          observationLocations,
-          relationshipCoverage,
-        ),
-      );
+      return ok(projectExecution(operation, normalized, observation));
     },
     executeIfReady: async (operation, parameters, options) => {
       if (operation !== "list_documents" && operation !== "list_procedures")
@@ -921,6 +910,13 @@ const projectPrimarySessionError = (
           ? failure
           : failure.cancellation.reason,
     });
+  if (failure.kind === "remote" && failure.remoteCode === "decompile_failed")
+    return new ProviderAdapterError("ghidra", operation, {
+      ...context,
+      userMessage: `${failure.message.trim().replace(/\.$/u, "")}. Only the decompiler failed for this procedure; the Ghidra session remains usable.`,
+      remediationAction:
+        "Call analyze_function (CLI: `rea function`) for the same procedure. It returns assembly, callers, callees, references and basic blocks from the Ghidra listing and records this decompiler failure under facet_availability.pseudocode. Repeating the unchanged decompile request is not expected to succeed.",
+    });
   if (failure.kind === "analysis_timeout")
     return new AnalysisTimeoutError(
       operation,
@@ -958,32 +954,96 @@ const projectPrimarySessionError = (
       failure.message,
       context,
     );
+  const output =
+    failure.kind === "start" ||
+    failure.kind === "process" ||
+    failure.kind === "protocol" ||
+    failure.kind === "timeout"
+      ? readGhidraFailureOutput(failure.diagnostics.failure_output)
+      : undefined;
   const memoryFailure = projectObservedJvmMemoryFailure(
     operation,
     failure,
     context,
+    output,
   );
+  const uncertainty =
+    output?.complete === false
+      ? "Ghidra's output for this operation is incomplete. No OutOfMemoryError was confirmed; a memory cause cannot be ruled out."
+      : undefined;
   if (memoryFailure !== undefined) return memoryFailure;
   if (failure.kind === "timeout") {
     const timeoutMs = failure.timeoutMs ?? startupTimeoutMs;
-    return new AnalysisTimeoutError(
-      operation,
-      timeoutMs,
+    const guidance =
       failure.message === GHIDRA_STARTUP_DEADLINE_ELAPSED
-        ? { ...context, ...ghidraStartupTimeoutGuidance(timeoutMs) }
-        : context,
-    );
+        ? ghidraStartupTimeoutGuidance(timeoutMs)
+        : undefined;
+    return new AnalysisTimeoutError(operation, timeoutMs, {
+      ...context,
+      ...guidance,
+      ...(uncertainty === undefined
+        ? {}
+        : {
+            userMessage: `${
+              guidance?.userMessage ??
+              `Ghidra did not finish within its ${String(timeoutMs)} ms deadline.`
+            } ${uncertainty}`,
+          }),
+    });
   }
   const exited = exitedProviderMessage(operation, failure, health);
   if (exited !== undefined)
     return new ProviderAdapterError("ghidra", operation, {
       ...context,
-      userMessage: exited,
+      userMessage:
+        uncertainty === undefined ? exited : `${exited} ${uncertainty}`,
     });
-  return new ProviderAdapterError("ghidra", operation, context);
+  return new ProviderAdapterError("ghidra", operation, {
+    ...context,
+    ...(uncertainty === undefined
+      ? {}
+      : {
+          userMessage: uncertainty,
+          remediationAction:
+            "Review the retained Ghidra diagnostics and capture complete launcher output before choosing resource-specific recovery.",
+        }),
+  });
 };
 
-/** Project only OOME evidence captured during the operation that failed. */
+const observedJvmFailureSchema = z.object({
+  stream: z.enum(["stdout", "stderr"]),
+  offset: z.number().int().nonnegative(),
+  line: z.string().min(1),
+});
+
+interface GhidraFailureOutputView {
+  readonly oomText: string | undefined;
+  readonly complete: boolean | undefined;
+}
+
+/** Read the scoped capture once; unavailable fields remain unconfirmed. */
+const readGhidraFailureOutput = (
+  scoped: JsonValue | undefined,
+): GhidraFailureOutputView | undefined => {
+  if (scoped === null || typeof scoped !== "object" || Array.isArray(scoped))
+    return undefined;
+  const observedLines = Array.isArray(scoped.observed_oome)
+    ? scoped.observed_oome.flatMap((observed) => {
+        const parsed = observedJvmFailureSchema.safeParse(observed);
+        return parsed.success ? [parsed.data.line] : [];
+      })
+    : [];
+  return {
+    oomText: observedLines.length === 0 ? undefined : observedLines.join("\n"),
+    complete:
+      typeof scoped.complete === "boolean" ? scoped.complete : undefined,
+  };
+};
+
+/**
+ * Project OOME evidence captured during the operation that failed, including
+ * OOME lines the process supervisor observed beyond the retention budget.
+ */
 const projectObservedJvmMemoryFailure = (
   operation: AnalysisOperation,
   failure: GhidraSessionError,
@@ -991,35 +1051,10 @@ const projectObservedJvmMemoryFailure = (
     readonly cause: GhidraSessionError;
     readonly diagnostics: Readonly<Record<string, JsonValue>>;
   },
+  scoped: GhidraFailureOutputView | undefined,
 ): AnalysisResourceConstraintError | undefined => {
-  if (
-    failure.kind !== "start" &&
-    failure.kind !== "process" &&
-    failure.kind !== "protocol" &&
-    failure.kind !== "timeout"
-  )
-    return undefined;
-  const scoped = failure.diagnostics.failure_output;
-  if (
-    scoped === null ||
-    typeof scoped !== "object" ||
-    Array.isArray(scoped) ||
-    typeof scoped.stdout !== "object" ||
-    scoped.stdout === null ||
-    typeof scoped.stderr !== "object" ||
-    scoped.stderr === null
-  )
-    return undefined;
-  const streamText = (value: JsonValue): string =>
-    typeof value === "object" &&
-    value !== null &&
-    !Array.isArray(value) &&
-    typeof value.text === "string"
-      ? value.text
-      : "";
-  const output = `${streamText(scoped.stdout)}\n${streamText(scoped.stderr)}`;
-  if (!/java\.lang\.OutOfMemoryError(?:\s*:|\b)/u.test(output))
-    return undefined;
+  const output = scoped?.oomText;
+  if (output === undefined) return undefined;
   const threadCapacity = /unable to create native thread/iu.test(output);
   const heapExhaustion = /Java heap space|GC overhead limit exceeded/iu.test(
     output,
@@ -1069,8 +1104,8 @@ const projectObservedJvmMemoryFailure = (
 
 /** Name the settings that change Ghidra's import-and-analysis startup deadline. */
 const ghidraStartupTimeoutGuidance = (timeoutMs: number) => ({
-  userMessage: `Ghidra did not finish importing and analyzing the target within its ${String(timeoutMs)} ms startup deadline (REA_GHIDRA_STARTUP_TIMEOUT_MS).`,
-  remediationAction: `Large binaries can need longer: set REA_GHIDRA_STARTUP_TIMEOUT_MS above ${String(timeoutMs)} in the environment that starts REA, or skip expensive analyzers with REA_GHIDRA_DISABLED_ANALYZERS, then open the target again. An MCP client's own tool-call timeout is separate and may also need raising.`,
+  userMessage: `Ghidra did not finish importing and analyzing the target within its configured ${String(timeoutMs)} ms startup deadline (REA_GHIDRA_STARTUP_TIMEOUT_MS).`,
+  remediationAction: `Large binaries can need longer: set REA_GHIDRA_STARTUP_TIMEOUT_MS above ${String(timeoutMs)} in REA's launch environment; REA_GHIDRA_DISABLED_ANALYZERS can skip selected expensive analyzers with reduced coverage. Before restarting, export useful Evidence and close the binary; resolve any cleanup failure. Then restart REA, reconnect the MCP client if used, and reopen the target. Reopening alone keeps the current server settings and repeats import from scratch. The MCP client's tool-call deadline must also allow startup and the query.`,
 });
 
 /** A provider already observed as running can be restarted by reopening. */

@@ -36,10 +36,10 @@ import {
 } from "./ArtifactReader.js";
 import type { ZipPackageFormat } from "../domain/zipPackageFormat.js";
 import {
-  ARTIFACT_DECOMPRESSION_RATIO,
-  artifactDecompressionBudgetBytes,
-  MINIMUM_ARTIFACT_DECOMPRESSION_BYTES,
-} from "../domain/artifactDecompressionBudget.js";
+  ARTIFACT_EXPANSION_RATIO,
+  artifactExpansionBudgetBytes,
+  MINIMUM_ARTIFACT_EXPANDED_BYTES,
+} from "../domain/artifactExpansionBudget.js";
 import { OwnedFileHandle } from "../filesystem/OwnedFileHandle.js";
 import {
   NonRegularFileReadError,
@@ -209,11 +209,11 @@ export class ZipArtifactReader implements ArtifactReader {
         metadata.declaredSize >= 0
       ) {
         declaredFileBytes += metadata.declaredSize;
-        const budget = artifactDecompressionBudgetBytes(this.#source.size);
+        const budget = artifactExpansionBudgetBytes(this.#source.size);
         if (declaredFileBytes > budget)
           throw new ArtifactReaderFailure(
             "limit",
-            `ZIP entries declare ${String(declaredFileBytes)} uncompressed bytes, exceeding this archive's ${String(budget)}-byte decompression budget (${String(MINIMUM_ARTIFACT_DECOMPRESSION_BYTES)}-byte minimum, ${String(ARTIFACT_DECOMPRESSION_RATIO)}x archive size); a small archive cannot expand this far`,
+            `ZIP entries declare ${String(declaredFileBytes)} uncompressed bytes, exceeding this archive's ${String(budget)}-byte decompression budget (${String(MINIMUM_ARTIFACT_EXPANDED_BYTES)}-byte minimum, ${String(ARTIFACT_EXPANSION_RATIO)}x archive size); a small archive cannot expand this far`,
           );
       }
       const stored = this.#entries.get(metadata.adapterKey);
@@ -289,7 +289,7 @@ const projectZipEntry = (
     executable: entry.executable,
     encrypted: entry.encrypted,
     byteOffset: null,
-    declaredSha256: null,
+    declaredIntegrity: null,
     unpacked: false,
     limitations: [
       ...(kind === "symlink" ? ["Archive symlink target was not read."] : []),
@@ -298,9 +298,22 @@ const projectZipEntry = (
         : [
             `ZIP member name ${JSON.stringify(sourcePath)} has a leading current-directory prefix omitted from its logical path.`,
           ]),
+      ...legacyNameLimitations(entry),
     ],
     adapterKey: `zip-entry:${index}`,
   };
+};
+
+/** Preserve source bytes when an unflagged legacy name may use another code page. */
+const legacyNameLimitations = (entry: Entry): readonly string[] => {
+  if (entry.filenameUTF8 || entry.extraFieldUnicodePath?.valid === true)
+    return [];
+  const bytes = entry.rawFilename;
+  if (!bytes.some((byte) => byte >= 0x80)) return [];
+  const hex = Buffer.from(bytes).toString("hex");
+  return [
+    `ZIP name uses CP437 fallback; source encoding unverified; raw hex: ${hex}.`,
+  ];
 };
 
 const decodeZipEntryText = (

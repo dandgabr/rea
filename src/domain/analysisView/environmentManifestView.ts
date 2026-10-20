@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { WebNetworkCaptureRecord } from "../webNetworkCapture.js";
 import { AnalysisUnsupportedTargetError } from "../analysisErrorCore.js";
 import type { AnalysisError } from "../analysisErrorBase.js";
 import { uniqueSorted } from "../canonicalOrdering.js";
@@ -9,22 +10,28 @@ import type {
   UnsignedAnalysisView,
 } from "./analysisView.js";
 import { EnvironmentManifestAccumulator } from "./EnvironmentManifestAccumulator.js";
-import { TEMPLATE_RULES } from "./environmentManifestRules.js";
+import {
+  TEMPLATE_RULES,
+  type TemplateRule,
+} from "./environmentManifestRules.js";
 import { admitHarCaptureParent } from "./WebNetworkProjectionAccumulator.js";
+import { admitScenarioCaptureParent } from "./scenarioCaptureRecords.js";
 import { ROUTE_RULES } from "./webNetworkRouteTemplates.js";
+
+/** Opt-in template rules, each listed at most once; shared by every view that groups tools. */
+export const templateRulesSchema = z
+  .array(z.enum(TEMPLATE_RULES))
+  .refine((rules) => new Set(rules).size === rules.length, {
+    message: "template_rules must not repeat a rule",
+  })
+  .meta({ uniqueItems: true })
+  .default([]);
 
 export const environmentManifestViewRequestSchema = z.strictObject({
   kind: z.literal("environment-manifest"),
-  template_rules: z
-    .array(z.enum(TEMPLATE_RULES))
-    .refine((rules) => new Set(rules).size === rules.length, {
-      message: "template_rules must not repeat a rule",
-    })
-    .meta({ uniqueItems: true })
-    .default([])
-    .describe(
-      "Opt-in template rules applied after the four format rules, each listed at most once: after-uid-literal templates the segment following a literal uid, opaque-token templates long mixed alphanumeric segments, sibling-variance merges groups that differ in one identifier-like segment. Literal sibling folding into existing opt-in parameters also requires sibling-variance. Merged parameters are inferences.",
-    ),
+  template_rules: templateRulesSchema.describe(
+    "Opt-in template rules applied after the four format rules, each listed at most once: after-uid-literal templates the segment following a literal uid, opaque-token templates long mixed alphanumeric segments, sibling-variance merges groups that differ in one identifier-like segment, sibling-pair-variance merges groups that differ in two adjacent literals between a plural literal and another literal when at least three distinct pairs vary in both. Literal sibling folding into existing opt-in parameters also requires sibling-variance. Merged parameters are inferences.",
+  ),
   include_query_parameter_names: z
     .boolean()
     .default(true)
@@ -119,7 +126,94 @@ export const environmentManifestFields = {
     ),
 };
 
-/** Project retained HAR request lines into a replayable tool surface; templates are inferences. */
+/** The records, coverage and identity a manifest projects from, for either parent kind. */
+export interface CaptureParent {
+  readonly operation:
+    | "inspect_web_network_capture"
+    | "capture_browser_scenario";
+  readonly records: readonly WebNetworkCaptureRecord[];
+  readonly total_records: number;
+  readonly limitations: readonly string[];
+  readonly artifact: { readonly path: string; readonly sha256: string | null };
+}
+
+/** HAR captures keep their own gate; a browser scenario has no captured file, so its artifact is empty. */
+const admitCaptureParent = (
+  parent: AnalysisViewParent,
+  viewKind: "environment-manifest" | "environment-state",
+  accumulator: EnvironmentManifestAccumulator,
+): Result<CaptureParent, AnalysisError> => {
+  if (parent.operation === "capture_browser_scenario") {
+    const scenario = admitScenarioCaptureParent(parent, viewKind, accumulator);
+    return scenario.ok
+      ? ok({
+          operation: "capture_browser_scenario",
+          records: scenario.value.records,
+          total_records: scenario.value.totalRecords,
+          limitations: scenario.value.limitations,
+          artifact: { path: "", sha256: null },
+        })
+      : scenario;
+  }
+  const har = admitHarCaptureParent(parent, viewKind, accumulator);
+  return har.ok
+    ? ok({ operation: "inspect_web_network_capture", ...har.value })
+    : har;
+};
+
+/** Admit the parent, the shared and view-specific limitations, then group every retained record. */
+export const groupCaptureRecords = (
+  parent: AnalysisViewParent,
+  viewKind: "environment-manifest" | "environment-state",
+  rules: readonly TemplateRule[],
+  target: {
+    readonly accumulator: EnvironmentManifestAccumulator;
+    readonly noun: "manifest" | "state";
+    readonly limitations: readonly string[];
+  },
+): Result<CaptureParent, AnalysisError> => {
+  const admitted = admitCaptureParent(parent, viewKind, target.accumulator);
+  if (!admitted.ok) return admitted;
+  const added = addCaptureRecords(parent, admitted.value, rules, target);
+  return added.ok ? admitted : added;
+};
+
+/** Admit the shared and view-specific limitations, then group every retained record. */
+const addCaptureRecords = (
+  parent: AnalysisViewParent,
+  capture: CaptureParent,
+  rules: readonly TemplateRule[],
+  target: {
+    readonly accumulator: EnvironmentManifestAccumulator;
+    readonly noun: "manifest" | "state";
+    readonly limitations: readonly string[];
+  },
+): Result<void, AnalysisError> => {
+  const limitations = target.accumulator.addLimitations([
+    ...parent.limitations,
+    ...capture.limitations,
+    "Tool templates, parameters and names are inferences from recorded request lines; they do not establish handler identity, URL-space schemas or causality.",
+    ...target.limitations,
+    ...(rules.length > 0
+      ? [
+          `Opt-in template rules ${uniqueSorted(rules).join(", ")} merge recorded literals by shape; merged parameters may conflate distinct resources.`,
+        ]
+      : []),
+    ...(capture.records.length < capture.total_records
+      ? [
+          `Parent contains an ordinal subset; the ${target.noun} covers only retained records.`,
+        ]
+      : []),
+  ]);
+  if (!limitations.ok) return limitations;
+  for (const record of capture.records) {
+    const added = target.accumulator.add(record);
+    if (!added.ok) return added;
+  }
+  return ok(undefined);
+};
+
+/** Project retained request lines, from a HAR or a browser scenario, into a replayable tool surface; templates are inferences. */
 export const projectEnvironmentManifestView = (
   parent: AnalysisViewParent,
   view: AnalysisViewRequest,
@@ -136,48 +230,27 @@ export const projectEnvironmentManifestView = (
       new AnalysisUnsupportedTargetError(
         "inspect_analysis_view",
         parent.evidenceId,
-        `View ${view.kind} is unsupported for parent operation ${parent.operation}; environment-manifest requires inspect_web_network_capture.`,
+        `View ${view.kind} is unsupported for parent operation ${parent.operation}; environment-manifest requires inspect_web_network_capture or capture_browser_scenario.`,
       ),
     );
-  const admitted = admitHarCaptureParent(
-    parent,
-    "environment-manifest",
+  const grouped = groupCaptureRecords(parent, view.kind, view.template_rules, {
     accumulator,
-  );
-  if (!admitted.ok) return admitted;
-  const capture = admitted.value;
-  const limitations = accumulator.addLimitations([
-    ...parent.limitations,
-    ...capture.limitations,
-    "Tool templates, parameters and names are inferences from recorded request lines; they do not establish handler identity, URL-space schemas or causality.",
-    ...(view.include_query_parameter_names
+    noun: "manifest",
+    limitations: view.include_query_parameter_names
       ? [
           "Observed query parameter names do not establish required parameters, value types or a complete API schema.",
         ]
-      : []),
-    ...(view.template_rules.length > 0
-      ? [
-          `Opt-in template rules ${uniqueSorted(view.template_rules).join(", ")} merge recorded literals by shape; merged parameters may conflate distinct resources.`,
-        ]
-      : []),
-    ...(capture.records.length < capture.total_records
-      ? [
-          "Parent contains an ordinal subset; the manifest covers only retained records.",
-        ]
-      : []),
-  ]);
-  if (!limitations.ok) return limitations;
-  for (const record of capture.records) {
-    const added = accumulator.add(record);
-    if (!added.ok) return added;
-  }
+      : [],
+  });
+  if (!grouped.ok) return grouped;
+  const capture = grouped.value;
   const manifest = accumulator.finish();
   if (!manifest.ok) return manifest;
   return ok({
     kind: "environment-manifest",
     view,
     parent_evidence_id: parent.evidenceId,
-    parent_operation: "inspect_web_network_capture",
+    parent_operation: capture.operation,
     parent_digest: parent.evidenceId.slice(3),
     artifact: { path: capture.artifact.path, sha256: capture.artifact.sha256 },
     ...manifest.value,
